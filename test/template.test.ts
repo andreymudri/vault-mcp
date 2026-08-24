@@ -136,6 +136,35 @@ describe('applyTemplate', () => {
       /tp\.system\.prompt\("x"\)/,
     );
   });
+
+  // O TOKEN_RE é deliberadamente linear e, por isso, exclui `\n` de todas as
+  // alternativas: ele NÃO casa um token multi-linha. Sem uma segunda checagem o
+  // resultado seria devolver o texto cru — nem substituído, nem recusado —, que
+  // é exatamente a falha que este módulo existe para impedir. T13 lê
+  // `_templates/*.md` do vault REAL, onde a forma de bloco `<%* ... %>` do
+  // Templater é comum; sem isto a nota nova nasceria com o bloco cru no corpo.
+  it('lança TemplateError num token multi-linha em vez de devolvê-lo cru', () => {
+    const multiline = '<%\ntp.file.title\n%>';
+    expect(() => applyTemplate(multiline, ctx)).toThrow(TemplateError);
+    expect(() => applyTemplate(multiline, ctx)).toThrow(/<%/);
+  });
+
+  it('lança TemplateError no bloco `<%* ... %>` de um template real do Obsidian', () => {
+    const block = '# Nota\n\n<%*\nconst t = tp.file.title\n%>\n\ncorpo\n';
+    expect(() => applyTemplate(block, ctx)).toThrow(TemplateError);
+    // O erro precisa CITAR o fragmento que sobrou, senão é indepurável.
+    expect(() => applyTemplate(block, ctx)).toThrow(/<%\*/);
+  });
+
+  it('lança quando sobra um `<%` sem fechamento em vez de gravá-lo na nota', () => {
+    expect(() => applyTemplate('texto <% tp.file.title', ctx)).toThrow(TemplateError);
+    expect(() => applyTemplate('<%', ctx)).toThrow(TemplateError);
+  });
+
+  it('não lança quando nenhum `<%` sobra no resultado', () => {
+    expect(() => applyTemplate('# <% tp.file.title %>\n\n100% pronto\n', ctx)).not.toThrow();
+    expect(applyTemplate('sem token algum\n', ctx)).toBe('sem token algum\n');
+  });
 });
 
 // Estes são os testes que travam a DIREÇÃO da conversão de data deste módulo,
@@ -314,6 +343,107 @@ describe('ensureFrontmatter — escape de YAML', () => {
   });
 });
 
+// `Frontmatter` tem index signature: as CHAVES são tão controladas pelo modelo
+// quanto os valores. Endurecer só o valor de `${key}: ${serializeValue(value)}`
+// deixa a metade esquerda da linha aberta — e é a metade que decide onde o
+// bloco TERMINA.
+describe('ensureFrontmatter — escape das CHAVES', () => {
+  const base = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
+
+  it('não deixa uma chave com `\\n---\\n` fechar o bloco e injetar metadado', () => {
+    const key = 'k\n---\ntipo: injetado';
+    const out = ensureFrontmatter('corpo\n', { ...base, [key]: 'v' });
+    const parsed = matter(out, {});
+
+    expect(() => matter(out, {})).not.toThrow();
+    // Sem escape, o segundo `---` fecha o bloco: `tipo` viraria `injetado` e o
+    // resto da nota viraria corpo.
+    expect(parsed.data.tipo).toBe('wiki');
+    expect(parsed.data[key]).toBe('v');
+    expect(parsed.content).toBe('\ncorpo\n');
+  });
+
+  it('mantém `a: 1\\nb` como UMA chave, sem injetar uma entrada extra', () => {
+    const key = 'a: 1\nb';
+    const out = ensureFrontmatter('corpo\n', { ...base, [key]: 'v' });
+    const parsed = matter(out, {});
+
+    expect(parsed.data[key]).toBe('v');
+    expect(parsed.data.a).toBeUndefined();
+    expect(Object.keys(parsed.data)).toEqual(['tipo', 'tags', 'criado', key]);
+  });
+
+  it('escapa caracteres de controle numa chave em vez de perder o bloco inteiro', () => {
+    const key = 'a\x1bb\x7fc\x9dd';
+    const out = ensureFrontmatter('corpo\n', { ...base, [key]: 'v' });
+
+    // Um caractere não-imprimível CRU faz o js-yaml recusar o stream inteiro.
+    expect(() => matter(out, {})).not.toThrow();
+    expect(matter(out, {}).data[key]).toBe('v');
+    expect(matter(out, {}).data.tipo).toBe('wiki');
+  });
+
+  it('não põe aspas nas chaves simples que o vault já usa', () => {
+    const out = ensureFrontmatter('corpo\n', base);
+    expect(out).toContain('\ntipo: wiki\n');
+    expect(out).toContain('\ntags: [nestjs, auth]\n');
+    expect(out).toContain('\ncriado: 2026-08-24\n');
+  });
+});
+
+// Um caractere de controle cru faz o js-yaml recusar o documento INTEIRO com
+// "the stream contains non-printable characters": a nota perde todos os
+// metadados, de forma permanente. Sequências ANSI são conteúdo ordinário numa
+// página clipada para `01-raw/clippings/`, então isto não é hipotético.
+describe('ensureFrontmatter — caracteres de controle C0/C1 e DEL', () => {
+  const base = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
+
+  /** Todo C0, DEL e todo C1 — a faixa exata que o js-yaml recusa. */
+  const CONTROLS: string[] = [];
+  for (let code = 0x00; code <= 0x1f; code += 1) CONTROLS.push(String.fromCharCode(code));
+  for (let code = 0x7f; code <= 0x9f; code += 1) CONTROLS.push(String.fromCharCode(code));
+
+  it('faz a ida e volta de cada caractere de controle num VALOR', () => {
+    for (const ch of CONTROLS) {
+      const tipo = `a${ch}b`;
+      const out = ensureFrontmatter('corpo\n', { ...base, tipo });
+      const code = ch.charCodeAt(0).toString(16);
+      expect(() => matter(out, {}), `valor com U+${code}`).not.toThrow();
+      expect(matter(out, {}).data.tipo, `valor com U+${code}`).toBe(tipo);
+    }
+  });
+
+  it('faz a ida e volta de cada caractere de controle numa TAG', () => {
+    for (const ch of CONTROLS) {
+      const tags = ['nestjs', `a${ch}b`];
+      const out = ensureFrontmatter('corpo\n', { ...base, tags });
+      const code = ch.charCodeAt(0).toString(16);
+      expect(() => matter(out, {}), `tag com U+${code}`).not.toThrow();
+      expect(matter(out, {}).data.tags, `tag com U+${code}`).toEqual(tags);
+    }
+  });
+
+  it('preserva uma sequência ANSI vinda de uma página clipada', () => {
+    const tipo = '\x1b[31mvermelho\x1b[0m';
+    const tags = ['\x1b[1mnegrito\x1b[0m', 'auth'];
+    const out = ensureFrontmatter('corpo\n', { ...base, tipo, tags });
+    const parsed = matter(out, {});
+
+    expect(parsed.data.tipo).toBe(tipo);
+    expect(parsed.data.tags).toEqual(tags);
+    expect(parsed.content).toBe('\ncorpo\n');
+  });
+
+  it('não emite nenhum caractere não-imprimível cru no resultado', () => {
+    const out = ensureFrontmatter('corpo\n', {
+      ...base,
+      tipo: 'a\x00b\x1bc\x7fd\x85e\x9ff',
+      tags: ['g\x07h'],
+    });
+    expect(out).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/);
+  });
+});
+
 describe('ensureFrontmatter — `---` no início do CORPO', () => {
   const required = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
 
@@ -361,10 +491,18 @@ describe('ensureFrontmatter — parsing sem o cache global do gray-matter', () =
   });
 });
 
+// O tamanho da entrada aqui é escolhido, não arbitrário. O regex ingênuo
+// `/<%\s*(.+?)\s*%>/g` é CÚBICO nesta forma de entrada — medido: 2.000 chars
+// 1.987ms, 4.000 chars 16.015ms, 8.000 chars 128.612ms, ×8 a cada dobra. Com os
+// 245.760 chars que este teste usava, uma regressão levaria ~43 DIAS, e como
+// `String.replace` bloqueia a thread o timeout do vitest não pode dispará-lo:
+// o resultado era a suíte TRAVADA, não vermelha. Com 4.000 chars o caso quebrado
+// termina em ~16s (vermelho e legível) e o correto em ~0,1ms — a distância
+// continua decisiva e, o que importa, o teste TERMINA.
 describe('applyTemplate — custo do TOKEN_RE', () => {
-  it('termina em tempo linear sobre entrada adversarial de 240KB', () => {
+  it('termina em tempo linear sobre entrada adversarial', () => {
     const ctx = { title: 'x', now: localDate(2026, 8, 24) };
-    const inputs = ['<%'.padEnd(240 * 1024, ' '), '<% '.repeat(80 * 1024)];
+    const inputs = ['<%'.padEnd(4000, ' '), '<% '.repeat(4000 / 4)];
 
     const started = performance.now();
     for (const input of inputs) {
@@ -375,5 +513,7 @@ describe('applyTemplate — custo do TOKEN_RE', () => {
       }
     }
     expect(performance.now() - started).toBeLessThan(2000);
-  }, 20000);
+    // O timeout é folgado de propósito: ele existe para que uma regressão
+    // cúbica termine e FALHE na asserção acima, em vez de estourar o timeout.
+  }, 60000);
 });

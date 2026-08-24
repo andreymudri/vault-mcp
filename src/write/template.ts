@@ -71,15 +71,51 @@ export function formatLocal(d: Date, fmt: string): string {
 }
 
 /**
+ * Refuses any `<%` still standing after substitution.
+ *
+ * `TOKEN_RE` is linear precisely because it excludes `\n` from every
+ * alternative — which means it does not MATCH a multi-line token, and without
+ * this check `applyTemplate` would return such a template verbatim: neither
+ * substituted nor rejected, the one outcome this module exists to prevent.
+ *
+ * That is not hypothetical. T13 reads `_templates/*.md` from the user's REAL
+ * vault, and a hand-written Obsidian template commonly uses Templater's block
+ * form:
+ *
+ *     <%*
+ *     const t = tp.file.title
+ *     %>
+ *
+ * Silently passing it through creates a note whose body opens with a raw `<%*`
+ * block. Putting `\n` back into `TOKEN_RE` would match it — and reintroduce the
+ * cubic blow-up that regex was rewritten to escape. A residual scan is O(n),
+ * keeps the linear guarantee, and restores the fail-loud contract.
+ */
+function assertNoResidualToken(out: string): void {
+  const at = out.indexOf('<%');
+  if (at < 0) return;
+
+  // Bounded slice: the fragment must name the offender without pasting a 240KB
+  // adversarial input into an error message.
+  const fragment = out.slice(at, at + 60);
+  const ellipsis = out.length > at + 60 ? '…' : '';
+  throw new TemplateError(
+    `token Templater não resolvido (forma não suportada, possivelmente ` +
+      `multi-linha): ${fragment.replace(/\n/g, '\\n')}${ellipsis}`,
+  );
+}
+
+/**
  * Replaces the Templater tokens of `templateText`.
  *
  * Supports `tp.file.title` and `tp.date.now("FMT")`. Any other expression throws
  * `TemplateError` naming it: failing loud is the point, since an unsubstituted
  * `<% %>` token written into the vault is exactly the bug this module exists to
- * prevent.
+ * prevent. A token shape `TOKEN_RE` cannot match is caught by the residual scan
+ * below rather than passed through.
  */
 export function applyTemplate(templateText: string, ctx: TemplateContext): string {
-  return templateText.replace(TOKEN_RE, (_match, rawExpr: string) => {
+  const out = templateText.replace(TOKEN_RE, (_match, rawExpr: string) => {
     const expr = rawExpr.trim();
 
     if (expr === 'tp.file.title') return ctx.title;
@@ -89,6 +125,9 @@ export function applyTemplate(templateText: string, ctx: TemplateContext): strin
 
     throw new TemplateError(`expressão Templater não suportada: <% ${expr} %>`);
   });
+
+  assertNoResidualToken(out);
+  return out;
 }
 
 /** True when the parsed YAML value counts as "not filled in". */
@@ -104,10 +143,18 @@ function isEmptyValue(value: unknown): boolean {
  *
  * The alternatives, in order:
  *  - `^$` — the empty string is not a plain scalar at all.
- *  - `^\s|\s$|[\n\r\t]` — leading/trailing whitespace is stripped by YAML, and a
- *    newline or tab cannot appear in a plain scalar. A value carrying `\n---\n`
- *    would otherwise CLOSE the frontmatter block early, dropping every key after
- *    it into the note body and silently breaking this module's guarantee.
+ *  - `^\s|\s$` — leading/trailing whitespace is stripped by YAML.
+ *  - `[\u0000-\u001f\u007f-\u009f\u2028\u2029]` — every C0 control, DEL, every
+ *    C1 control, and the Unicode line separators. `\n` and `\r` are the obvious
+ *    members: a value carrying `\n---\n` would CLOSE the frontmatter block
+ *    early, dropping every key after it into the note body. But the rest matter
+ *    just as much and for a different reason: js-yaml scans the WHOLE raw stream
+ *    for non-printable characters before it parses anything, so a single stray
+ *    ESC or DEL makes it refuse the ENTIRE document — the note loses all of its
+ *    metadata, permanently. ANSI escape sequences are ordinary content in a page
+ *    clipped into `01-raw/clippings/`, so this is a routine input, not an
+ *    adversarial one. U+0085 and U+2028/U+2029 are line breaks to YAML, which is
+ *    the `\n` problem wearing a different codepoint.
  *  - `:\s|:$|\s#` — the mapping and comment indicators.
  *  - `[,[\]{}]` — the flow-context metacharacters, wherever they appear. Every
  *    list here is written in flow style, so a tag `auth]` closes the sequence
@@ -123,15 +170,35 @@ function isEmptyValue(value: unknown): boolean {
  * model — and land in the user's real vault, so the rule errs toward quoting.
  */
 const NEEDS_QUOTES_RE =
-  /^$|^\s|\s$|[\n\r\t]|:\s|:$|\s#|[,[\]{}]|^[-?:#&*!|>'"%@`]|^(?:true|false|null|yes|no|on|off|~)$/i;
+  /^$|^\s|\s$|[\u0000-\u001f\u007f-\u009f\u2028\u2029]|:\s|:$|\s#|[,[\]{}]|^[-?:#&*!|>'"%@`]|^(?:true|false|null|yes|no|on|off|~)$/i;
+
+/** The characters js-yaml refuses to see RAW anywhere in the stream. */
+const RAW_UNPRINTABLE_RE = /[\u007f-\u009f\u2028\u2029]/g;
+
+/**
+ * A double-quoted YAML scalar for `text`, with every non-printable character
+ * ESCAPED rather than merely wrapped in quotes.
+ *
+ * `JSON.stringify` on its own is not enough, and the gap is easy to miss: JSON
+ * string syntax is a subset of YAML's double-quoted syntax and it escapes the C0
+ * range, but it emits DEL and the C1 range (U+007F–U+009F) LITERALLY. js-yaml
+ * checks the entire raw stream for non-printable characters BEFORE parsing, so a
+ * single literal DEL — inside quotes or not — makes it reject the whole
+ * document and the note loses all of its metadata. Quoting never fixes that;
+ * only escaping does.
+ */
+function doubleQuote(text: string): string {
+  return JSON.stringify(text).replace(
+    RAW_UNPRINTABLE_RE,
+    (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
 
 function serializeScalar(value: unknown): string {
   if (value === null || value === undefined) return "''";
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   const text = String(value);
-  // JSON string syntax is a subset of YAML's double-quoted scalar syntax, so
-  // this is a valid escape for every char, control characters included.
-  if (NEEDS_QUOTES_RE.test(text)) return JSON.stringify(text);
+  if (NEEDS_QUOTES_RE.test(text)) return doubleQuote(text);
   return text;
 }
 
@@ -143,8 +210,32 @@ function serializeValue(value: unknown): string {
   return serializeScalar(value);
 }
 
+/**
+ * A frontmatter key safe to emit unquoted: a letter or digit, then letters,
+ * digits, `_`, `-` or `.`.
+ *
+ * An allowlist, not a denylist, and deliberately so. `Frontmatter` carries an
+ * index signature, so a key is exactly as model-controlled as a value — and it
+ * is the LEFT half of `key: value` that decides where the block ENDS. A key
+ * holding `\n---\ntipo: injetado` emits a second `---` mid-block, closing the
+ * frontmatter early and turning the rest of the user's metadata into note body;
+ * a milder `a: 1\nb` silently injects an entry that nobody wrote. Enumerating
+ * the ways a key can break out is the losing side of that game; naming the
+ * shapes that cannot is the winning one. Everything else is double-quoted, which
+ * makes it one key with a strange name — never two keys, never a delimiter.
+ */
+const SAFE_KEY_RE = /^[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u;
+
+/** Keys YAML would hand back as a boolean or null rather than a string. */
+const RESERVED_WORD_RE = /^(?:true|false|null|yes|no|on|off)$/i;
+
+function serializeKey(key: string): string {
+  if (!SAFE_KEY_RE.test(key) || RESERVED_WORD_RE.test(key)) return doubleQuote(key);
+  return key;
+}
+
 function serializeEntry(key: string, value: unknown): string {
-  return `${key}: ${serializeValue(value)}`;
+  return `${serializeKey(key)}: ${serializeValue(value)}`;
 }
 
 interface SplitContent {
@@ -204,8 +295,21 @@ function splitFrontmatter(content: string): SplitContent | undefined {
   return undefined;
 }
 
+function escapeForRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Both spellings are matched — the plain key and the double-quoted one
+ * `serializeKey` may have written — so a key that needed quoting is still
+ * recognised as already present and gets REPLACED rather than appended a second
+ * time. Without that, `ensureFrontmatter` would stop being idempotent for
+ * exactly the keys it had to harden.
+ */
 function topLevelKeyIndex(block: string[], key: string): number {
-  const re = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`);
+  const plain = escapeForRegExp(key);
+  const quoted = escapeForRegExp(doubleQuote(key));
+  const re = new RegExp(`^(?:${plain}|${quoted})\\s*:`);
   return block.findIndex((line) => re.test(line));
 }
 
