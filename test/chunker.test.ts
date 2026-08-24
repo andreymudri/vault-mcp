@@ -37,6 +37,19 @@ function loadFixture(relPath: string): { raw: string; body: string; bodyStartLin
   return { raw, body, bodyStartLine };
 }
 
+/**
+ * Conta as linhas reais de um arquivo SEM o elemento fantasma que
+ * `raw.split('\n')` produz quando o arquivo termina em newline. Contamos as
+ * ocorrências de `\n` e só somamos 1 quando o arquivo NÃO termina em
+ * newline (a última linha, sem terminador, ainda conta como linha).
+ * Deliberadamente não usa `raw.split('\n').length`, que reproduziria o
+ * próprio bug que este teste existe para detectar.
+ */
+function trueLineCount(raw: string): number {
+  const newlineCount = (raw.match(/\n/g) ?? []).length;
+  return raw.endsWith('\n') ? newlineCount : newlineCount + 1;
+}
+
 // Todas as notas da fixture, exceto `_templates/`, que não é varrida em
 // produção (ver scanner). Chunkar todas confirma a contagem total medida de
 // 33 chunks e dá cobertura de fidelidade de linha além de um único arquivo.
@@ -139,6 +152,25 @@ describe('chunkNote', () => {
       }
     }
     expect(total).toBe(33);
+  });
+
+  it('lineEnd de nenhum chunk ultrapassa a última linha real do arquivo (mesmo quando o corpo termina em newline)', () => {
+    // `body.split('\n')` deixa um elemento fantasma quando `body` termina em
+    // newline; se o chunker o contar como linha real, o último chunk aponta
+    // para uma linha que não existe no arquivo (ex.: lineEnd 63 num arquivo
+    // de 62 linhas). `trueLineCount` deriva o total sem esse fantasma, então
+    // esta asserção não pode "passar por acidente" como a de fidelidade
+    // acima (que resliça com o mesmo `split('\n')` e por isso carrega o
+    // mesmo fantasma dos dois lados da comparação).
+    for (const relPath of ALL_FIXTURE_NOTES) {
+      const { raw, body, bodyStartLine } = loadFixture(relPath);
+      const chunks = chunkNote(relPath, body, undefined, [], bodyStartLine);
+      const maxLine = trueLineCount(raw);
+
+      for (const chunk of chunks) {
+        expect(chunk.lineEnd).toBeLessThanOrEqual(maxLine);
+      }
+    }
   });
 
   it('corpo anterior ao primeiro heading vira um chunk com headingPath vazio', () => {

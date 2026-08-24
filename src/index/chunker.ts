@@ -20,6 +20,12 @@ export function chunkNote(
   bodyStartLine: number,
 ): Chunk[] {
   const lines = body.split('\n');
+  // `body.split('\n')` leaves a phantom trailing empty element whenever
+  // `body` ends in a newline — there is no real line of text after that
+  // final newline. Cap the loop before it so that element is never treated
+  // as content (never toggles a fence, never opens a heading, never gets
+  // pushed into a chunk's text) and never counted toward `lineEnd`.
+  const realLineCount = body.endsWith('\n') ? lines.length - 1 : lines.length;
   const chunks: Chunk[] = [];
 
   let inFence = false;
@@ -44,7 +50,7 @@ export function chunkNote(
     });
   };
 
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0; i < realLineCount; i++) {
     const line = lines[i] ?? '';
     const originalLine = bodyStartLine + i;
 
@@ -77,7 +83,7 @@ export function chunkNote(
     currentLines.push(line);
   }
 
-  flush(bodyStartLine + lines.length - 1);
+  flush(bodyStartLine + realLineCount - 1);
 
   return chunks;
 }
