@@ -104,4 +104,153 @@ describe('commitFiles', () => {
     const subject = await git(repoRoot, ['log', '-1', '--pretty=%s']);
     expect(subject).toBe(message);
   });
+
+  it('never invokes a shell, even when the path is a shell injection attempt', async () => {
+    // A path containing `; touch <repo>/PWNED` is only dangerous if the paths
+    // are ever interpolated into a shell command string (e.g. via
+    // `exec` + a template literal). Passed as a single execFile argv entry,
+    // git will simply fail to find a file with this literal, absurd name.
+    const maliciousPath = path.join(repoRoot, `nota.md; touch ${repoRoot}/PWNED`);
+
+    const result = await commitFiles(repoRoot, [maliciousPath], 'feat: tentativa de injecao');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    await expect(fs.access(path.join(repoRoot, 'PWNED'))).rejects.toThrow();
+  });
+
+  it('is a no-op returning { committed: false, warning } for an empty path list, without touching the index', async () => {
+    const unrelated = path.join(repoRoot, 'trabalho-do-usuario.md');
+    await fs.writeFile(unrelated, 'algo nao relacionado\n', 'utf8');
+    await git(repoRoot, ['add', unrelated]);
+
+    const result = await commitFiles(repoRoot, [], 'feat: commit vazio');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+
+    await expect(git(repoRoot, ['log', '--oneline'])).rejects.toThrow();
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toContain('trabalho-do-usuario.md');
+  });
+
+  it('treats a path containing a glob character literally, never as a wildcard', async () => {
+    // The file to commit is literally named with a `*` in it (a legal
+    // filename on this filesystem). A sibling file whose name a glob
+    // expansion of `target*.md` would incorrectly match, but which the tool
+    // was never told about.
+    const globLikePath = path.join(repoRoot, 'target*.md');
+    await fs.writeFile(globLikePath, '# Target\n', 'utf8');
+    const untouchedPath = path.join(repoRoot, 'targetX.md');
+    await fs.writeFile(untouchedPath, '# Nao deveria ser tocado\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [globLikePath], 'feat: commit com glob literal');
+
+    // Without --literal-pathspecs (on either the `add` or the `commit`
+    // step), git's default pathspec magic treats `*` as a wildcard even
+    // though it arrived as a single execFile argv entry with no shell
+    // involved — so `target*.md` would also match `targetX.md`.
+    expect(result).toEqual({ committed: true });
+
+    const nameOnly = await git(repoRoot, ['show', '--name-only', '--pretty=format:']);
+    const committedFiles = nameOnly
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    expect(committedFiles).toEqual(['target*.md']);
+
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toBe('?? targetX.md');
+  });
+
+  it('does not let a glob-like pathspec at the commit step sweep in an already-staged unrelated file', async () => {
+    // This isolates --literal-pathspecs on the `commit` invocation
+    // specifically: targetX.md is staged by something other than
+    // commitFiles (simulating unrelated in-flight work), before
+    // commitFiles ever runs its own `add`. If `commit`'s pathspec matching
+    // is not literal, `target*.md` would match the already-staged
+    // targetX.md too and pull it into the commit, even though commitFiles's
+    // own `add` step never touched it.
+    const globLikePath = path.join(repoRoot, 'target*.md');
+    await fs.writeFile(globLikePath, '# Target\n', 'utf8');
+    const unrelatedPath = path.join(repoRoot, 'targetX.md');
+    await fs.writeFile(unrelatedPath, '# Nao deveria ser tocado\n', 'utf8');
+    await git(repoRoot, ['add', unrelatedPath]);
+
+    const result = await commitFiles(repoRoot, [globLikePath], 'feat: commit com glob literal');
+
+    expect(result).toEqual({ committed: true });
+
+    const nameOnly = await git(repoRoot, ['show', '--name-only', '--pretty=format:']);
+    const committedFiles = nameOnly
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    expect(committedFiles).toEqual(['target*.md']);
+
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toBe('A  targetX.md');
+  });
+
+  it('commits only the given files, leaving an unrelated modified file untouched', async () => {
+    const trackedPath = path.join(repoRoot, 'ja-existente.md');
+    await fs.writeFile(trackedPath, 'conteudo original\n', 'utf8');
+    await git(repoRoot, ['add', trackedPath]);
+    await git(repoRoot, ['commit', '-m', 'chore: seed']);
+
+    // Modify the already-tracked file without including it in the call.
+    await fs.writeFile(trackedPath, 'conteudo modificado sem passar por commitFiles\n', 'utf8');
+
+    const newPath = path.join(repoRoot, 'nova.md');
+    await fs.writeFile(newPath, '# Nova\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [newPath], 'feat: adicionar apenas nova');
+
+    expect(result).toEqual({ committed: true });
+
+    const nameOnly = await git(repoRoot, ['show', '--name-only', '--pretty=format:']);
+    const committedFiles = nameOnly
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    expect(committedFiles).toEqual(['nova.md']);
+
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toContain('ja-existente.md');
+  });
+
+  it('does not mistake a real commit failure for "nothing to commit" just because the repo path contains "nada"', async () => {
+    // Node's execFile rejection `.message` is built from the reconstructed
+    // command line, e.g. `Command failed: git -C <repoRoot> commit ...`. If
+    // the repo path happens to contain "nada", that reconstructed line alone
+    // satisfies a naive `nada.*commit` check — hiding a genuine failure
+    // (here: no git identity configured) behind a false "nothing to commit".
+    const nadaRepoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-nada-repo-'));
+    try {
+      await git(nadaRepoRoot, ['init']);
+      await git(nadaRepoRoot, ['config', 'user.name', 'Vault MCP Test']);
+      await git(nadaRepoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+
+      // A failing pre-commit hook forces a real, deterministic commit
+      // failure that has nothing to do with "nothing staged".
+      const hookPath = path.join(nadaRepoRoot, '.git', 'hooks', 'pre-commit');
+      await fs.writeFile(
+        hookPath,
+        '#!/bin/sh\necho "recusado pelo hook de pre-commit" >&2\nexit 1\n',
+        'utf8'
+      );
+      await fs.chmod(hookPath, 0o755);
+
+      const absPath = path.join(nadaRepoRoot, 'nota.md');
+      await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+      const result = await commitFiles(nadaRepoRoot, [absPath], 'feat: adicionar nota');
+
+      expect(result.committed).toBe(false);
+      expect(result.warning).toBeTruthy();
+      expect(result.warning).not.toBe('nada a commitar: arquivos sem alteração');
+    } finally {
+      await fs.rm(nadaRepoRoot, { recursive: true, force: true });
+    }
+  });
 });
