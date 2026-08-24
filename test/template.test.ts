@@ -517,3 +517,195 @@ describe('applyTemplate — custo do TOKEN_RE', () => {
     // cúbica termine e FALHE na asserção acima, em vez de estourar o timeout.
   }, 60000);
 });
+
+// `ensureFrontmatter` só é idempotente se reconhecer a chave existente em
+// QUALQUER grafia YAML que a denote. A grafia com aspas SIMPLES é YAML comum e
+// pode já estar no vault do usuário; sem reconhecê-la, a segunda passada APENDA
+// uma segunda `tipo:`, o `parseBlock` da terceira passada morre na chave
+// duplicada, o `splitFrontmatter` devolve undefined e o bloco ORIGINAL do
+// usuário é rebaixado para dentro do CORPO da nota. Destrutivo, não cosmético.
+describe('ensureFrontmatter — idempotência em todas as grafias da chave', () => {
+  const CASES: Array<{ key: string; spellings: string[] }> = [
+    { key: 'tipo', spellings: ['tipo', '"tipo"', "'tipo'"] },
+    // Chave que o `serializeKey` PRECISA citar (espaços) — o caso que nada
+    // fixava: estreitar o índice para a grafia simples passava nos 42 testes.
+    { key: 'tipo do doc', spellings: ['tipo do doc', '"tipo do doc"', "'tipo do doc'"] },
+    // Aspas simples escapadas por duplicação, a regra do YAML.
+    { key: "o'brien", spellings: ["o'brien", '"o\'brien"', "'o''brien'"] },
+  ];
+
+  for (const { key, spellings } of CASES) {
+    for (const spelling of spellings) {
+      it(`substitui em vez de apendar quando a chave já existe como ${spelling}`, () => {
+        const content = `---\n${spelling}: \n---\ncorpo\n`;
+        const once = ensureFrontmatter(content, { [key]: 'wiki' });
+        const twice = ensureFrontmatter(once, { [key]: 'wiki' });
+        const thrice = ensureFrontmatter(twice, { [key]: 'wiki' });
+
+        // Uma única linha de chave, não duas.
+        expect(once.split('\n').filter((line) => line.includes(':')).length).toBe(1);
+        expect(twice).toBe(once);
+        expect(thrice).toBe(once);
+
+        // E o resultado continua sendo UM bloco, com o corpo intacto.
+        expect(thrice.match(/^---$/gm)?.length).toBe(2);
+        const parsed = matter(thrice, {});
+        expect((parsed.data as Record<string, unknown>)[key]).toBe('wiki');
+        expect(parsed.content).toBe('corpo\n');
+      });
+    }
+  }
+});
+
+// O portão real do js-yaml (loader.js:26) é
+// `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F￾￿]` MAIS os
+// surrogates desemparelhados. U+FFFE, U+FFFF e um surrogate solto ficavam de
+// fora da regra de citação: saíam CRUS, o `matter()` recusava o documento
+// inteiro e a `ensureFrontmatter` seguinte prefixava um SEGUNDO bloco,
+// empurrando os metadados originais para o corpo.
+//
+// Isto é alcançável por uso ordinário, não por ataque: o plano trunca `resumo`
+// num comprimento fixo, e cortar texto com emoji no meio do par produz
+// exatamente um surrogate desemparelhado.
+describe('ensureFrontmatter — U+FFFE, U+FFFF e surrogates desemparelhados', () => {
+  const base = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
+
+  /** Exatamente o que o portão do js-yaml recusa e a regra antiga ignorava. */
+  const NASTY: Array<[string, string]> = [
+    ['U+FFFE', '￾'],
+    ['U+FFFF', '￿'],
+    ['high surrogate solto', '\ud83d'],
+    ['low surrogate solto', '\ude00'],
+  ];
+
+  const RAW_RE =
+    /[￾￿]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+  for (const [name, ch] of NASTY) {
+    it(`faz a ida e volta de ${name} num VALOR`, () => {
+      const tipo = `guia${ch}`;
+      const out = ensureFrontmatter('corpo\n', { ...base, tipo });
+      expect(() => matter(out, {}), name).not.toThrow();
+      expect(matter(out, {}).data.tipo, name).toBe(tipo);
+      expect(matter(out, {}).content, name).toBe('\ncorpo\n');
+    });
+
+    it(`faz a ida e volta de ${name} numa TAG`, () => {
+      const tags = ['nestjs', `guia-${ch}`];
+      const out = ensureFrontmatter('corpo\n', { ...base, tags });
+      expect(() => matter(out, {}), name).not.toThrow();
+      expect(matter(out, {}).data.tags, name).toEqual(tags);
+    });
+
+    it(`não emite ${name} cru e continua idempotente`, () => {
+      const out = ensureFrontmatter('corpo\n', { ...base, tipo: `guia${ch}` });
+      expect(RAW_RE.test(out), name).toBe(false);
+      // Sem a citação, esta segunda passada prefixava um SEGUNDO bloco.
+      expect(ensureFrontmatter(out, base), name).toBe(out);
+      expect(out.match(/^---$/gm)?.length, name).toBe(2);
+    });
+  }
+
+  it('um resumo truncado no meio de um emoji não destrói o frontmatter', () => {
+    // `'guia 😀'.slice(0, 6)` — o corte por unidade de código.
+    const resumo = 'guia 😀'.slice(0, 6);
+    expect(resumo.endsWith('\ud83d')).toBe(true);
+
+    const out = ensureFrontmatter('corpo\n', { ...base, resumo });
+    expect(() => matter(out, {})).not.toThrow();
+    expect(matter(out, {}).data.resumo).toBe(resumo);
+    expect(ensureFrontmatter(out, base)).toBe(out);
+  });
+
+  it('um emoji COMPLETO continua sem aspas desnecessárias', () => {
+    // O par bem formado é imprimível para o js-yaml: citar aqui seria ruído.
+    const out = ensureFrontmatter('corpo\n', { ...base, tipo: 'guia 😀' });
+    expect(out).toContain('\ntipo: guia 😀\n');
+    expect(matter(out, {}).data.tipo).toBe('guia 😀');
+  });
+});
+
+// A varredura residual precisa rodar sobre o TEXTO DE ENTRADA, não sobre a
+// saída: só na ENTRADA é que um token não resolvido pode estar, e a entrada não
+// pode ser envenenada por conteúdo substituído. Rodando na saída, um `<%`
+// legítimo chegado por `ctx.title` era acusado de ser um token Templater
+// pendente — e como o título é escolhido pelo modelo a partir do conteúdo
+// clipado, isso fixava uma falha de escrita PERMANENTE numa nota.
+describe('applyTemplate — a varredura residual olha a ENTRADA, não a saída', () => {
+  const now = localDate(2026, 8, 24, 9, 5);
+
+  it('não acusa um `<%` que veio de ctx.title', () => {
+    const out = applyTemplate('# <% tp.file.title %>\n\ncorpo\n', {
+      title: 'Sintaxe <% %> do Templater',
+      now,
+    });
+    expect(out).toBe('# Sintaxe <% %> do Templater\n\ncorpo\n');
+  });
+
+  it('não acusa um `<%` do título mesmo com outros tokens resolvidos ao lado', () => {
+    const out = applyTemplate('# <% tp.file.title %> — <% tp.date.now("YYYY-MM") %>\n', {
+      title: 'Sintaxe <% %> do Templater',
+      now,
+    });
+    expect(out).toBe('# Sintaxe <% %> do Templater — 2026-08\n');
+  });
+
+  // Este caso substitui um teste do rascunho que pedia
+  // `applyTemplate('<% tp.date.now("[<%] YYYY") %>')` === '[<%] 2026'.
+  // Ele não testava a distinção entrada/saída: um `<%` na SAÍDA vindo do
+  // `tp.date.now` só existe se estiver LITERALMENTE dentro do token na entrada
+  // — o `formatLocal` apenas substitui, nunca inventa `<%`. O que o teste pedia
+  // de fato era que o `TOKEN_RE` atravessasse um `<%` ANINHADO, exatamente o que
+  // ele proíbe (`<(?!%)`) para manter o custo linear; atendê-lo seria devolver a
+  // explosão quadrática de 65s em 240KB. O contrato defensável é o oposto: essa
+  // forma é RECUSADA em voz alta, nunca emitida em silêncio.
+  // A recusa chega pelo caminho da expressão não suportada, não pela varredura
+  // residual: o `TOKEN_RE` casa primeiro o `<%` INTERNO, cuja expressão
+  // (`] YYYY") `) não é nem `tp.file.title` nem `tp.date.now`. Os dois caminhos
+  // são igualmente altos — o que importa é que nada sai em silêncio.
+  it('recusa (sem emitir em silêncio) um `<%` aninhado dentro do token', () => {
+    const tpl = '<% tp.date.now("[<%] YYYY") %>\n';
+    const ctx = { title: 'x', now };
+    expect(() => applyTemplate(tpl, ctx)).toThrow(TemplateError);
+    expect(() => applyTemplate(tpl, ctx)).toThrow(/não suportada/);
+  });
+
+  it('continua recusando um token não resolvido mesmo com `<%` no título', () => {
+    const tpl = '# <% tp.file.title %>\n\n<%*\nconst t = 1\n%>\n';
+    const ctx = { title: 'a <% b', now };
+    expect(() => applyTemplate(tpl, ctx)).toThrow(TemplateError);
+    expect(() => applyTemplate(tpl, ctx)).toThrow(/<%\*/);
+  });
+});
+
+// `SAFE_KEY_RE` admitia chaves com forma de número ou de data: `2026-08-24: v`
+// sai sem aspas e volta como uma chave `Date`, então `data['2026-08-24']` é
+// undefined. O bloco nunca quebra — só a IDENTIDADE da chave.
+describe('ensureFrontmatter — chaves que o YAML resolveria como não-string', () => {
+  const NON_STRING = ['2026-08-24', '0x1f', '1e5', '1_000', '012', '12:30', '.inf', '.nan'];
+
+  for (const key of NON_STRING) {
+    it(`preserva a identidade da chave \`${key}\``, () => {
+      const out = ensureFrontmatter('corpo\n', { tipo: 'wiki', [key]: 'v' });
+      const data = matter(out, {}).data as Record<string, unknown>;
+      expect(Object.prototype.hasOwnProperty.call(data, key), key).toBe(true);
+      expect(data[key], key).toBe('v');
+      expect(ensureFrontmatter(out, { tipo: 'wiki', [key]: 'v' }), key).toBe(out);
+    });
+  }
+
+  it('não cita as chaves que já round-trippam como string', () => {
+    const out = ensureFrontmatter('corpo\n', {
+      tipo: 'wiki',
+      criado: '2026-08-24',
+      'v1.0': 'x',
+      'a.b': 'y',
+      '1.5': 'z',
+    });
+    expect(out).toContain('\ntipo: wiki\n');
+    expect(out).toContain('\ncriado: 2026-08-24\n');
+    expect(out).toContain('\nv1.0: x\n');
+    expect(out).toContain('\na.b: y\n');
+    expect(out).toContain('\n1.5: z\n');
+  });
+});

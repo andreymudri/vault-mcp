@@ -71,7 +71,7 @@ export function formatLocal(d: Date, fmt: string): string {
 }
 
 /**
- * Refuses any `<%` still standing after substitution.
+ * Refuses any `<%` of the TEMPLATE that `TOKEN_RE` did not consume.
  *
  * `TOKEN_RE` is linear precisely because it excludes `\n` from every
  * alternative — which means it does not MATCH a multi-line token, and without
@@ -90,15 +90,30 @@ export function formatLocal(d: Date, fmt: string): string {
  * block. Putting `\n` back into `TOKEN_RE` would match it — and reintroduce the
  * cubic blow-up that regex was rewritten to escape. A residual scan is O(n),
  * keeps the linear guarantee, and restores the fail-loud contract.
+ *
+ * It scans `templateText`, NOT the substituted output, and the difference is
+ * the whole point. An unresolved token can only live in the INPUT; the output
+ * additionally carries whatever `ctx` supplied, so scanning it made a perfectly
+ * legitimate `<%` arriving through `ctx.title` — a note actually titled
+ * "Sintaxe <% %> do Templater" — get blamed on a Templater token that was never
+ * there. `ctx.title` is model-chosen from clipped content, so that pinned a
+ * PERMANENT write failure on one note: the guard cannot be poisoned by the very
+ * text it is guarding. `tokenStarts` holds the offsets `TOKEN_RE` consumed;
+ * every alternative in that regex forbids a nested `<%`, so a matched token
+ * contains exactly one `<%` — its own, at the range start — and set membership
+ * on the starts is enough to tell resolved from residual.
  */
-function assertNoResidualToken(out: string): void {
-  const at = out.indexOf('<%');
+function assertNoResidualToken(templateText: string, tokenStarts: Set<number>): void {
+  let at = templateText.indexOf('<%');
+  while (at >= 0 && tokenStarts.has(at)) {
+    at = templateText.indexOf('<%', at + 2);
+  }
   if (at < 0) return;
 
   // Bounded slice: the fragment must name the offender without pasting a 240KB
   // adversarial input into an error message.
-  const fragment = out.slice(at, at + 60);
-  const ellipsis = out.length > at + 60 ? '…' : '';
+  const fragment = templateText.slice(at, at + 60);
+  const ellipsis = templateText.length > at + 60 ? '…' : '';
   throw new TemplateError(
     `token Templater não resolvido (forma não suportada, possivelmente ` +
       `multi-linha): ${fragment.replace(/\n/g, '\\n')}${ellipsis}`,
@@ -115,7 +130,10 @@ function assertNoResidualToken(out: string): void {
  * below rather than passed through.
  */
 export function applyTemplate(templateText: string, ctx: TemplateContext): string {
-  const out = templateText.replace(TOKEN_RE, (_match, rawExpr: string) => {
+  const tokenStarts = new Set<number>();
+
+  const out = templateText.replace(TOKEN_RE, (_match, rawExpr: string, offset: number) => {
+    tokenStarts.add(offset);
     const expr = rawExpr.trim();
 
     if (expr === 'tp.file.title') return ctx.title;
@@ -126,7 +144,7 @@ export function applyTemplate(templateText: string, ctx: TemplateContext): strin
     throw new TemplateError(`expressão Templater não suportada: <% ${expr} %>`);
   });
 
-  assertNoResidualToken(out);
+  assertNoResidualToken(templateText, tokenStarts);
   return out;
 }
 
@@ -155,6 +173,19 @@ function isEmptyValue(value: unknown): boolean {
  *    clipped into `01-raw/clippings/`, so this is a routine input, not an
  *    adversarial one. U+0085 and U+2028/U+2029 are line breaks to YAML, which is
  *    the `\n` problem wearing a different codepoint.
+ *  - `[\ufffe\uffff]` and the two unpaired-surrogate alternatives — the REST of
+ *    that same js-yaml gate, which the control ranges alone did not cover. Its
+ *    pattern (`loader.js:26`) is
+ *    `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\ufffe\uffff]` plus a high
+ *    surrogate with no low after it and a low surrogate with no high before it,
+ *    so those three shapes were emitted RAW and cost the note its whole block
+ *    exactly like a stray DEL. A lone surrogate is not an exotic attack: the
+ *    plan truncates `resumo` at a fixed LENGTH, and cutting text mid-emoji
+ *    produces precisely one — this module must not depend on every caller
+ *    slicing by code point. A WELL-FORMED pair is printable to js-yaml, so the
+ *    lookahead and lookbehind are load-bearing; quoting every emoji would be
+ *    pointless churn. And the regex carries no `u` flag, deliberately: it has to
+ *    see code UNITS to tell a pair from a half.
  *  - `:\s|:$|\s#` — the mapping and comment indicators.
  *  - `[,[\]{}]` — the flow-context metacharacters, wherever they appear. Every
  *    list here is written in flow style, so a tag `auth]` closes the sequence
@@ -170,10 +201,23 @@ function isEmptyValue(value: unknown): boolean {
  * model — and land in the user's real vault, so the rule errs toward quoting.
  */
 const NEEDS_QUOTES_RE =
-  /^$|^\s|\s$|[\u0000-\u001f\u007f-\u009f\u2028\u2029]|:\s|:$|\s#|[,[\]{}]|^[-?:#&*!|>'"%@`]|^(?:true|false|null|yes|no|on|off|~)$/i;
+  /^$|^\s|\s$|[\u0000-\u001f\u007f-\u009f\u2028\u2029\ufffe\uffff]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]|:\s|:$|\s#|[,[\]{}]|^[-?:#&*!|>'"%@`]|^(?:true|false|null|yes|no|on|off|~)$/i;
 
-/** The characters js-yaml refuses to see RAW anywhere in the stream. */
-const RAW_UNPRINTABLE_RE = /[\u007f-\u009f\u2028\u2029]/g;
+/**
+ * The characters js-yaml refuses to see RAW anywhere in the stream.
+ *
+ * Mirrors `PATTERN_NON_PRINTABLE` (`js-yaml/lib/js-yaml/loader.js:26`) minus the
+ * C0 range, which `JSON.stringify` already escapes. U+FFFE, U+FFFF and the two
+ * unpaired-surrogate shapes belong here for the same reason DEL does: QUOTING
+ * them is not enough, because that gate runs over the RAW stream and rejects the
+ * WHOLE document — the note loses every key it had, permanently. Only escaping
+ * fixes it. `JSON.stringify` has been well-formed since ES2019 and escapes lone
+ * surrogates itself, so those two alternatives find nothing left to do on a
+ * current runtime; they cost one branch and they keep this function from
+ * depending silently on that.
+ */
+const RAW_UNPRINTABLE_RE =
+  /[\u007f-\u009f\u2028\u2029\ufffe\uffff]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
 /**
  * A double-quoted YAML scalar for `text`, with every non-printable character
@@ -185,7 +229,8 @@ const RAW_UNPRINTABLE_RE = /[\u007f-\u009f\u2028\u2029]/g;
  * checks the entire raw stream for non-printable characters BEFORE parsing, so a
  * single literal DEL — inside quotes or not — makes it reject the whole
  * document and the note loses all of its metadata. Quoting never fixes that;
- * only escaping does.
+ * only escaping does. U+FFFE and U+FFFF sit in that same gate and JSON leaves
+ * them literal too, which is why `RAW_UNPRINTABLE_RE` reaches past the C1 range.
  */
 function doubleQuote(text: string): string {
   return JSON.stringify(text).replace(
@@ -229,8 +274,51 @@ const SAFE_KEY_RE = /^[\p{L}\p{N}][\p{L}\p{N}_.-]*$/u;
 /** Keys YAML would hand back as a boolean or null rather than a string. */
 const RESERVED_WORD_RE = /^(?:true|false|null|yes|no|on|off)$/i;
 
+/**
+ * Only a key STARTING with a digit can be resolved to something other than a
+ * string once `SAFE_KEY_RE` and `RESERVED_WORD_RE` have had their say: every
+ * numeric, sexagesimal and timestamp shape begins with one, `.inf`/`.nan`/`~`
+ * fail the allowlist outright, and the word-shaped resolutions are the reserved
+ * words. So this is the gate that keeps `keyRoundTripsAsString` — a real YAML
+ * parse — off the path of every ordinary key like `tipo` or `criado`.
+ */
+const NUMERIC_LOOKING_KEY_RE = /^\p{N}/u;
+
+/**
+ * Whether YAML reads `key` back as the SAME key, asked of the parser instead of
+ * a regex that imitates it.
+ *
+ * `SAFE_KEY_RE` admits `2026-08-24`, `012`, `0x1f`, `1e5` and `1_000`, and every
+ * one of them is resolved by js-yaml to a Date or a number — so the mapping
+ * comes back keyed by `Sat Aug 23 2026 21:00:00 GMT-0300`, or by `10` for an
+ * octal `012`, and `data['2026-08-24']` is undefined. Nothing looks broken: the
+ * block parses, the note renders. But `ensureFrontmatter` then sees its own key
+ * as MISSING on the next pass and appends it again, and a duplicated mapping key
+ * is what js-yaml refuses outright — the same demotion-into-the-body failure
+ * `topLevelKeyOf` exists to prevent, arriving by a different road. A model
+ * filling `Frontmatter`'s index signature with a date-shaped key (`2026-08-24:
+ * reuniao`) is ordinary use, not an attack.
+ *
+ * The check is a one-line parse rather than a copy of js-yaml's int/float/
+ * timestamp resolvers because a copy is a fork: it drifts from the installed
+ * parser and it has to re-derive, by hand, that `1.5` DOES round-trip (JS object
+ * keys are strings, and `String(1.5) === '1.5'`) while `1.0` does not. Asking
+ * the parser cannot be wrong about the parser. `NUMERIC_LOOKING_KEY_RE` keeps
+ * the cost off ordinary keys, and `matter`'s `{}` is as load-bearing here as in
+ * `parseBlock`.
+ */
+function keyRoundTripsAsString(key: string): boolean {
+  try {
+    const data = matter(`---\n${key}: x\n---\n`, {}).data as Record<string, unknown>;
+    return Object.prototype.hasOwnProperty.call(data, key);
+  } catch {
+    return false;
+  }
+}
+
 function serializeKey(key: string): string {
   if (!SAFE_KEY_RE.test(key) || RESERVED_WORD_RE.test(key)) return doubleQuote(key);
+  if (NUMERIC_LOOKING_KEY_RE.test(key) && !keyRoundTripsAsString(key)) return doubleQuote(key);
   return key;
 }
 
@@ -295,22 +383,78 @@ function splitFrontmatter(content: string): SplitContent | undefined {
   return undefined;
 }
 
-function escapeForRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * The key a frontmatter LINE declares, or `undefined` when the line opens no
+ * top-level entry at all (indented, a comment, a list item, an unterminated
+ * quote, a continuation of the value above).
+ *
+ * It READS the spelling instead of guessing it, and that is the fix rather than
+ * an embellishment. Matching only the two spellings this module happens to
+ * EMIT — plain and double-quoted — leaves out the one YAML spelling it never
+ * writes but users and other tools produce constantly: single quotes. A vault
+ * note carrying `'tipo': ` went unrecognised, so the missing-key fill APPENDED a
+ * second `tipo:` line. The duplicate is not the damage: js-yaml REFUSES a
+ * mapping with a duplicated key, so `parseBlock` throws, `splitFrontmatter`
+ * returns undefined, and the next pass prefixes a brand-new block — demoting the
+ * user's real frontmatter into the note BODY, where it reads as stray text. One
+ * unrecognised spelling therefore costs the note its metadata on the pass after
+ * next.
+ *
+ * Deriving the key from the line closes the whole family at once, including the
+ * spellings nobody enumerated: extra space before the colon, `''` as the escaped
+ * single quote, a plain key holding a `:` that no whitespace follows (`a:b: v`,
+ * whose key is `a:b`). A double-quoted key using YAML-only escapes (`\x41`) is
+ * beyond `JSON.parse` and reads as "no key here" — the conservative direction,
+ * since this module only ever writes JSON-compatible escapes and an unread key
+ * merely appends where it could have replaced.
+ */
+function topLevelKeyOf(line: string): string | undefined {
+  if (line === '' || /^\s/.test(line)) return undefined;
+
+  if (line.startsWith('"')) {
+    let i = 1;
+    while (i < line.length && line[i] !== '"') i += line[i] === '\\' ? 2 : 1;
+    if (i >= line.length) return undefined;
+    let key: unknown;
+    try {
+      key = JSON.parse(line.slice(0, i + 1));
+    } catch {
+      return undefined;
+    }
+    return typeof key === 'string' && /^\s*:/.test(line.slice(i + 1)) ? key : undefined;
+  }
+
+  if (line.startsWith("'")) {
+    let key = '';
+    let i = 1;
+    while (i < line.length) {
+      if (line[i] === "'") {
+        // YAML escapes a single quote by DOUBLING it.
+        if (line[i + 1] !== "'") break;
+        key += "'";
+        i += 2;
+        continue;
+      }
+      key += line[i];
+      i += 1;
+    }
+    if (i >= line.length) return undefined;
+    return /^\s*:/.test(line.slice(i + 1)) ? key : undefined;
+  }
+
+  // Plain scalar: the key ends at the first `:` that whitespace or end-of-line
+  // follows — the only `:` YAML reads as the mapping indicator.
+  const match = /^(.*?):(?=\s|$)/.exec(line);
+  const key = match?.[1]?.replace(/\s+$/, '');
+  return key === undefined || key === '' ? undefined : key;
 }
 
 /**
- * Both spellings are matched — the plain key and the double-quoted one
- * `serializeKey` may have written — so a key that needed quoting is still
- * recognised as already present and gets REPLACED rather than appended a second
- * time. Without that, `ensureFrontmatter` would stop being idempotent for
- * exactly the keys it had to harden.
+ * The index of the line already declaring `key`, in ANY spelling that denotes
+ * it, so the missing-key fill REPLACES rather than appending a duplicate.
  */
 function topLevelKeyIndex(block: string[], key: string): number {
-  const plain = escapeForRegExp(key);
-  const quoted = escapeForRegExp(doubleQuote(key));
-  const re = new RegExp(`^(?:${plain}|${quoted})\\s*:`);
-  return block.findIndex((line) => re.test(line));
+  return block.findIndex((line) => topLevelKeyOf(line) === key);
 }
 
 /**
