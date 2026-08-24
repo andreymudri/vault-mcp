@@ -19,7 +19,22 @@ describe('resolveWritePath', () => {
 
   it('rejects absolute paths', () => {
     const vaultRoot = '/vault';
-    expect(() => resolveWritePath(vaultRoot, '/etc/passwd')).toThrow(PathGuardError);
+    // Must end in .md, otherwise this dies on the suffix check before the absolute-path
+    // handling is ever reached, and the rejection this test claims to verify is never
+    // exercised.
+    expect(() => resolveWritePath(vaultRoot, '/etc/passwd.md')).toThrow(PathGuardError);
+    // An absolute path that happens to resolve inside the vault must still be rejected:
+    // the contract is "vault-relative path in", not "any path that lands inside the vault".
+    expect(() => resolveWritePath(vaultRoot, '/vault/02-wiki/nova.md')).toThrow(PathGuardError);
+  });
+
+  it('rejects paths containing glob metacharacters', () => {
+    const vaultRoot = '/vault';
+    // git interprets a pathspec as a glob; `*.md` stays inside the vault and ends in .md so
+    // every other check passes, but it reaches `git add` as a wildcard and can sweep up files
+    // the tool never touched.
+    expect(() => resolveWritePath(vaultRoot, '02-wiki/*.md')).toThrow(PathGuardError);
+    expect(() => resolveWritePath(vaultRoot, '02-wiki/nota[1].md')).toThrow(PathGuardError);
   });
 
   it('rejects paths that escape via traversal', () => {
@@ -107,5 +122,14 @@ describe('assertNoSymlinkEscape', () => {
     const notePathThroughSymlink = resolve(symlinkDir, 'test.md');
 
     await expect(assertNoSymlinkEscape(tmpVault, notePathThroughSymlink)).rejects.toThrow();
+  });
+
+  it('surfaces a missing vault root as PathGuardError, not a raw ENOENT', async () => {
+    const missingRoot = resolve(tmpVault, 'nope');
+    const target = resolve(missingRoot, 'a.md');
+
+    // writer.ts branches on `e instanceof PathGuardError`; a raw fs ENOENT would escape
+    // that check as an unclassified tool failure instead of a recognized guard rejection.
+    await expect(assertNoSymlinkEscape(missingRoot, target)).rejects.toThrow(PathGuardError);
   });
 });

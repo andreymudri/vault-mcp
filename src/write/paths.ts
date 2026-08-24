@@ -1,4 +1,4 @@
-import { resolve, relative, sep } from 'node:path';
+import { resolve, relative, sep, isAbsolute } from 'node:path';
 import { promises as fs } from 'node:fs';
 
 export const DENIED_PREFIXES = ['99-archive', '_templates'] as const;
@@ -12,6 +12,17 @@ export class PathGuardError extends Error {}
 export function resolveWritePath(vaultRoot: string, relPath: string): string {
   if (!relPath.endsWith('.md')) {
     throw new PathGuardError(`caminho deve terminar em .md: ${relPath}`);
+  }
+  // The contract is "vault-relative path in": an absolute relPath must be rejected even when
+  // it happens to resolve inside the vault, because `resolve(root, absPath)` ignores `root`
+  // for an absolute `absPath` and the containment check below would otherwise let it through.
+  if (isAbsolute(relPath)) {
+    throw new PathGuardError(`caminho deve ser relativo ao vault: ${relPath}`);
+  }
+  // git interpreta pathspec como glob. `*.md` passa em qualquer checagem de contenção e de
+  // sufixo, mas chega ao `git add` como curinga e arrasta arquivos que a tool nunca tocou.
+  if (/[*?[\]]/.test(relPath)) {
+    throw new PathGuardError(`caminho não pode conter metacaractere de glob: ${relPath}`);
   }
   const root = resolve(vaultRoot);
   const abs = resolve(root, relPath);
@@ -33,7 +44,12 @@ export function resolveWritePath(vaultRoot: string, relPath: string): string {
  */
 export async function assertNoSymlinkEscape(vaultRoot: string, abs: string): Promise<void> {
   const root = resolve(vaultRoot);
-  const realRoot = await fs.realpath(root);
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(root);
+  } catch (err) {
+    throw new PathGuardError(`raiz do vault inexistente ou inacessível: ${root} (${(err as Error).message})`);
+  }
 
   // Walk up from abs to find the nearest existing directory
   let checkPath = abs;
