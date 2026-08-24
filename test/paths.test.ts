@@ -121,7 +121,7 @@ describe('assertNoSymlinkEscape', () => {
 
     const notePathThroughSymlink = resolve(symlinkDir, 'test.md');
 
-    await expect(assertNoSymlinkEscape(tmpVault, notePathThroughSymlink)).rejects.toThrow();
+    await expect(assertNoSymlinkEscape(tmpVault, notePathThroughSymlink)).rejects.toThrow(PathGuardError);
   });
 
   it('surfaces a missing vault root as PathGuardError, not a raw ENOENT', async () => {
