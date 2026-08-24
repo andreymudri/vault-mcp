@@ -8,6 +8,20 @@ const FENCE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
 const HEADING_RE = /^(#{2,3})\s+(.*)$/;
 
 /**
+ * `FENCE_RE`/`HEADING_RE` use `.` and anchor with `$`, and `.` does not match
+ * `\r` in JavaScript. A CRLF-terminated line (common in notes authored on
+ * Windows, or content clipped into `01-raw/clippings/`) therefore fails to
+ * match either regex even though it is, semantically, an ordinary fence or
+ * heading line followed by a line ending. Strip a trailing `\r` before
+ * matching so CRLF and LF lines are treated identically; the `\r` itself is
+ * left untouched in the line as stored in chunks/output, only the matching
+ * is affected.
+ */
+function stripTrailingCR(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
+}
+
+/**
  * Tracks the state of a fenced code block across a sequence of lines: which
  * delimiter character opened it (if any) and how long the opening run was.
  * `char === null` means "not currently inside a fence".
@@ -29,12 +43,12 @@ interface FenceTracker {
  * not close it — it is just content.
  */
 function feedFenceTracker(line: string, tracker: FenceTracker): void {
-  const match = FENCE_RE.exec(line);
+  const match = FENCE_RE.exec(stripTrailingCR(line));
   if (!match) {
     return;
   }
   const marker = match[1] ?? '';
-  const info = (match[2] ?? '').trim();
+  const info = match[2] ?? '';
   const char = marker[0] ?? '';
   const length = marker.length;
 
@@ -44,7 +58,13 @@ function feedFenceTracker(line: string, tracker: FenceTracker): void {
     return;
   }
 
-  if (char === tracker.char && length >= tracker.length && info === '') {
+  // CommonMark: a closing fence permits nothing but whitespace after the
+  // delimiter run — no info string. "Whitespace" here means spaces and tabs
+  // only (this is what makes a fence a *closing* fence rather than content),
+  // matching src/vault/links.ts. `String.trim()` is too lenient: it also
+  // strips NBSP, form feed, vertical tab and other Unicode space
+  // separators, which would wrongly let e.g. "```  " close a fence.
+  if (char === tracker.char && length >= tracker.length && /^[ \t]*$/.test(info)) {
     tracker.char = null;
     tracker.length = 0;
   }
@@ -104,7 +124,7 @@ export function chunkNote(
     feedFenceTracker(line, fence);
 
     if (fence.char === null) {
-      const match = HEADING_RE.exec(line);
+      const match = HEADING_RE.exec(stripTrailingCR(line));
       if (match) {
         // Close the chunk that was accumulating before this heading.
         flush(originalLine - 1);

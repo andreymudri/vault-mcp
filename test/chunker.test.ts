@@ -197,6 +197,20 @@ describe('chunkNote', () => {
     expect(exemplo?.headingPath).toEqual(['Exemplo']);
   });
 
+  it('detecta heading mesmo com terminador de linha CRLF', () => {
+    // `HEADING_RE` usa `.` e ancora com `$`; `.` não casa `\r` em
+    // JavaScript, então uma linha terminada em CRLF (comum em notas
+    // escritas no Windows, ou conteúdo colado em `01-raw/clippings/`) falha
+    // o match inteiro se o `\r` não for removido antes. Esse defeito já
+    // existia antes da adoção da regra CommonMark de cerca — não é uma
+    // regressão desta rodada, mas ficou sem teste até agora.
+    const body = '## Titulo\r\n\r\nConteudo da secao.\r\n';
+    const chunks = chunkNote('crlf-heading.md', body, undefined, [], 1);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.headingPath).toEqual(['Titulo']);
+  });
+
   it('id tem a forma ${path}#${lineStart}', () => {
     const { body, bodyStartLine } = loadFixture(BULLMQ_PATH);
     const chunks = chunkNote(BULLMQ_PATH, body, 'wiki', ['nestjs', 'bullmq', 'filas'], bodyStartLine);
@@ -215,6 +229,31 @@ describe('chunkNote', () => {
     for (const chunk of chunks) {
       expect(chunk.text.trim().length).toBeGreaterThan(0);
     }
+  });
+
+  it('um heading dentro de uma cerca de til não abre um novo chunk', () => {
+    // Cerca de til é o que uma nota usa quando o próprio exemplo contém
+    // crases — plausível num vault sobre ferramentas de desenvolvedor.
+    // Deletar `~{3,}` de FENCE_RE passa em todos os outros testes; só este
+    // caso concreto (heading disfarçado dentro da cerca de til) expõe a
+    // falta de cobertura.
+    const body = [
+      '## Real',
+      '',
+      '~~~ts',
+      'const a = 1;',
+      '## nao e heading',
+      'const b = 2;',
+      '~~~',
+      '',
+      'fim',
+      '',
+    ].join('\n');
+    const chunks = chunkNote('tilde-fence.md', body, undefined, [], 1);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.headingPath).toEqual(['Real']);
+    expect(chunks.some((c) => c.headingPath.includes('nao e heading'))).toBe(false);
   });
 
   it('propaga tipo e tags para cada chunk gerado', () => {
@@ -335,6 +374,93 @@ describe('splitFields', () => {
     expect(code).toContain('mais conteudo');
     expect(prose).not.toContain('conteudo');
     expect(prose).not.toContain('mais conteudo');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('detecta cerca de crase mesmo com terminador de linha CRLF', () => {
+    // Verificado: antes da correção, isto caía inteiro em `prose` com
+    // `code` vazio; `FENCE_RE` usa `.` e ancora com `$`, e `.` não casa
+    // `\r`. Notas escritas no Windows e conteúdo colado em
+    // `01-raw/clippings/` costumam ter CRLF; sem isso, o campo `code`
+    // (usado pela Task 7 para peso de busca) nunca dispara nessas notas.
+    const text = '```bash\r\ndocker build .\r\n```\r\n';
+
+    const { prose, code } = splitFields(text);
+
+    expect(code).toContain('docker build .');
+    expect(prose).not.toContain('docker build .');
+  });
+
+  it('cerca de til abre e fecha corretamente', () => {
+    const text = ['Prosa antes.', '~~~ts', 'const a = 1;', '~~~', 'Prosa depois.'].join('\n');
+
+    const { prose, code } = splitFields(text);
+
+    expect(code).toContain('const a = 1;');
+    expect(prose).not.toContain('const a = 1;');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('cerca de til não é fechada por crase', () => {
+    const text = ['Prosa antes.', '~~~', 'conteudo', '```', 'mais conteudo', '~~~', 'Prosa depois.'].join(
+      '\n',
+    );
+
+    const { prose, code } = splitFields(text);
+
+    // Espelho do teste "cerca de crases não é fechada por til": o
+    // caractere de fechamento tem que casar com o de abertura.
+    expect(code).toContain('conteudo');
+    expect(code).toContain('```');
+    expect(code).toContain('mais conteudo');
+    expect(prose).not.toContain('conteudo');
+    expect(prose).not.toContain('mais conteudo');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('uma linha de cerca com info string não fecha a cerca aberta', () => {
+    // Verificado: remover a cláusula `info === ''` do fechamento passa em
+    // todos os outros testes. Sob a mutação, a linha "``` bash" (que tem
+    // uma info string, então não é um fechamento válido) fecha a cerca de
+    // qualquer forma: código vaza para `prose` e prosa vaza para `code`.
+    const text = ['Prosa antes.', '```', 'exemplo:', '``` bash', 'npm test', '```', 'Prosa depois.'].join(
+      '\n',
+    );
+
+    const { prose, code } = splitFields(text);
+
+    expect(code).toContain('exemplo:');
+    expect(code).toContain('``` bash');
+    expect(code).toContain('npm test');
+    expect(prose).not.toContain('exemplo:');
+    expect(prose).not.toContain('npm test');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('só espaço e tab podem seguir a cerca de fechamento — NBSP não fecha', () => {
+    // CommonMark exige que só espaços e tabs sigam a cerca de fechamento;
+    // `links.ts` compara a info string a `''` exatamente. Usar
+    // `String.trim()` diverge disso porque também remove NBSP, form feed e
+    // vertical tab, tratando-os (erradamente) como fechamento válido.
+    const text = [
+      'Prosa antes.',
+      '```',
+      'conteudo',
+      '``` ',
+      'ainda dentro da cerca',
+      '```',
+      'Prosa depois.',
+    ].join('\n');
+
+    const { prose, code } = splitFields(text);
+
+    expect(code).toContain('conteudo');
+    expect(code).toContain('ainda dentro da cerca');
+    expect(prose).not.toContain('ainda dentro da cerca');
     expect(prose).toContain('Prosa antes.');
     expect(prose).toContain('Prosa depois.');
   });
