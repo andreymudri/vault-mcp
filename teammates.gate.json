@@ -1,34 +1,64 @@
 {
   "maxParallel": 8,
-  "lens": ["correctness", "security", "tests"],
-  "preview": { "link": ["node_modules"] },
+  "lens": [
+    "correctness",
+    "security",
+    "tests"
+  ],
   "phases": {
     "1": {
       "fixRounds": 2,
       "checks": [
-        { "name": "fileset", "kind": "fileset" },
-        { "name": "ownership", "kind": "ownership" },
+        {
+          "name": "fileset",
+          "kind": "fileset"
+        },
+        {
+          "name": "ownership",
+          "kind": "ownership"
+        },
         {
           "name": "review",
           "kind": "agent",
           "agent": "tm-reviewer",
-          "lens": ["correctness", "tests"],
-          "blockOn": ["high"]
+          "lens": [
+            "correctness",
+            "tests"
+          ],
+          "blockOn": [
+            "high"
+          ]
         }
       ]
     },
     "default": {
       "fixRounds": 2,
       "checks": [
-        { "name": "test", "kind": "command", "run": "npm test" },
-        { "name": "fileset", "kind": "fileset" },
-        { "name": "ownership", "kind": "ownership" },
+        {
+          "name": "test",
+          "kind": "command",
+          "run": "npm test"
+        },
+        {
+          "name": "fileset",
+          "kind": "fileset"
+        },
+        {
+          "name": "ownership",
+          "kind": "ownership"
+        },
         {
           "name": "review",
           "kind": "agent",
           "agent": "tm-reviewer",
-          "lens": ["correctness", "security", "tests"],
-          "blockOn": ["high"]
+          "lens": [
+            "correctness",
+            "security",
+            "tests"
+          ],
+          "blockOn": [
+            "high"
+          ]
         }
       ]
     }
