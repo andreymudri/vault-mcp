@@ -20,11 +20,34 @@
  *
  * Both are honest restrictions on the syntax: a wiki-link never spans lines, and neither a
  * target, an anchor, nor an alias can contain `[`.
+ *
+ * Unlike `FENCE`, this pattern needs no CRLF fix. None of its classes exclude `\r`, but `\r`
+ * can still never end up inside a captured group: `source` (the string this matches against) is
+ * built by `body.split('\n')` and rejoined with `'\n'`, so every `\r` in it is immediately
+ * followed by `\n` (the one exception — a truncated file ending mid line-break, `\r` with no `\n`
+ * after it — puts the `\r` at the very end of `source`, past any possible `]]`). Either way, the
+ * character right after a `\r` is never `]`, `|` or `#`, so a class that tentatively consumed the
+ * `\r` always fails to complete a match and backtracks it back out. A target therefore can only
+ * ever end in `\r` if the match itself failed — i.e. never. (`match[1]?.trim()` in
+ * `extractLinkTargets` would strip a stray `\r` anyway, belt-and-braces.)
  */
 const WIKI_LINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 
 /** A ``` or ~~~ fence line, with its optional info string. */
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
+
+/**
+ * `FENCE` anchors with `$` and uses `.`, and `.` does not match `\r` in JavaScript. A
+ * CRLF-terminated line (common in notes authored on Windows, or content clipped into
+ * `01-raw/clippings/`) therefore fails to match `FENCE` even though it is, semantically, an
+ * ordinary fence line followed by a line ending: `body.split('\n')` leaves the `\r` attached to
+ * the end of each line, `(.*)` can't consume it, and `$` then can't reach the end of the line.
+ * Strip a trailing `\r` before matching so CRLF and LF lines are treated identically — mirrors
+ * `src/index/chunker.ts`'s `stripTrailingCR`, which fixes the same blindness on the same pattern.
+ */
+function stripTrailingCR(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
+}
 
 /**
  * Code samples routinely contain `[[...]]` that is not a link — a fenced snippet in the vault
@@ -34,7 +57,7 @@ function stripFencedCode(body: string): string {
   const kept: string[] = [];
   let openFence: string | undefined;
   for (const line of body.split('\n')) {
-    const marker = FENCE.exec(line);
+    const marker = FENCE.exec(stripTrailingCR(line));
     if (openFence === undefined) {
       if (marker?.[1] !== undefined) {
         openFence = marker[1];

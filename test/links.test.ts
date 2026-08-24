@@ -46,6 +46,25 @@ describe('extractLinkTargets', () => {
     expect(targets).toContain('auth-guard');
   });
 
+  // `FENCE` (em links.ts) anchors with `$` and uses `.`, nenhum dos quais casa `\r`. Uma nota em
+  // CRLF (comum em notas escritas no Windows, ou em conteúdo clipado para `01-raw/clippings/`)
+  // fazia a linha de cerca não ser reconhecida como cerca, deixando o `[[...]]` de dentro do
+  // bloco vazar como link — o mesmo alvo, em LF, é corretamente ignorado pelo teste acima.
+  it('ignora wiki-link dentro de bloco de código cercado em CRLF', () => {
+    const crlf = [
+      '```typescript',
+      "// veja [[nota-inexistente]] aqui dentro",
+      '```',
+      '',
+      'fora do bloco: [[auth-guard]]',
+    ].join('\r\n');
+
+    const targets = extractLinkTargets(crlf);
+
+    expect(targets).not.toContain('nota-inexistente');
+    expect(targets).toContain('auth-guard');
+  });
+
   it('desduplica o mesmo alvo repetido, preservando a ordem de aparição', () => {
     const targets = extractLinkTargets(body('02-wiki/nestjs/bullmq-worker.md'));
 
