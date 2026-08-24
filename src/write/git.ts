@@ -53,7 +53,11 @@ export async function commitFiles(
     ]);
   } catch (err) {
     const streams = errorStreams(err);
-    if (/nothing to commit|nada a submeter|nada.*commit/i.test(streams)) {
+    if (
+      /nothing to commit|nada a submeter|nada.*commit|no changes added to commit|nenhuma alteração adicionada ao commit/i.test(
+        streams
+      )
+    ) {
       return { committed: false, warning: 'nada a commitar: arquivos sem alteração' };
     }
     return { committed: false, warning: `falha ao commitar: ${errorMessage(err)}` };

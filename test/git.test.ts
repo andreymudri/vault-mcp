@@ -94,6 +94,39 @@ describe('commitFiles', () => {
     expect(log.split('\n')).toHaveLength(1);
   });
 
+  it('treats "no changes added to commit" from an unrelated modified tracked file as a benign no-op, not a git failure', async () => {
+    // The target file itself is unchanged, but a different tracked file has
+    // an unstaged modification. Under `--literal-pathspecs commit -- <target>`
+    // this makes git exit 1 printing "no changes added to commit" -- a
+    // different message than "nothing to commit" -- verified with git
+    // 2.55.0. This is the normal case, not an edge case: the user's vault is
+    // a git repo they actively work in, so it routinely has unrelated
+    // pending edits, and re-learning an unchanged note has exactly this
+    // shape. It must be classified as a benign no-op, not surfaced as
+    // `falha ao commitar`, and must not leak the unrelated filename back.
+    const targetPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(targetPath, '# Nota\n', 'utf8');
+    const unrelatedPath = path.join(repoRoot, 'outra-nota.md');
+    await fs.writeFile(unrelatedPath, 'conteudo original\n', 'utf8');
+    await git(repoRoot, ['add', targetPath, unrelatedPath]);
+    await git(repoRoot, ['commit', '-m', 'chore: seed']);
+
+    // Modify the unrelated tracked file without ever passing it to commitFiles.
+    await fs.writeFile(unrelatedPath, 'conteudo modificado\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [targetPath], 'feat: reaprender nota inalterada');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toContain('falha ao commitar');
+    expect(result.warning).not.toContain('outra-nota.md');
+
+    const log = await git(repoRoot, ['log', '--oneline']);
+    expect(log.split('\n')).toHaveLength(1);
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toContain('outra-nota.md');
+  });
+
   it('uses the passed message literally', async () => {
     const absPath = path.join(repoRoot, 'nota.md');
     await fs.writeFile(absPath, '# Nota\n', 'utf8');
@@ -248,7 +281,11 @@ describe('commitFiles', () => {
 
       expect(result.committed).toBe(false);
       expect(result.warning).toBeTruthy();
-      expect(result.warning).not.toBe('nada a commitar: arquivos sem alteração');
+      // Assert on an observable, not on a copy of the source's literal
+      // fallback string: the real pre-commit hook failure must actually be
+      // surfaced (its own stderr text present in the warning), rather than
+      // silently swallowed behind the fixed "nothing to commit" message.
+      expect(result.warning).toContain('recusado pelo hook de pre-commit');
     } finally {
       await fs.rm(nadaRepoRoot, { recursive: true, force: true });
     }
