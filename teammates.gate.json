@@ -5,6 +5,11 @@
     "security",
     "tests"
   ],
+  "preview": {
+    "link": [
+      "node_modules"
+    ]
+  },
   "phases": {
     "1": {
       "fixRounds": 2,
