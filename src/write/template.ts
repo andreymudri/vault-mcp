@@ -15,8 +15,25 @@ export interface TemplateContext {
   now: Date;
 }
 
-/** `<% ... %>`, tolerating any amount of whitespace inside the delimiters. */
-const TOKEN_RE = /<%\s*(.+?)\s*%>/g;
+/**
+ * `<% ... %>` on a single line, tolerating any amount of whitespace inside the
+ * delimiters (`applyTemplate` trims the capture).
+ *
+ * Deliberately NOT the obvious `<%\s*(.+?)\s*%>`. That form is ambiguous twice
+ * over — `\s*` and `.+?` compete for the same characters, and `.` swallows a
+ * nested `<%` — so on text carrying many `<%` and no `%>` the engine rescans to
+ * the end of the input from every one of them: quadratic, 65s on 240KB. This
+ * form is a deterministic loop instead. Each alternative consumes exactly one
+ * character and they are disjoint on that character, so at every position at
+ * most one can apply, and the loop stops dead at a nested `<%` (`<(?!%)`) — the
+ * bound that keeps each start position O(token length) rather than O(input).
+ *
+ * It matters because a template body is not always trusted: T13 may splice
+ * model-supplied content into the skeleton before calling `applyTemplate`, so
+ * the only thing standing between an adversarial note and a wedged event loop
+ * is this regex.
+ */
+const TOKEN_RE = /<%((?:[^%<\n]|<(?!%)|%(?!>))*)%>/g;
 
 /** `tp.date.now("FMT")`, single or double quoted. */
 const DATE_NOW_RE = /^tp\.date\.now\(\s*(['"])([\s\S]*?)\1\s*\)$/;
@@ -82,13 +99,38 @@ function isEmptyValue(value: unknown): boolean {
   return false;
 }
 
+/**
+ * When a plain (unquoted) YAML scalar would NOT round-trip the value.
+ *
+ * The alternatives, in order:
+ *  - `^$` — the empty string is not a plain scalar at all.
+ *  - `^\s|\s$|[\n\r\t]` — leading/trailing whitespace is stripped by YAML, and a
+ *    newline or tab cannot appear in a plain scalar. A value carrying `\n---\n`
+ *    would otherwise CLOSE the frontmatter block early, dropping every key after
+ *    it into the note body and silently breaking this module's guarantee.
+ *  - `:\s|:$|\s#` — the mapping and comment indicators.
+ *  - `[,[\]{}]` — the flow-context metacharacters, wherever they appear. Every
+ *    list here is written in flow style, so a tag `auth]` closes the sequence
+ *    early and yields `tags: [auth], x]`, which js-yaml then REFUSES to parse:
+ *    the note loses all of its metadata and T3's scanner reports it as broken
+ *    frontmatter forever after. A comma is milder but just as wrong — `a, b, c`
+ *    as one tag silently becomes three.
+ *  - `^[-?:#&*!|>'"%@\`]` — the indicator characters, which are only special in
+ *    first position.
+ *  - the boolean/null words, which would come back as a non-string.
+ *
+ * Values reach here from a `vault_write_note` call — that is, from a language
+ * model — and land in the user's real vault, so the rule errs toward quoting.
+ */
 const NEEDS_QUOTES_RE =
-  /^$|^\s|\s$|:\s|:$|^[-?:,[\]{}#&*!|>'"%@`]|\s#|^(?:true|false|null|yes|no|on|off|~)$/i;
+  /^$|^\s|\s$|[\n\r\t]|:\s|:$|\s#|[,[\]{}]|^[-?:#&*!|>'"%@`]|^(?:true|false|null|yes|no|on|off|~)$/i;
 
 function serializeScalar(value: unknown): string {
   if (value === null || value === undefined) return "''";
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   const text = String(value);
+  // JSON string syntax is a subset of YAML's double-quoted scalar syntax, so
+  // this is a valid escape for every char, control characters included.
   if (NEEDS_QUOTES_RE.test(text)) return JSON.stringify(text);
   return text;
 }
@@ -110,28 +152,56 @@ interface SplitContent {
   block: string[];
   /** Everything after the closing delimiter, verbatim. */
   body: string;
-}
-
-function splitFrontmatter(content: string): SplitContent | undefined {
-  const lines = content.split('\n');
-  if (lines.length === 0 || (lines[0] ?? '').trim() !== '---') return undefined;
-
-  for (let i = 1; i < lines.length; i += 1) {
-    if ((lines[i] ?? '').trim() === '---') {
-      return { block: lines.slice(1, i), body: lines.slice(i + 1).join('\n') };
-    }
-  }
-  return undefined;
+  /** `block` as parsed by js-yaml; `{}` when it is malformed. */
+  data: Frontmatter;
 }
 
 function parseBlock(block: string[]): Frontmatter {
   try {
-    const parsed = matter(`---\n${block.join('\n')}\n---\n`);
+    // The `{}` is load-bearing: called with no options at all, `gray-matter`
+    // memoises every string it is handed in an unbounded process-global cache —
+    // and it writes the entry BEFORE parsing, so a malformed block throws once
+    // and from then on returns the half-built `{data: {}, content: <raw>}` to
+    // every caller in the process. The spec forbids that cache for T3 and it is
+    // no more acceptable here.
+    const parsed = matter(`---\n${block.join('\n')}\n---\n`, {});
     return parsed.data as Frontmatter;
   } catch {
     // Malformed YAML: treat every required key as missing rather than crashing.
     return {};
   }
+}
+
+/**
+ * Splits `content` into frontmatter block and body — but ONLY when the leading
+ * `---` really opens a frontmatter block.
+ *
+ * A bare `---` is also valid Markdown (a horizontal rule), and `vault_write_note`
+ * receives note bodies that start with one. Accepting any leading `---` with a
+ * later `---` somewhere below silently swallows whatever sits between them:
+ * `'---\n\n# Titulo\n\n---\n\ntexto\n'` put `# Titulo` inside the block, where
+ * `#` is a YAML comment, and the heading simply disappeared from the note.
+ *
+ * So the block must actually look like frontmatter: it parses to a non-empty
+ * mapping, or it is entirely blank. Anything else — a heading, prose, an opener
+ * with no closing delimiter at all — stays body text, untouched, and a fresh
+ * block is prefixed above it. Deleting the user's content is never the answer.
+ */
+function splitFrontmatter(content: string): SplitContent | undefined {
+  const lines = content.split('\n');
+  if ((lines[0] ?? '').trim() !== '---') return undefined;
+
+  for (let i = 1; i < lines.length; i += 1) {
+    if ((lines[i] ?? '').trim() !== '---') continue;
+
+    const block = lines.slice(1, i);
+    const data = parseBlock(block);
+    const isBlank = block.every((line) => line.trim() === '');
+    if (!isBlank && Object.keys(data).length === 0) return undefined;
+
+    return { block, body: lines.slice(i + 1).join('\n'), data };
+  }
+  return undefined;
 }
 
 function topLevelKeyIndex(block: string[], key: string): number {
@@ -157,7 +227,7 @@ export function ensureFrontmatter(content: string, required: Frontmatter): strin
   }
 
   const block = [...split.block];
-  const data = parseBlock(block);
+  const data = split.data;
 
   for (const [key, value] of entries) {
     if (!isEmptyValue(data[key])) continue;

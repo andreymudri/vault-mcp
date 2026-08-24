@@ -1,7 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import matter from 'gray-matter';
 import ts from 'typescript';
 import { describe, it, expect } from 'vitest';
 
@@ -17,25 +20,41 @@ const ROOT = dirname(here);
 const TEMPLATES = join(here, 'fixtures', 'vault', '_templates');
 const MODULE_SRC = join(ROOT, 'src', 'write', 'template.ts');
 
+/** Absolute URL of the real `gray-matter`, resolved from THIS file's node_modules. */
+const GRAY_MATTER_URL = pathToFileURL(
+  createRequire(import.meta.url).resolve('gray-matter'),
+).href;
+
 /**
  * Runs `snippet` against the real `src/write/template.ts` in a child process
  * pinned to `tz`, and returns what it printed.
  *
  * A child process is the only honest way to assert this: vitest runs test files
  * in worker threads, where assigning `process.env.TZ` never reaches `tzset()`,
- * so the timezone of the runner cannot be changed from inside a test. The
- * transpiled module lands under `node_modules/` so that its `gray-matter`
- * import still resolves.
+ * so the timezone of the runner cannot be changed from inside a test.
+ *
+ * The scratch directory goes under `os.tmpdir()`, NOT under the repo. An earlier
+ * version put it in `<repo>/node_modules` so the module's bare `gray-matter`
+ * import would resolve by directory position — but `teammates.gate.json`
+ * SYMLINKS `node_modules` into the gate's preview tree, so that path is the one
+ * real shared directory, not a private copy, and the test was writing into it.
+ * The import is rewritten to an absolute file URL instead, which resolves from
+ * anywhere on disk.
  */
 function runInTimezone(tz: string, snippet: string): string {
-  const dir = mkdtempSync(join(ROOT, 'node_modules', '.vault-mcp-tz-'));
+  const dir = mkdtempSync(join(tmpdir(), 'vault-mcp-tz-'));
   try {
-    const js = ts.transpileModule(readFileSync(MODULE_SRC, 'utf8'), {
-      compilerOptions: {
-        module: ts.ModuleKind.ESNext,
-        target: ts.ScriptTarget.ES2022,
-      },
-    }).outputText;
+    const js = ts
+      .transpileModule(readFileSync(MODULE_SRC, 'utf8'), {
+        compilerOptions: {
+          module: ts.ModuleKind.ESNext,
+          target: ts.ScriptTarget.ES2022,
+        },
+      })
+      .outputText.replace(
+        /(\bfrom\s*)(['"])gray-matter\2/g,
+        (_m, from: string) => `${from}${JSON.stringify(GRAY_MATTER_URL)}`,
+      );
     const entry = join(dir, 'probe.mjs');
     writeFileSync(entry, `${js}\n${snippet}\n`);
     return execFileSync(process.execPath, [entry], {
@@ -246,4 +265,115 @@ describe('ensureFrontmatter', () => {
     expect(out).toContain('criado: 2026-08-24');
     expect(out).toContain('# Cache Wrapper');
   });
+});
+
+// Os valores que chegam aqui vêm de uma chamada `vault_write_note` — ou seja, de
+// um modelo de linguagem — e o resultado é gravado no vault real do usuário. Um
+// escape faltando não é cosmético: ou o js-yaml passa a RECUSAR a nota (e ela
+// perde todos os metadados), ou o bloco fecha cedo e chaves caem no corpo.
+// Cada teste abaixo assere a IDA E VOLTA: serializa e reparsa com `matter(out, {})`.
+describe('ensureFrontmatter — escape de YAML', () => {
+  const base = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
+
+  it('cita uma tag com `]` em vez de quebrar a lista de fluxo', () => {
+    const out = ensureFrontmatter('corpo\n', { ...base, tags: ['nestjs', 'auth]'] });
+    // Sem aspas isto vira `tags: [nestjs, auth]]`, que o js-yaml RECUSA.
+    expect(() => matter(out, {})).not.toThrow();
+    expect(matter(out, {}).data.tags).toEqual(['nestjs', 'auth]']);
+  });
+
+  it('cita tags com os demais metacaracteres de contexto de fluxo', () => {
+    const tags = ['a[b', 'c{d', 'e}f', 'g,h', '#i', 'j: k', ' l', 'm '];
+    const out = ensureFrontmatter('corpo\n', { ...base, tags });
+    expect(() => matter(out, {})).not.toThrow();
+    expect(matter(out, {}).data.tags).toEqual(tags);
+  });
+
+  it('mantém uma tag com vírgula como UMA tag, não três', () => {
+    const out = ensureFrontmatter('corpo\n', { ...base, tags: ['a, b, c'] });
+    expect(matter(out, {}).data.tags).toEqual(['a, b, c']);
+  });
+
+  it('cita um valor com quebra de linha em vez de fechar o bloco cedo', () => {
+    const tipo = 'linha\n---\nfim';
+    const out = ensureFrontmatter('corpo\n', { ...base, tipo });
+    const parsed = matter(out, {});
+    // A garantia declarada da função: TODAS as chaves ficam no frontmatter.
+    expect(parsed.data.tipo).toBe(tipo);
+    expect(parsed.data.tags).toEqual(['nestjs', 'auth']);
+    expect(parsed.data.criado).toBeDefined();
+    // ...e o corpo continua sendo só o corpo.
+    expect(parsed.content).toBe('\ncorpo\n');
+  });
+
+  it('não altera a serialização simples que o vault já usa', () => {
+    const out = ensureFrontmatter('corpo\n', base);
+    expect(out).toContain('tipo: wiki');
+    expect(out).toContain('tags: [nestjs, auth]');
+    expect(out).toContain('criado: 2026-08-24');
+  });
+});
+
+describe('ensureFrontmatter — `---` no início do CORPO', () => {
+  const required = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
+
+  it('não engole um `# Titulo` do corpo tratando o `---` inicial como abertura', () => {
+    const out = ensureFrontmatter('---\n\n# Titulo\n\n---\n\ntexto\n', required);
+    const parsed = matter(out, {});
+    expect(parsed.data).toEqual({
+      tipo: 'wiki',
+      tags: ['nestjs', 'auth'],
+      criado: new Date('2026-08-24T00:00:00.000Z'),
+    });
+    // `#` é comentário em YAML: sem o conserto o título some da nota.
+    expect(parsed.content).toContain('# Titulo');
+    expect(parsed.content).toContain('texto');
+  });
+
+  it('preserva verbatim um `---` de abertura sem fechamento', () => {
+    const content = '---\n\n# Titulo\n';
+    const out = ensureFrontmatter(content, required);
+    const parsed = matter(out, {});
+    expect(parsed.data).toEqual({
+      tipo: 'wiki',
+      tags: ['nestjs', 'auth'],
+      criado: new Date('2026-08-24T00:00:00.000Z'),
+    });
+    // O `---` órfão é uma régua horizontal do usuário: nada dele é apagado.
+    expect(parsed.content).toBe(`\n${content}`);
+    expect(ensureFrontmatter(out, required)).toBe(out);
+  });
+});
+
+describe('ensureFrontmatter — parsing sem o cache global do gray-matter', () => {
+  it('parseia o mesmo bloco malformado duas vezes sem popular matter.cache', () => {
+    const required = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
+    const malformed = '---\ntipo: "aberto\n---\n\ncorpo\n';
+
+    matter.clearCache();
+    const first = ensureFrontmatter(malformed, required);
+    const second = ensureFrontmatter(malformed, required);
+
+    expect(second).toBe(first);
+    // Sem o `{}`, o gray-matter guarda o conteúdo num cache global ilimitado e
+    // devolve o objeto meio-parseado da chamada que lançou.
+    expect(Object.keys(matter.cache)).toHaveLength(0);
+  });
+});
+
+describe('applyTemplate — custo do TOKEN_RE', () => {
+  it('termina em tempo linear sobre entrada adversarial de 240KB', () => {
+    const ctx = { title: 'x', now: localDate(2026, 8, 24) };
+    const inputs = ['<%'.padEnd(240 * 1024, ' '), '<% '.repeat(80 * 1024)];
+
+    const started = performance.now();
+    for (const input of inputs) {
+      try {
+        applyTemplate(input, ctx);
+      } catch {
+        // Um token não suportado é resposta legítima; o que se mede é o tempo.
+      }
+    }
+    expect(performance.now() - started).toBeLessThan(2000);
+  }, 20000);
 });
