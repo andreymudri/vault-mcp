@@ -4,6 +4,8 @@ tags: [nestjs, auth, jwt]
 criado: 2026-01-10
 ---
 
+# Auth Guard
+
 Este documento registra uma decisão de autenticação tomada para os serviços NestJS da Potentia, cobrindo como guards validam tokens JWT antes de liberar acesso às rotas protegidas.
 
 ## Contexto

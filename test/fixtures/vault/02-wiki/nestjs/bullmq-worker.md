@@ -12,7 +12,8 @@ O processamento assíncrono da Potentia usa BullMQ: cada `worker` consome uma `f
 
 ### Retry e backoff
 
-Quando um job falha, o BullMQ aplica a política de retry configurada em `queueOptions`. Para revisar o fluxo de autenticação usado antes de cada retry, veja [[auth-guard]]; a mesma referência [[auth-guard]] documenta como o token é revalidado a cada nova tentativa de processamento.
+Quando um job falha, o BullMQ aplica a política de retry configurada em `queueOptions`. Para revisar o fluxo de autenticação usado antes de cada retry, veja [[auth-guard]];
+a mesma referência [[auth-guard]] documenta como o token é revalidado a cada nova tentativa de processamento.
 
 ## Exemplo
 
@@ -50,10 +51,12 @@ worker.on('failed', (job, err) => {
   console.error(`queue job failed, worker will retry`, job?.id, err);
 });
 
-# nao e um heading
+## nao e um heading
 // [[link-dentro-de-codigo]] deve ser ignorado pelo parser de links
 export const queueOptions = {
   attempts: 5,
   backoff: { type: 'exponential', delay: 1000 },
 };
 ```
+
+Depois da cerca, o worker acima é o único ponto de entrada do processamento assíncrono da fila.
