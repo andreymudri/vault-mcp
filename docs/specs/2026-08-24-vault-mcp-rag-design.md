@@ -95,7 +95,7 @@ e tradução.
 1. Valida que o caminho resolvido está dentro de `VAULT_PATH` (bloqueia `..` e symlink para fora).
 2. Rejeita se o caminho cai em `99-archive/` ou `_templates/`.
 3. Escrita atômica: grava em arquivo temporário no mesmo diretório e faz `rename`.
-4. `git add <path> && git commit` com mensagem convencional.
+4. `git add <paths...> && git commit` com mensagem convencional, um commit por operação de tool.
 5. Invalida a entrada do arquivo no índice.
 
 ## Indexação e retrieval
@@ -178,7 +178,7 @@ não-validado. `include_raw: true` inclui.
 | `vault_write_note` | `path`, `content`, `frontmatter?` | Cria ou substitui. Aplica `_templates/wiki.md` ou `_templates/projeto.md` conforme `tipo`, garante frontmatter válido com `criado`, commita |
 
 | `vault_edit_note` | `path`, `old_text`, `new_text` | Substituição exata de trecho; falha se `old_text` não for encontrado ou não for único. Evita reescrever a nota inteira |
-| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio`, `tags?`, `links?` | Ver abaixo |
+| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio`, `projeto?`, `tags?`, `links?` | Ver abaixo |
 
 ### `vault_learn`
 
@@ -189,7 +189,8 @@ O ciclo fechado: o retrieval é usado na **entrada** de conhecimento, não só n
    seção datada `## YYYY-MM-DD — {titulo}`.
 3. Caso contrário, **cria** nota nova em `02-wiki/{dominio}/` a partir de `_templates/wiki.md`,
    com frontmatter preenchido (`tipo: wiki`, `tags`, `criado`) e wiki-links para `links?`.
-4. Em ambos os casos, commita e **retorna o diff aplicado**.
+4. Em ambos os casos, **propaga** (abaixo), commita tudo num único commit e **retorna o diff
+   aplicado**, cobrindo todos os arquivos tocados.
 
 `titulo` e `dominio` são fornecidos pelo agente, não inferidos pelo servidor — não há LLM
 neste processo. `dominio` é validado contra os diretórios existentes em `02-wiki/`; um domínio
@@ -197,6 +198,39 @@ novo exige `confirm_novo_dominio: true`, para que o agente não invente taxonomi
 
 Retornar o diff é obrigatório: a decisão de anexar-vs-criar fica visível na hora, em vez de
 ser descoberta depois numa nota errada.
+
+### Propagação automática
+
+`vault_learn` é a operação de uso diário, então ela mantém as estruturas de navegação do vault
+coerentes sozinha. Toda chamada bem-sucedida propaga para três lugares, e os três mais a nota
+entram num **único commit**:
+
+**1. MOC do domínio** — `02-wiki/{dominio}/{dominio}-moc.md`.
+Ao criar nota nova, insere `- [[{slug}]] — {resumo}` ao final da lista sob `## Notas` e atualiza
+`atualizado:` no frontmatter para a data corrente. Ao anexar a nota existente, só o `atualizado:`
+é tocado — a entrada já está lá.
+Se o MOC não existir, é criado. Isso não é hipotético: `02-wiki/performance/` e `02-wiki/tauri/`
+hoje não têm MOC. O MOC criado segue o formato dos existentes: frontmatter `tipo: moc`,
+`tags: [{dominio}]`, `criado`, `atualizado`; título `# {Dominio} — Mapa de Conteúdo`; seções
+`## Notas` e `## Relacionados`, esta última já linkando `[[../../00-index/index-knowledge|índice de conhecimento]]`.
+
+**2. Índice de conhecimento** — `00-index/index-knowledge.md`.
+Só é tocado quando um domínio novo é criado: acrescenta `- [[../02-wiki/{dominio}/{dominio}-moc|{dominio}]] — {resumo do domínio}`
+sob `## Domínios` e atualiza `atualizado:`. Domínio já listado não gera escrita.
+
+**3. Nota diária** — `04-daily/{YYYY-MM-DD}.md`.
+Acrescenta `- {HH:MM} [[{slug}]] ({tipo}, {projeto})` sob `## Capturas`, no formato já usado em
+`04-daily/2026-04-20.md`. `{tipo}` é `pattern`, `gotcha`, `decisão` ou `estado`, derivado das
+`tags` quando uma delas casa, e `aprendizado` como padrão. `{projeto}` vem do parâmetro `projeto?`;
+ausente, o sufixo entre parênteses traz só o tipo. Se a nota do dia não existir, é criada com
+frontmatter `tipo: daily`, `criado: {YYYY-MM-DD}` e a seção `## Capturas` — o formato de
+`2026-04-20.md`, não o de `2026-04-17.md`, que é anterior à convenção.
+
+**Atomicidade.** Os arquivos são gravados um a um (cada um atomicamente, via tmp + `rename`), e o
+commit acontece **uma vez ao final**, cobrindo o conjunto. Se a gravação de um arquivo de
+propagação falhar depois da nota já estar em disco, a operação retorna `warning` descrevendo o que
+não propagou e ainda assim commita o que gravou — perder a nota para preservar a coerência de um
+MOC seria a troca errada. Nenhum estado fica só na memória do processo.
 
 **Regra de duplicata.** Score BM25 bruto não é comparável entre queries, então o critério é
 relativo e conjuntivo — o match precisa satisfazer as duas condições:
@@ -236,7 +270,8 @@ Princípio: nenhum dado perdido; degradação parcial em vez de crash.
 | `VAULT_PATH` ausente ou não é diretório | Falha no boot com mensagem explícita. Único erro fatal |
 | Frontmatter malformado | Nota é indexada com frontmatter vazio; registro em diagnostics. Uma nota quebrada não derruba o índice |
 | Wiki-link apontando para nada | Ignorado pelo grafo; reportado por `vault_get_note` como sinal de manutenção |
-| Git indisponível ou commit falha | O arquivo já foi gravado; retorna warning de que não commitou. Nunca desfaz a escrita |
+| Git indisponível ou commit falha | Os arquivos já foram gravados; retorna warning de que não commitou. Nunca desfaz a escrita |
+| Propagação falha após a nota gravada | Retorna warning nomeando o alvo que não propagou; a nota permanece e o commit cobre o que foi gravado |
 | Caminho fora do vault ou em pasta negada | Erro de tool, sem escrita parcial |
 | Arquivo aberto no Obsidian durante write | Escrita atômica via tmp + `rename`; nunca deixa meio-arquivo |
 | `vault_edit_note` com `old_text` ambíguo ou ausente | Erro de tool descrevendo o problema; nenhuma escrita |
