@@ -40,6 +40,52 @@ export async function commitFiles(
     return { committed: false, warning: `falha ao adicionar arquivos ao git: ${errorMessage(err)}` };
   }
 
+  // Ask git's own bookkeeping whether anything is actually staged for these
+  // exact paths, rather than reading the prose `git commit` prints on
+  // failure. That prose is not ours: it interleaves a pre-commit hook's
+  // stderr, a commit-msg hook echoing the message, and filenames git echoes
+  // back -- and here the filename is `slug(titulo)` and the message is
+  // `docs(vault): {titulo}`, with the title chosen by a language model over
+  // web content clipped into the vault. Any phrase the classifier looks for,
+  // including one at column 0, can be injected through that path (an
+  // injected string carries its own newlines, so anchoring does not help).
+  // An exit status cannot be. This also covers every wording, present and
+  // future, localized or not -- including `nothing added to commit but
+  // untracked files present`, which a vault holding any untracked draft or
+  // `.obsidian/workspace.json` produces as its normal state.
+  //
+  // Ordering: this must run *after* `add`, so it sees exactly what `add`
+  // staged, and immediately *before* `commit` with the identical
+  // `--literal-pathspecs` and pathspecs, so it answers precisely the
+  // question the commit is about to ask. Nothing runs in between that could
+  // invalidate it. A concurrent writer could still change the index in that
+  // window, but then the commit fails and is reported as a real failure --
+  // the safe direction, since the benign classification is only ever granted
+  // by a check that positively observed an empty staged diff.
+  try {
+    await execFileAsync('git', [
+      '-C',
+      repoRoot,
+      '--literal-pathspecs',
+      'diff',
+      '--cached',
+      '--quiet',
+      '--',
+      ...absPaths,
+    ]);
+    // Exit 0: no staged difference for these paths. The benign no-op.
+    return { committed: false, warning: 'nada a commitar: arquivos sem alteração' };
+  } catch (err) {
+    // Exit 1 is `--quiet`'s "there are differences" signal: proceed to commit.
+    // Anything else (128, a spawn failure) is a genuine error.
+    if (exitCode(err) !== 1) {
+      return {
+        committed: false,
+        warning: `falha ao verificar alterações no git: ${errorMessage(err)}`,
+      };
+    }
+  }
+
   try {
     await execFileAsync('git', [
       '-C',
@@ -52,22 +98,8 @@ export async function commitFiles(
       ...absPaths,
     ]);
   } catch (err) {
-    const streams = errorStreams(err);
-    // Anchored to the start of a line (multiline) and restricted to the four
-    // specific wordings git actually prints for this case. A loose
-    // `nada.*commit`-style alternative, or leaving these unanchored, lets the
-    // phrase match mid-sentence inside a hook's own stderr, or inside a
-    // committed filename that echoes back through a hook's diagnostics (e.g.
-    // `nada-para-commit.md`) -- both attacker-influenceable, since the
-    // filename comes from an LLM-chosen title over untrusted note content.
-    // Git always prints these as their own line, never buried in one.
-    if (
-      /^(nothing to commit|nada a submeter|no changes added to commit|nenhuma alteração adicionada ao commit)/im.test(
-        streams
-      )
-    ) {
-      return { committed: false, warning: 'nada a commitar: arquivos sem alteração' };
-    }
+    // There *was* something staged, so a failure here is real: a rejecting
+    // hook, an unset identity, a locked index. Surface the diagnostic.
     return { committed: false, warning: `falha ao commitar: ${errorMessage(err)}` };
   }
 
@@ -75,12 +107,24 @@ export async function commitFiles(
 }
 
 /**
- * Combines only an execFile rejection's stdout and stderr — never its
- * `.message`, which node builds from the reconstructed command line (e.g.
- * `Command failed: git -C <repoRoot> commit ...`). Matching "nothing to
- * commit" detection against that message would let a repo path containing
- * the word "nada" or "commit" masquerade every real git failure (unset
- * identity, a pre-commit hook, index.lock) as "nothing to commit".
+ * The process exit status of an execFile rejection, or `undefined` when the
+ * child never ran (`err.code` is then a string like `ENOENT`).
+ */
+function exitCode(err: unknown): number | undefined {
+  if (err instanceof Error) {
+    const { code } = err as Error & { code?: number | string };
+    return typeof code === 'number' ? code : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Combines an execFile rejection's stdout and stderr. Used only to build the
+ * diagnostic text of a warning: no control-flow decision is taken on git's
+ * prose, because that prose carries hook output and LLM-chosen filenames and
+ * commit messages derived from untrusted note content. Whether a failure was
+ * a benign no-op is decided by `git diff --cached --quiet`'s exit status
+ * above, before the commit is ever attempted.
  */
 function errorStreams(err: unknown): string {
   if (err instanceof Error) {

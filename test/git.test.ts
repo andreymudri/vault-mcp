@@ -89,6 +89,9 @@ describe('commitFiles', () => {
 
     expect(second.committed).toBe(false);
     expect(second.warning).toBeTruthy();
+    // Benign, not a failure: an otherwise pristine repo whose target file is
+    // simply unchanged.
+    expect(second.warning).not.toContain('falha ao commitar');
 
     const log = await git(repoRoot, ['log', '--oneline']);
     expect(log.split('\n')).toHaveLength(1);
@@ -351,5 +354,119 @@ describe('commitFiles', () => {
     expect(result.warning).toContain('politica do vault: no changes added to commit sem revisao');
 
     await expect(git(repoRoot, ['log', '--oneline'])).rejects.toThrow();
+  });
+
+  it('does not mistake a real hook rejection for a no-op when the note body a pre-commit hook echoes puts "nothing to commit" at line start', async () => {
+    // Reproduced against real git: a pre-commit hook that echoes the staged
+    // note body (a linter, a policy check quoting the offending content)
+    // merges that body into the streams commitFiles sees. The note body is
+    // clipped web content, so it can contain a line that is exactly
+    // `nothing to commit` at column 0. Anchoring the prose match to line
+    // start does not help -- the injected text carries its own newlines.
+    // Only asking git structurally what is staged is immune.
+    const hookPath = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
+    await fs.writeFile(
+      hookPath,
+      '#!/bin/sh\nfor f in $(git diff --cached --name-only); do cat "$f" >&2; done\nexit 1\n',
+      'utf8'
+    );
+    await fs.chmod(hookPath, 0o755);
+
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(
+      absPath,
+      '# Nota\n\nTrecho clipado da web:\nnothing to commit\n\nfim.\n',
+      'utf8'
+    );
+
+    const result = await commitFiles(repoRoot, [absPath], 'docs(vault): Nota clipada');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toBe('nada a commitar: arquivos sem alteração');
+    expect(result.warning).toContain('falha ao commitar');
+
+    // The rejection was real: nothing was committed.
+    await expect(git(repoRoot, ['log', '--oneline'])).rejects.toThrow();
+  });
+
+  it('does not mistake a real hook rejection for a no-op when a commit-msg hook echoes a message whose title carries a newline', async () => {
+    // The commit message is `docs(vault): {titulo}` with an LLM-chosen
+    // title over untrusted note content, so the title can embed a newline.
+    // A commit-msg hook that cats the message file (the common shape for
+    // conventional-commit linters) then emits `nothing to commit` at column
+    // 0 while genuinely rejecting the commit.
+    const hookPath = path.join(repoRoot, '.git', 'hooks', 'commit-msg');
+    await fs.writeFile(hookPath, '#!/bin/sh\ncat "$1" >&2\nexit 1\n', 'utf8');
+    await fs.chmod(hookPath, 0o755);
+
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+    const message = 'docs(vault): Guia\nnothing to commit\n';
+    const result = await commitFiles(repoRoot, [absPath], message);
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toBe('nada a commitar: arquivos sem alteração');
+    expect(result.warning).toContain('falha ao commitar');
+
+    await expect(git(repoRoot, ['log', '--oneline'])).rejects.toThrow();
+  });
+
+  it('treats "nothing added to commit but untracked files present" as a benign no-op', async () => {
+    // A vault holding any untracked file -- a draft, `.obsidian/workspace.json`
+    // -- makes git print this fifth wording instead of "nothing to commit"
+    // when the declared paths are unchanged. That is the normal state of a
+    // real vault, and it is a benign no-op, not `falha ao commitar`.
+    const targetPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(targetPath, '# Nota\n', 'utf8');
+    const first = await commitFiles(repoRoot, [targetPath], 'docs(vault): Nota');
+    expect(first.committed).toBe(true);
+
+    await fs.mkdir(path.join(repoRoot, '.obsidian'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, '.obsidian', 'workspace.json'), '{}\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [targetPath], 'docs(vault): Nota de novo');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toContain('falha ao commitar');
+
+    const log = await git(repoRoot, ['log', '--oneline']);
+    expect(log.split('\n')).toHaveLength(1);
+    // The untracked file stayed untracked: the no-op check never staged it.
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toContain('?? .obsidian/');
+  });
+
+  it('asks whether anything is staged with literal pathspecs, so a glob-like target is not answered for by a sibling', async () => {
+    // The staged-check must ask exactly the question the commit will ask.
+    // Target `target*.md` is committed and unchanged; the sibling
+    // `targetX.md`, which a glob expansion would match, has a staged
+    // change the tool was never told about. Without --literal-pathspecs on
+    // the check, the sibling answers "yes, something is staged", the commit
+    // is attempted, and its own literal pathspec finds nothing -- turning a
+    // benign no-op into `falha ao commitar`.
+    const globLikePath = path.join(repoRoot, 'target*.md');
+    await fs.writeFile(globLikePath, '# Target\n', 'utf8');
+    const siblingPath = path.join(repoRoot, 'targetX.md');
+    await fs.writeFile(siblingPath, '# Irmao\n', 'utf8');
+    await git(repoRoot, ['--literal-pathspecs', 'add', '--', globLikePath, siblingPath]);
+    await git(repoRoot, ['commit', '-m', 'chore: seed']);
+
+    await fs.writeFile(siblingPath, '# Irmao modificado\n', 'utf8');
+    await git(repoRoot, ['--literal-pathspecs', 'add', '--', siblingPath]);
+
+    const result = await commitFiles(repoRoot, [globLikePath], 'docs(vault): Target');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toContain('falha ao commitar');
+
+    const log = await git(repoRoot, ['log', '--oneline']);
+    expect(log.split('\n')).toHaveLength(1);
+    const status = await git(repoRoot, ['status', '--porcelain']);
+    expect(status).toBe('M  targetX.md');
   });
 });
