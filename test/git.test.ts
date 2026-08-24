@@ -290,4 +290,66 @@ describe('commitFiles', () => {
       await fs.rm(nadaRepoRoot, { recursive: true, force: true });
     }
   });
+
+  it('does not mistake a real commit failure for "nothing to commit" just because the target file is named "nada-para-commit.md"', async () => {
+    // Many real-world pre-commit hooks echo which file(s) they rejected as
+    // their very first line of diagnostics (e.g. a linter listing the
+    // failing paths). If the target file itself is named e.g.
+    // `nada-para-commit.md` -- plausible here, since the filename comes from
+    // `slug(titulo)` and the title is LLM-chosen from untrusted note content
+    // -- a loose `nada.*commit` check matches that filename directly (`nada`
+    // ... `commit` inside `nada-para-commit.md`), even though it leads the
+    // line -- so anchoring to line-start alone cannot save it. Only dropping
+    // the loose alternative does. This must be reported as a genuine
+    // failure.
+    const hookPath = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
+    await fs.writeFile(
+      hookPath,
+      '#!/bin/sh\ngit diff --cached --name-only >&2\necho "rejeitado pela politica do vault" >&2\nexit 1\n',
+      'utf8'
+    );
+    await fs.chmod(hookPath, 0o755);
+
+    const absPath = path.join(repoRoot, 'nada-para-commit.md');
+    await fs.writeFile(absPath, '# Nada para commit\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toBe('nada a commitar: arquivos sem alteração');
+    expect(result.warning).toContain('falha ao commitar');
+    expect(result.warning).toContain('nada-para-commit.md');
+    expect(result.warning).toContain('rejeitado pela politica do vault');
+
+    await expect(git(repoRoot, ['log', '--oneline'])).rejects.toThrow();
+  });
+
+  it('does not mistake a real commit failure for "nothing to commit" when a hook\'s stderr contains that phrase mid-sentence', async () => {
+    // Git always prints "no changes added to commit" as its own line. A
+    // hook can print the same words buried inside an unrelated sentence
+    // (e.g. as part of its own policy message) while genuinely rejecting
+    // the commit. Unanchored matching lets that masquerade as the benign
+    // no-op; anchored-to-line-start matching must not.
+    const hookPath = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
+    await fs.writeFile(
+      hookPath,
+      '#!/bin/sh\necho "politica do vault: no changes added to commit sem revisao" >&2\nexit 1\n',
+      'utf8'
+    );
+    await fs.chmod(hookPath, 0o755);
+
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota');
+
+    expect(result.committed).toBe(false);
+    expect(result.warning).toBeTruthy();
+    expect(result.warning).not.toBe('nada a commitar: arquivos sem alteração');
+    expect(result.warning).toContain('falha ao commitar');
+    expect(result.warning).toContain('politica do vault: no changes added to commit sem revisao');
+
+    await expect(git(repoRoot, ['log', '--oneline'])).rejects.toThrow();
+  });
 });

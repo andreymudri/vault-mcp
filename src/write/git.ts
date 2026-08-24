@@ -53,8 +53,16 @@ export async function commitFiles(
     ]);
   } catch (err) {
     const streams = errorStreams(err);
+    // Anchored to the start of a line (multiline) and restricted to the four
+    // specific wordings git actually prints for this case. A loose
+    // `nada.*commit`-style alternative, or leaving these unanchored, lets the
+    // phrase match mid-sentence inside a hook's own stderr, or inside a
+    // committed filename that echoes back through a hook's diagnostics (e.g.
+    // `nada-para-commit.md`) -- both attacker-influenceable, since the
+    // filename comes from an LLM-chosen title over untrusted note content.
+    // Git always prints these as their own line, never buried in one.
     if (
-      /nothing to commit|nada a submeter|nada.*commit|no changes added to commit|nenhuma alteração adicionada ao commit/i.test(
+      /^(nothing to commit|nada a submeter|no changes added to commit|nenhuma alteração adicionada ao commit)/im.test(
         streams
       )
     ) {
