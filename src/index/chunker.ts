@@ -1,7 +1,54 @@
 import type { Chunk } from '../types.js';
 
-const FENCE_RE = /^\s*(```|~~~)/;
+// CommonMark fenced code block rule (matches src/vault/links.ts): the opening
+// fence may be indented at most 3 spaces, and needs 3-or-more backticks or
+// tildes. Deeper indentation (4+ spaces) is an indented code block, not a
+// fence, and must not toggle fence state.
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
 const HEADING_RE = /^(#{2,3})\s+(.*)$/;
+
+/**
+ * Tracks the state of a fenced code block across a sequence of lines: which
+ * delimiter character opened it (if any) and how long the opening run was.
+ * `char === null` means "not currently inside a fence".
+ */
+interface FenceTracker {
+  char: string | null;
+  length: number;
+}
+
+/**
+ * Feeds one line into a fence tracker, mutating it in place when the line
+ * opens or closes a fence per the CommonMark rule:
+ *  - opening: 0-3 leading spaces, then 3+ of the same delimiter char
+ *    (backtick or tilde); an info string after it is allowed.
+ *  - closing: same delimiter char as the opener, a run at least as long,
+ *    and nothing but whitespace after it (no info string).
+ * A line that merely looks fence-like (e.g. a shorter run, the wrong
+ * character, or a trailing info string) while already inside a fence does
+ * not close it — it is just content.
+ */
+function feedFenceTracker(line: string, tracker: FenceTracker): void {
+  const match = FENCE_RE.exec(line);
+  if (!match) {
+    return;
+  }
+  const marker = match[1] ?? '';
+  const info = (match[2] ?? '').trim();
+  const char = marker[0] ?? '';
+  const length = marker.length;
+
+  if (tracker.char === null) {
+    tracker.char = char;
+    tracker.length = length;
+    return;
+  }
+
+  if (char === tracker.char && length >= tracker.length && info === '') {
+    tracker.char = null;
+    tracker.length = 0;
+  }
+}
 
 /**
  * Divide o corpo de uma nota em chunks delimitados por headings `##`/`###`,
@@ -28,7 +75,7 @@ export function chunkNote(
   const realLineCount = body.endsWith('\n') ? lines.length - 1 : lines.length;
   const chunks: Chunk[] = [];
 
-  let inFence = false;
+  const fence: FenceTracker = { char: null, length: 0 };
   let headingPath: string[] = [];
   let currentLines: string[] = [];
   let currentStartLine = bodyStartLine;
@@ -54,11 +101,9 @@ export function chunkNote(
     const line = lines[i] ?? '';
     const originalLine = bodyStartLine + i;
 
-    if (FENCE_RE.test(line)) {
-      inFence = !inFence;
-    }
+    feedFenceTracker(line, fence);
 
-    if (!inFence) {
+    if (fence.char === null) {
       const match = HEADING_RE.exec(line);
       if (match) {
         // Close the chunk that was accumulating before this heading.
@@ -99,15 +144,15 @@ export function splitFields(text: string): { prose: string; code: string } {
   const prose: string[] = [];
   const code: string[] = [];
 
-  let inFence = false;
+  const fence: FenceTracker = { char: null, length: 0 };
   for (const line of lines) {
-    const isFenceMarker = FENCE_RE.test(line);
-    if (isFenceMarker) {
-      inFence = !inFence;
-      code.push(line);
-      continue;
-    }
-    if (inFence) {
+    const wasInFence = fence.char !== null;
+    feedFenceTracker(line, fence);
+    const isInFence = fence.char !== null;
+
+    if (wasInFence || isInFence) {
+      // The fence delimiter line itself (open or close) is code, and so is
+      // everything between them.
       code.push(line);
     } else {
       prose.push(line);

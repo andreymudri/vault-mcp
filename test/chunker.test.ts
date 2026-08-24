@@ -268,4 +268,74 @@ describe('splitFields', () => {
     expect(prose).not.toContain("import { Worker, Queue, Job } from 'bullmq';");
     expect(prose).toContain('Depois da cerca');
   });
+
+  // As quatro provas abaixo travam a regra CommonMark que src/vault/links.ts
+  // já seguia (`/^ {0,3}(`{3,}|~{3,})/`): indentação de até 3 espaços abre
+  // cerca, 4+ é bloco indentado comum; e o fechamento exige o mesmo
+  // caractere, um comprimento >= o de abertura, e nenhuma info string.
+
+  it('``` indentado com 4 espaços NÃO é tratado como cerca', () => {
+    const text = ['Prosa antes.', '    ```', 'Prosa depois.'].join('\n');
+
+    const { prose, code } = splitFields(text);
+
+    // Se a linha indentada abrisse (erradamente) uma cerca, tudo depois dela
+    // — sem um fechamento real — cairia em `code`.
+    expect(code).toBe('');
+    expect(prose).toContain('    ```');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('``` indentado com 3 espaços É tratado como cerca', () => {
+    const text = ['Prosa antes.', '   ```', 'codigo aqui', '   ```', 'Prosa depois.'].join('\n');
+
+    const { prose, code } = splitFields(text);
+
+    expect(code).toContain('codigo aqui');
+    expect(prose).not.toContain('codigo aqui');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('cerca de 4 crases não é fechada por apenas 3', () => {
+    const text = [
+      'Prosa antes.',
+      '````',
+      'conteudo linha 1',
+      '```',
+      'conteudo linha 2',
+      '````',
+      'Prosa depois.',
+    ].join('\n');
+
+    const { prose, code } = splitFields(text);
+
+    // A linha de 3 crases no meio não fecha a cerca de 4: continua dentro
+    // do bloco, junto com o conteúdo em volta dela.
+    expect(code).toContain('conteudo linha 1');
+    expect(code).toContain('conteudo linha 2');
+    expect(code).toContain('```');
+    expect(prose).not.toContain('conteudo linha 1');
+    expect(prose).not.toContain('conteudo linha 2');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
+
+  it('cerca de crases não é fechada por til', () => {
+    const text = ['Prosa antes.', '```', 'conteudo', '~~~', 'mais conteudo', '```', 'Prosa depois.'].join(
+      '\n',
+    );
+
+    const { prose, code } = splitFields(text);
+
+    // `~~~` não fecha uma cerca aberta com crase: permanece dentro do
+    // bloco como conteúdo comum, e só o `` ``` `` seguinte fecha a cerca.
+    expect(code).toContain('conteudo');
+    expect(code).toContain('~~~');
+    expect(code).toContain('mais conteudo');
+    expect(prose).not.toContain('conteudo');
+    expect(prose).not.toContain('mais conteudo');
+    expect(prose).toContain('Prosa antes.');
+    expect(prose).toContain('Prosa depois.');
+  });
 });
