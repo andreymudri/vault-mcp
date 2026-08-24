@@ -3,8 +3,25 @@
  * owns the vault index (`allPaths`, `byBasename`) and passes it in.
  */
 
-/** `[[target]]`, `[[target#anchor]]`, `[[target|alias]]`, `[[target#anchor|alias]]`. */
-const WIKI_LINK = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
+/**
+ * `[[target]]`, `[[target#anchor]]`, `[[target|alias]]`, `[[target#anchor|alias]]`.
+ *
+ * Every class excludes `\n` and `[` deliberately, and both exclusions are load-bearing against
+ * quadratic backtracking on hostile input — note bodies include web pages clipped into
+ * `01-raw/clippings/`, so this parses untrusted text.
+ *
+ * A class that admits `[` lets `[^\]|#]+` run to end-of-file from *every* `[[` in a body that
+ * happens to contain no `]`, `|` or `#`, then backtrack the whole way looking for `]]`: O(n)
+ * work at O(n) start positions. Measured on `"[[a".repeat(n)`: 60KB 1.2s, 120KB 4.7s, 240KB
+ * 18.7s — a clean 4x per doubling, repeated on every cold start. Excluding `\n` alone does NOT
+ * fix that payload (it holds no newlines; measured 23.4s); excluding `[` is what collapses it
+ * to O(n), and 240KB then parses in ~2ms. Excluding `\n` bounds the same blow-up to a single
+ * line for the multi-line documents real clippings produce.
+ *
+ * Both are honest restrictions on the syntax: a wiki-link never spans lines, and neither a
+ * target, an anchor, nor an alias can contain `[`.
+ */
+const WIKI_LINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 
 /** A ``` or ~~~ fence line, with its optional info string. */
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;

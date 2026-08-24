@@ -104,6 +104,69 @@ describe('parseFile — frontmatter válido', () => {
   });
 });
 
+// O vault indexa páginas clipadas da web em 01-raw/clippings/, então frontmatter é entrada não
+// confiável. O js-yaml resolve alias por referência sem limite de profundidade, e
+// `Array.prototype.join` detecta ciclo mas não memoiza DAG, então cada nível multiplica o texto:
+// 269 bytes de frontmatter viravam 9.565.929 caracteres retidos em `fm.tags`. Um nível a mais
+// lança RangeError, que o `try` do parseFile engole — virando exaustão de memória silenciosa.
+describe('parseFile — bomba de alias YAML no tags', () => {
+  /** Payload "billion laughs": cada nível referencia 9x o anterior. */
+  const ALIAS_BOMB = [
+    '---',
+    'a: &a ["x","x","x","x","x","x","x","x","x"]',
+    'b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a]',
+    'c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b]',
+    'd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c]',
+    'e: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d]',
+    'f: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e]',
+    'tags: [*f,*f,*f,*f,*f,*f,*f,*f,*f]',
+    '---',
+    '',
+    'corpo',
+    '',
+  ].join('\n');
+
+  it('termina rápido e com tags limitadas, sem expandir os alias', () => {
+    const started = Date.now();
+    const parsed = parseFile('01-raw/clippings/bomba.md', ALIAS_BOMB);
+    const elapsed = Date.now() - started;
+
+    const tags = parsed.frontmatter.tags ?? [];
+    const totalChars = tags.reduce((sum, tag) => sum + tag.length, 0);
+
+    // Sem o guard, totalChars é 9.565.929. É esta asserção que pega a regressão; o tempo é um
+    // cinto de segurança para o caso de um payload mais fundo.
+    expect(totalChars).toBeLessThanOrEqual(8192);
+    expect(tags.length).toBeLessThanOrEqual(64);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('descarta um array aninhado em vez de convertê-lo com String()', () => {
+    const parsed = parseFile('nested.md', '---\ntags:\n  - ok\n  - [a, b]\n  - {k: v}\n---\n\nc\n');
+
+    // `String(['a','b'])` daria 'a,b' e `String({k:'v'})` daria '[object Object]': um array
+    // aninhado não é uma tag, então é rejeitado.
+    expect(parsed.frontmatter.tags).toEqual(['ok']);
+  });
+
+  it('limita a quantidade de tags de uma lista plana enorme', () => {
+    const many = Array.from({ length: 5000 }, (_, i) => `t${i}`).join(', ');
+    const parsed = parseFile('muitas.md', `---\ntags: ${many}\n---\n\ncorpo\n`);
+
+    const tags = parsed.frontmatter.tags ?? [];
+    expect(tags.length).toBeLessThanOrEqual(64);
+    expect(tags[0]).toBe('t0');
+  });
+
+  it('trunca uma tag absurdamente longa em vez de guardá-la inteira', () => {
+    const parsed = parseFile('longa.md', `---\ntags:\n  - ${'z'.repeat(100_000)}\n---\n\ncorpo\n`);
+
+    const tags = parsed.frontmatter.tags ?? [];
+    expect(tags).toHaveLength(1);
+    expect(tags[0]?.length).toBe(128);
+  });
+});
+
 describe('parseFile — arquivo sem frontmatter', () => {
   it('devolve frontmatter sem chaves de dados e corpo intacto', () => {
     const raw = readFixture('01-raw/inbox/rascunho.md');
@@ -144,6 +207,28 @@ describe('parseFile — frontmatter malformado', () => {
   // gray-matter memoiza por conteúdo quando chamado sem objeto de opções: a primeira chamada
   // lança e a segunda devolve o resultado cacheado, sem diagnostic e com o frontmatter cru
   // ainda dentro do corpo. O reindex incremental reparsa o mesmo arquivo várias vezes.
+  // `raw.indexOf('\n', end + 1)` devolve -1 quando o `---` de fechamento é o último byte do
+  // arquivo, e `raw.slice(-1 + 1)` é `raw.slice(0)`: o bloco inteiro vaza para o corpo indexado.
+  // O fixture quebrada.md termina com newline, então não cobre este caso.
+  it('não vaza o bloco quando o --- de fechamento é o último byte, sem newline final', () => {
+    const raw = '---\ntipo: wiki\ntags:\n\t- a\ncriado\n---';
+
+    const parsed = parseFile('sem-newline.md', raw);
+
+    expect(parsed.diagnostic).toBeDefined();
+    expect(parsed.body).not.toBe(raw);
+    expect(parsed.body).not.toContain('tipo: wiki');
+    expect(parsed.body).not.toContain('criado');
+    expect(parsed.body).toBe('');
+  });
+
+  it('preserva o corpo quando há conteúdo após o --- de fechamento sem newline final', () => {
+    const parsed = parseFile('corpo.md', '---\ntipo: wiki\ncriado\n---\ncorpopreservado');
+
+    expect(parsed.body).toBe('corpopreservado');
+    expect(parsed.body).not.toContain('tipo: wiki');
+  });
+
   it('produz o mesmo diagnostic ao parsear o mesmo conteúdo duas vezes seguidas', () => {
     const raw = readFixture('quebrada.md');
 

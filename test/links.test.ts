@@ -67,6 +67,41 @@ describe('extractLinkTargets', () => {
   });
 });
 
+// Corpos de nota incluem páginas clipadas da web, então são entrada não confiável. Com `[`
+// aceito pela classe de caracteres, `[^\]|#]+` corria até o fim do arquivo a partir de CADA
+// `[[` e voltava atrás procurando `]]`: O(n) de trabalho em O(n) posições. Medido com
+// `'[[a'.repeat(n)`: 60KB 1,2s, 120KB 4,7s, 240KB 18,7s — 4x limpo por duplicação.
+describe('extractLinkTargets — entrada patológica', () => {
+  it('processa 240KB de "[[a" repetido em bem menos de um segundo', () => {
+    const body = '[[a'.repeat(80_000);
+    expect(body.length).toBe(240_000);
+
+    const started = Date.now();
+    const targets = extractLinkTargets(body);
+    const elapsed = Date.now() - started;
+
+    expect(targets).toEqual([]);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  // Mesma forma pelo lado do alias: sem excluir `[`, a classe do alias corre até o fim do arquivo.
+  it('processa 240KB de "[[a|" repetido em bem menos de um segundo', () => {
+    const body = '[[a|'.repeat(60_000);
+
+    const started = Date.now();
+    const targets = extractLinkTargets(body);
+    const elapsed = Date.now() - started;
+
+    expect(targets).toEqual([]);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it('não deixa um alvo atravessar quebra de linha', () => {
+    expect(extractLinkTargets('[[a\nb]]')).toEqual([]);
+    expect(extractLinkTargets('[[a]]\n[[b]]')).toEqual(['a', 'b']);
+  });
+});
+
 describe('resolveLinks — fixture', () => {
   it('resolve [[bullmq-worker]] para 02-wiki/nestjs/bullmq-worker.md', () => {
     const { links, brokenLinks } = linksOf('02-wiki/nestjs/nestjs-moc.md');
