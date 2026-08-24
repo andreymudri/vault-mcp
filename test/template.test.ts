@@ -491,31 +491,70 @@ describe('ensureFrontmatter — parsing sem o cache global do gray-matter', () =
   });
 });
 
-// O tamanho da entrada aqui é escolhido, não arbitrário. O regex ingênuo
-// `/<%\s*(.+?)\s*%>/g` é CÚBICO nesta forma de entrada — medido: 2.000 chars
-// 1.987ms, 4.000 chars 16.015ms, 8.000 chars 128.612ms, ×8 a cada dobra. Com os
-// 245.760 chars que este teste usava, uma regressão levaria ~43 DIAS, e como
-// `String.replace` bloqueia a thread o timeout do vitest não pode dispará-lo:
-// o resultado era a suíte TRAVADA, não vermelha. Com 4.000 chars o caso quebrado
-// termina em ~16s (vermelho e legível) e o correto em ~0,1ms — a distância
-// continua decisiva e, o que importa, o teste TERMINA.
+/**
+ * O tempo ABSOLUTO num único tamanho não é um guarda de complexidade, e a
+ * versão anterior deste teste provou isso ao contrário: pedia < 2000ms sobre
+ * 4.000 chars, e a forma QUADRÁTICA `/<%((?:[^%\n]|%(?!>))*)%>/g` — uma
+ * "simplificação" plausível do `TOKEN_RE`, que perde só o `<(?!%)` — passava
+ * com 370× de folga. O orçamento absoluto pegava apenas o caso ingênuo e
+ * escondia exatamente a regressão mais provável.
+ *
+ * O protocolo aqui mede COMPLEXIDADE em vez de velocidade: em cada tamanho `n`
+ * o teste executa `TOTAL/n` repetições, então TODAS as medições varrem o mesmo
+ * número total de caracteres. Uma implementação linear gasta o mesmo tempo nas
+ * quatro; uma quadrática gasta tempo ∝ n, dobrando a cada tamanho. A asserção
+ * é a RAZÃO entre o maior e o menor tamanho, que é adimensional — independe da
+ * velocidade da máquina, do JIT e da carga, coisas que um limite em ms não
+ * consegue evitar.
+ *
+ * Medido nesta máquina (mínimo de 3 execuções, `TOTAL` = 96.000 chars):
+ *   linear      4k:0,41ms  8k:0,41ms  16k:0,41ms  32k:0,40ms  → razão ~1,0
+ *   quadrático  4k:244ms   8k:511ms   16k:1012ms  32k:1971ms  → razão ~8,0
+ *   ingênuo     4k:427ms   8k:840ms   16k:1754ms  32k:3479ms  → razão ~7,9
+ * O caminho VERDE custa ~5ms no total; o vermelho termina em ~11s, bem dentro
+ * do timeout — uma regressão FALHA na asserção em vez de travar a suíte.
+ */
 describe('applyTemplate — custo do TOKEN_RE', () => {
-  it('termina em tempo linear sobre entrada adversarial', () => {
-    const ctx = { title: 'x', now: localDate(2026, 8, 24) };
-    const inputs = ['<%'.padEnd(4000, ' '), '<% '.repeat(4000 / 4)];
+  const TOTAL = 96_000;
+  const SIZES = [4_000, 8_000, 16_000, 32_000];
+  /** Linear mede ~1,0; quadrático ~8,0. 3 dá 3× de folga dos dois lados. */
+  const MAX_RATIO = 3;
 
-    const started = performance.now();
-    for (const input of inputs) {
+  /** Muitos `<%` e nenhum `%>`: a forma que força o rescan até o fim. */
+  const adversarial = (n: number): string => '<% '.repeat(Math.floor(n / 3));
+
+  it('cresce LINEARMENTE, não só "rápido o bastante", sobre entrada adversarial', () => {
+    const ctx = { title: 'x', now: localDate(2026, 8, 24) };
+    const run = (input: string): void => {
       try {
         applyTemplate(input, ctx);
       } catch {
-        // Um token não suportado é resposta legítima; o que se mede é o tempo.
+        // Um token não resolvido é resposta legítima; o que se mede é o custo.
       }
-    }
-    expect(performance.now() - started).toBeLessThan(2000);
-    // O timeout é folgado de propósito: ele existe para que uma regressão
-    // cúbica termine e FALHE na asserção acima, em vez de estourar o timeout.
-  }, 60000);
+    };
+
+    const times = SIZES.map((n) => {
+      const input = adversarial(n);
+      const reps = Math.round(TOTAL / n);
+      run(input); // aquece o JIT fora da medição
+      let best = Infinity;
+      // O MÍNIMO de várias tentativas, não a média: ruído só ADICIONA tempo, e
+      // o mínimo é o estimador robusto do custo real.
+      for (let trial = 0; trial < 3; trial += 1) {
+        const t0 = performance.now();
+        for (let i = 0; i < reps; i += 1) run(input);
+        best = Math.min(best, performance.now() - t0);
+      }
+      return best;
+    });
+
+    const ratio = times[times.length - 1]! / times[0]!;
+    expect(
+      ratio,
+      `trabalho total constante deveria custar o mesmo em todo tamanho; medido ` +
+        `${SIZES.map((n, i) => `${n}:${times[i]!.toFixed(2)}ms`).join(' ')}`,
+    ).toBeLessThan(MAX_RATIO);
+  }, 60_000);
 });
 
 // `ensureFrontmatter` só é idempotente se reconhecer a chave existente em
@@ -656,8 +695,13 @@ describe('applyTemplate — a varredura residual olha a ENTRADA, não a saída',
   // `tp.date.now` só existe se estiver LITERALMENTE dentro do token na entrada
   // — o `formatLocal` apenas substitui, nunca inventa `<%`. O que o teste pedia
   // de fato era que o `TOKEN_RE` atravessasse um `<%` ANINHADO, exatamente o que
-  // ele proíbe (`<(?!%)`) para manter o custo linear; atendê-lo seria devolver a
-  // explosão quadrática de 65s em 240KB. O contrato defensável é o oposto: essa
+  // ele proíbe (`<(?!%)`) para manter o custo linear. Atendê-lo devolve a forma
+  // QUADRÁTICA — `/<%((?:[^%\n]|%(?!>))*)%>/g`, o `TOKEN_RE` sem o `<(?!%)` —
+  // que é o que o guarda de custo mede: 10,8ms em 4KB, 712ms em 32KB, ~20s em
+  // 240KB. Não é o número que este comentário já citou (65s): quem custa isso é
+  // a forma ingênua `/<%\s*(.+?)\s*%>/g`, e a diferença importa porque o
+  // quadrático é barato o bastante para atravessar um orçamento absoluto sem
+  // ser notado. O contrato defensável é o oposto de atender o pedido: essa
   // forma é RECUSADA em voz alta, nunca emitida em silêncio.
   // A recusa chega pelo caminho da expressão não suportada, não pela varredura
   // residual: o `TOKEN_RE` casa primeiro o `<%` INTERNO, cuja expressão
@@ -707,5 +751,164 @@ describe('ensureFrontmatter — chaves que o YAML resolveria como não-string', 
     expect(out).toContain('\nv1.0: x\n');
     expect(out).toContain('\na.b: y\n');
     expect(out).toContain('\n1.5: z\n');
+  });
+});
+
+// `topLevelKeyIndex` lia cada linha ISOLADA, e uma linha do bloco não carrega
+// sozinha a informação de se o PARSER a lê como uma entrada de topo. Uma
+// continuação de escalar multi-linha ou de coleção em fluxo pode começar na
+// coluna 0 e ter a forma exata de `chave: valor` — e a leitura isolada casava
+// com ela, SOBRESCREVENDO a continuação. O destino é sempre o mesmo lugar
+// destrutivo: aspa não terminada / coleção sem fechar, o `parseBlock` da
+// passada seguinte morre, o `splitFrontmatter` devolve undefined e o bloco
+// ORIGINAL do usuário é rebaixado para dentro do CORPO da nota.
+describe('ensureFrontmatter — continuação na coluna 0 não é chave de topo', () => {
+  const CASES: Array<{ nome: string; entrada: string }> = [
+    {
+      nome: 'escalar entre aspas DUPLAS dobrado em duas linhas',
+      entrada: '---\ntitulo: "resumo do artigo\ntipo: nota"\ncriado: 2026-01-01\n---\ncorpo\n',
+    },
+    {
+      nome: 'escalar entre aspas SIMPLES dobrado em duas linhas',
+      entrada: "---\ntitulo: 'resumo do artigo\ntipo: nota'\ncriado: 2026-01-01\n---\ncorpo\n",
+    },
+    {
+      nome: 'mapeamento em fluxo aberto em duas linhas',
+      entrada: '---\nmeta: {a: 1,\ntipo: 2}\ncriado: 2026-01-01\n---\ncorpo\n',
+    },
+    {
+      nome: 'sequência em fluxo aberta em duas linhas',
+      entrada: '---\nlista: [a,\ntipo: b]\ncriado: 2026-01-01\n---\ncorpo\n',
+    },
+  ];
+
+  for (const { nome, entrada } of CASES) {
+    it(`preserva a ${nome}`, () => {
+      const antes = matter(entrada, {}).data as Record<string, unknown>;
+      const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+
+      // O bloco continua parseável — a condição que o modo de falha destrói.
+      const depois = matter(out, {}).data as Record<string, unknown>;
+      expect(depois.tipo).toBe('wiki');
+      // E toda chave que o usuário tinha continua com o MESMO valor.
+      for (const [k, v] of Object.entries(antes)) {
+        if (k === 'tipo') continue;
+        expect(JSON.stringify(depois[k]), k).toBe(JSON.stringify(v));
+      }
+      // Idempotente: sem isso a passada seguinte é a que rebaixa o bloco.
+      expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+    });
+  }
+
+  // O caso que um cheque "a chave está no `data`?" sozinho NÃO cobre: `tipo`
+  // EXISTE no mapeamento (vazia) e há uma linha de continuação anterior com a
+  // forma `tipo: …`. Sem rastrear a estrutura, a substituição acerta a
+  // continuação em vez da entrada real.
+  it('substitui a entrada REAL, não a continuação de mesma forma acima dela', () => {
+    const entrada = '---\ntitulo: "resumo\ntipo: nota"\ntipo:\n---\ncorpo\n';
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+    const depois = matter(out, {}).data as Record<string, unknown>;
+    expect(depois.tipo).toBe('wiki');
+    expect(depois.titulo).toBe('resumo tipo: nota');
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+  });
+});
+
+// A direção oposta do mesmo erro: uma grafia de chave que o módulo não LÊ era
+// tratada como "não existe", e o preenchimento APENDAVA uma segunda `tipo:`.
+// A duplicata não é o dano — o js-yaml RECUSA um mapeamento com chave
+// duplicada, e a passada seguinte rebaixa o bloco do usuário para o corpo.
+// O contrato é: preencher quando a edição VERIFICA contra o parser, e não
+// tocar em nada quando não verifica. Nunca corromper.
+describe('ensureFrontmatter — grafias exóticas de chave nunca duplicam', () => {
+  const CASES: Array<{ nome: string; entrada: string; preenche: boolean }> = [
+    {
+      nome: 'chave entre aspas duplas com escape só-YAML (`"\\x74ipo"` = `tipo`)',
+      entrada: '---\n"\\x74ipo":\ncriado: 2026-01-01\n---\ncorpo\n',
+      preenche: true,
+    },
+    {
+      nome: 'chave explícita (`? tipo` em linha própria)',
+      entrada: '---\n? tipo\n:\ncriado: 2026-01-01\n---\ncorpo\n',
+      preenche: false,
+    },
+  ];
+
+  for (const { nome, entrada, preenche } of CASES) {
+    it(`não duplica com ${nome}`, () => {
+      const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+
+      // O invariante que importa: o bloco continua parseável, SEMPRE.
+      const depois = matter(out, {}).data as Record<string, unknown>;
+      expect(depois.criado).toBeInstanceOf(Date);
+      expect(Object.prototype.hasOwnProperty.call(depois, 'tipo')).toBe(true);
+
+      if (preenche) expect(depois.tipo).toBe('wiki');
+      // Recusar é resposta legítima: devolve o conteúdo intacto.
+      else expect(out).toBe(entrada);
+
+      expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+    });
+  }
+
+  // Uma linha de grafia ILEGÍVEL é tentada às cegas — o módulo não sabe qual
+  // chave ela declara, e quem decide é o parser. O cheque que faz essa tentativa
+  // ser segura é o do CONJUNTO de chaves: substituir `"\x63riado":` por
+  // `tipo: wiki` produz um bloco perfeitamente parseável cuja única diferença é
+  // que a chave `criado` do usuário DESAPARECEU. Sem comparar os conjuntos, a
+  // edição passa e a nota perde uma chave em silêncio.
+  it('não apaga uma chave de grafia ilegível ao preencher outra', () => {
+    const entrada = '---\n"\\x63riado": 2026-01-01\n---\ncorpo\n';
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+    const depois = matter(out, {}).data as Record<string, unknown>;
+
+    expect(depois.tipo).toBe('wiki');
+    expect(depois.criado).toBeInstanceOf(Date);
+    expect(out).toContain('"\\x63riado": 2026-01-01');
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+  });
+
+  // O rastreamento de estrutura não é redundante com a verificação, e este é o
+  // caso que separa os dois. A verificação REJEITA uma edição ruim, mas cada
+  // rejeição consome uma das tentativas do orçamento `MAX_OPAQUE_CANDIDATES` —
+  // que existe porque tentar toda linha ilegível é O(linhas²). Sem o scanner,
+  // TODA linha de continuação vira candidata ilegível, o orçamento se esgota nas
+  // continuações e a linha que realmente declara a chave nunca é tentada: a
+  // chave fica por preencher para sempre. Um `resumo` dobrado em muitas linhas é
+  // conteúdo comum numa nota clipada, não um caso construído.
+  const CONTINUACOES: Array<{ nome: string; bloco: string }> = [
+    {
+      nome: 'escalar multi-linha entre aspas',
+      bloco: `resumo: "linha 1\n${Array.from({ length: 12 }, (_, i) => `linha ${i + 2}`).join('\n')}\nfim"`,
+    },
+    {
+      nome: 'coleção em fluxo aberta',
+      bloco: `lista: [a1,\n${Array.from({ length: 12 }, (_, i) => `a${i + 2},`).join('\n')}\nfim]`,
+    },
+  ];
+
+  for (const { nome, bloco } of CONTINUACOES) {
+    it(`alcança a chave real além de uma ${nome} longa`, () => {
+      const entrada = `---\n${bloco}\n"\\x74ipo":\n---\ncorpo\n`;
+      const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+      const depois = matter(out, {}).data as Record<string, unknown>;
+
+      expect(depois.tipo).toBe('wiki');
+      // E sem duplicar: uma segunda `tipo:` faria o js-yaml recusar o bloco.
+      expect(out.match(/^tipo: wiki$/gm) ?? []).toHaveLength(1);
+      expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+    });
+  }
+
+  // Um bloco cujo topo é uma SEQUÊNCIA não é frontmatter: `Object.keys` de um
+  // array tem comprimento > 0, então o cheque de "mapeamento não vazio" o
+  // aceitava e o preenchimento apendava `tipo:` DENTRO da sequência — YAML
+  // inválido. O conteúdo do usuário é preservado como CORPO, nunca apagado.
+  it('não trata uma sequência de topo como frontmatter', () => {
+    const entrada = '---\n- a\n- b\n---\ncorpo\n';
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+    expect(out).toBe('---\ntipo: wiki\n---\n\n---\n- a\n- b\n---\ncorpo\n');
+    expect(matter(out, {}).data).toEqual({ tipo: 'wiki' });
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
   });
 });

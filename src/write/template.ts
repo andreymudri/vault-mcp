@@ -22,11 +22,20 @@ export interface TemplateContext {
  * Deliberately NOT the obvious `<%\s*(.+?)\s*%>`. That form is ambiguous twice
  * over — `\s*` and `.+?` compete for the same characters, and `.` swallows a
  * nested `<%` — so on text carrying many `<%` and no `%>` the engine rescans to
- * the end of the input from every one of them: quadratic, 65s on 240KB. This
- * form is a deterministic loop instead. Each alternative consumes exactly one
- * character and they are disjoint on that character, so at every position at
- * most one can apply, and the loop stops dead at a nested `<%` (`<(?!%)`) — the
- * bound that keeps each start position O(token length) rather than O(input).
+ * the end of the input from every one of them: quadratic in the input, ~65s on
+ * 240KB. This form is a deterministic loop instead. Each alternative consumes
+ * exactly one character and they are disjoint on that character, so at every
+ * position at most one can apply, and the loop stops dead at a nested `<%`
+ * (`<(?!%)`) — the bound that keeps each start position O(token length) rather
+ * than O(input).
+ *
+ * `<(?!%)` is the load-bearing half, and it is the half a reader is most likely
+ * to "simplify" away. Dropping it leaves `<%((?:[^%\n]|%(?!>))*)%>`, which looks
+ * equivalent, still refuses multi-line tokens, and is still QUADRATIC: measured
+ * 10.8ms on 4KB, 712ms on 32KB, ~20s on 240KB. That is cheap enough to pass any
+ * absolute time budget while being the exact regression this regex exists to
+ * prevent, which is why the cost test in `test/template.test.ts` asserts on the
+ * growth RATIO across four sizes rather than on milliseconds at one.
  *
  * It matters because a template body is not always trusted: T13 may splice
  * model-supplied content into the skeleton before calling `applyTemplate`, so
@@ -335,7 +344,30 @@ interface SplitContent {
   data: Frontmatter;
 }
 
-function parseBlock(block: string[]): Frontmatter {
+/**
+ * A YAML mapping, as opposed to the other things a frontmatter block can parse
+ * to.
+ *
+ * The array case is not a nicety. `Object.keys(['a', 'b'])` is `['0', '1']`, so
+ * a block whose top level is a SEQUENCE sailed through the "parses to a
+ * non-empty mapping" check in `splitFrontmatter` — and the missing-key fill then
+ * appended `tipo: wiki` INSIDE the sequence, producing a block js-yaml refuses
+ * outright. Treating it as "not frontmatter" keeps the user's `---\n- a\n- b\n---`
+ * intact as body text with a real block prefixed above it, which is the same
+ * answer this module already gives a leading `---` that opens a horizontal rule.
+ */
+function isPlainMapping(value: unknown): value is Frontmatter {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The block as js-yaml reads it, or `undefined` when js-yaml REFUSES it.
+ *
+ * The two outcomes have to stay distinguishable — `{}` alone cannot mean both
+ * "empty block" and "the parser threw", because `verifiedEdit` asks exactly that
+ * question about a block it has just modified.
+ */
+function parseBlock(block: string[]): unknown {
   try {
     // The `{}` is load-bearing: called with no options at all, `gray-matter`
     // memoises every string it is handed in an unbounded process-global cache —
@@ -343,11 +375,9 @@ function parseBlock(block: string[]): Frontmatter {
     // and from then on returns the half-built `{data: {}, content: <raw>}` to
     // every caller in the process. The spec forbids that cache for T3 and it is
     // no more acceptable here.
-    const parsed = matter(`---\n${block.join('\n')}\n---\n`, {});
-    return parsed.data as Frontmatter;
+    return matter(`---\n${block.join('\n')}\n---\n`, {}).data;
   } catch {
-    // Malformed YAML: treat every required key as missing rather than crashing.
-    return {};
+    return undefined;
   }
 }
 
@@ -362,9 +392,10 @@ function parseBlock(block: string[]): Frontmatter {
  * `#` is a YAML comment, and the heading simply disappeared from the note.
  *
  * So the block must actually look like frontmatter: it parses to a non-empty
- * mapping, or it is entirely blank. Anything else — a heading, prose, an opener
- * with no closing delimiter at all — stays body text, untouched, and a fresh
- * block is prefixed above it. Deleting the user's content is never the answer.
+ * MAPPING, or it is entirely blank. Anything else — a heading, prose, a
+ * top-level sequence, an opener with no closing delimiter at all — stays body
+ * text, untouched, and a fresh block is prefixed above it. Deleting the user's
+ * content is never the answer.
  */
 function splitFrontmatter(content: string): SplitContent | undefined {
   const lines = content.split('\n');
@@ -375,6 +406,7 @@ function splitFrontmatter(content: string): SplitContent | undefined {
 
     const block = lines.slice(1, i);
     const data = parseBlock(block);
+    if (!isPlainMapping(data)) return undefined;
     const isBlank = block.every((line) => line.trim() === '');
     if (!isBlank && Object.keys(data).length === 0) return undefined;
 
@@ -384,29 +416,28 @@ function splitFrontmatter(content: string): SplitContent | undefined {
 }
 
 /**
- * The key a frontmatter LINE declares, or `undefined` when the line opens no
- * top-level entry at all (indented, a comment, a list item, an unterminated
- * quote, a continuation of the value above).
+ * The key a frontmatter line declares WHEN READ IN ISOLATION, or `undefined`
+ * when it cannot tell.
  *
- * It READS the spelling instead of guessing it, and that is the fix rather than
- * an embellishment. Matching only the two spellings this module happens to
- * EMIT — plain and double-quoted — leaves out the one YAML spelling it never
- * writes but users and other tools produce constantly: single quotes. A vault
- * note carrying `'tipo': ` went unrecognised, so the missing-key fill APPENDED a
- * second `tipo:` line. The duplicate is not the damage: js-yaml REFUSES a
- * mapping with a duplicated key, so `parseBlock` throws, `splitFrontmatter`
- * returns undefined, and the next pass prefixes a brand-new block — demoting the
- * user's real frontmatter into the note BODY, where it reads as stray text. One
- * unrecognised spelling therefore costs the note its metadata on the pass after
- * next.
+ * Reading the spelling beats enumerating the two this module happens to EMIT:
+ * it closes single quotes, extra space before the colon, `''` as the escaped
+ * single quote, and a plain key holding a `:` that no whitespace follows
+ * (`a:b: v`, whose key is `a:b`) all at once.
  *
- * Deriving the key from the line closes the whole family at once, including the
- * spellings nobody enumerated: extra space before the colon, `''` as the escaped
- * single quote, a plain key holding a `:` that no whitespace follows (`a:b: v`,
- * whose key is `a:b`). A double-quoted key using YAML-only escapes (`\x41`) is
- * beyond `JSON.parse` and reads as "no key here" — the conservative direction,
- * since this module only ever writes JSON-compatible escapes and an unread key
- * merely appends where it could have replaced.
+ * But `undefined` here means "this line does not declare a key I can READ", NOT
+ * "this line declares no key". A double-quoted key using a YAML-only escape
+ * (`"\x74ipo"`, which denotes `tipo`) is beyond `JSON.parse` and lands in that
+ * bucket while being a perfectly ordinary top-level entry. That distinction is
+ * why callers must never read `undefined` as "absent": `topLevelStarts` keeps
+ * those lines as OPAQUE candidates and `verifiedEdit` decides, by asking the
+ * parser, whether replacing one is the right edit. Guessing "absent" is what
+ * appended a duplicate key, and a duplicated mapping key is what js-yaml refuses
+ * outright — after which the next pass demotes the user's whole block into the
+ * note body.
+ *
+ * Symmetrically, a key read here is only a CANDIDATE. Whether the parser sees
+ * this line as a top-level entry at all depends on the lines above it, which
+ * `topLevelStarts` — not this function — tracks.
  */
 function topLevelKeyOf(line: string): string | undefined {
   if (line === '' || /^\s/.test(line)) return undefined;
@@ -450,11 +481,297 @@ function topLevelKeyOf(line: string): string | undefined {
 }
 
 /**
- * The index of the line already declaring `key`, in ANY spelling that denotes
- * it, so the missing-key fill REPLACES rather than appending a duplicate.
+ * How much of the block's structure is still OPEN at a given point.
+ *
+ * A line does not carry, on its own, whether the parser reads it as a top-level
+ * entry — and reading lines in isolation is exactly what corrupted notes. A
+ * multi-line quoted scalar and an unclosed flow collection both CONTINUE onto
+ * the next line at column 0, and that continuation can have the precise shape of
+ * a mapping entry:
+ *
+ *     titulo: "resumo do artigo
+ *     tipo: nota"
+ *
+ * That is valid YAML — js-yaml folds the double-quoted scalar — so
+ * `splitFrontmatter` accepts it and `data.tipo` is absent. Line 2 read alone
+ * looks like `tipo:`, so the fill OVERWROTE it, leaving `titulo: "resumo do
+ * artigo` with an unterminated quote and deleting the rest of the user's value.
+ * Same shape with single quotes, and with `meta: {a: 1,` / `tipo: 2}`. The next
+ * pass then finds a block js-yaml refuses and demotes the whole thing into the
+ * body — the identical failure the false-negative direction produces.
  */
-function topLevelKeyIndex(block: string[], key: string): number {
-  return block.findIndex((line) => topLevelKeyOf(line) === key);
+interface ScanState {
+  /** The quote character of a quoted scalar still open, or `null`. */
+  quote: '"' | "'" | null;
+  /** How many `[`/`{` flow collections are still unclosed. */
+  flow: number;
+  /** Whether the next non-space character begins a fresh node. */
+  nodeStart: boolean;
+}
+
+/**
+ * Advances `state` across one line.
+ *
+ * Deliberately a SCANNER, not a parser: it answers one question — is the next
+ * line still inside something? — and it only has to be right about quotes and
+ * flow collections, because every other multi-line construct YAML has (block
+ * scalars, folded plain scalars, nested mappings) continues INDENTED, and an
+ * indented line is disqualified as a top-level start on sight.
+ *
+ * `nodeStart` is what keeps the quote tracking honest. A quote opens a quoted
+ * scalar only where a node may begin; anywhere else it is literal content, so
+ * `titulo: don't stop` must not be read as opening a single-quoted scalar that
+ * swallows the rest of the block. The same rule makes `[` and `{` open a flow
+ * collection only at a node start, since a plain scalar in block context is
+ * allowed to contain them (`titulo: a [b] c`).
+ */
+function advance(line: string, state: ScanState): void {
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i]!;
+
+    if (state.quote === '"') {
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === '"') state.quote = null;
+      i += 1;
+      continue;
+    }
+    if (state.quote === "'") {
+      // YAML escapes a single quote by DOUBLING it.
+      if (ch === "'" && line[i + 1] === "'") {
+        i += 2;
+        continue;
+      }
+      if (ch === "'") state.quote = null;
+      i += 1;
+      continue;
+    }
+
+    if (ch === ' ' || ch === '\t') {
+      i += 1;
+      continue;
+    }
+    // A `#` starts a comment only at line start or after whitespace.
+    if (ch === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) break;
+
+    const next = line[i + 1];
+    const breaks = next === undefined || next === ' ' || next === '\t';
+
+    if (state.nodeStart) {
+      if (ch === '"' || ch === "'") {
+        state.quote = ch;
+        i += 1;
+        continue;
+      }
+      if (ch === '[' || ch === '{') {
+        state.flow += 1;
+        i += 1;
+        continue;
+      }
+      if (ch === ']' || ch === '}') {
+        if (state.flow > 0) state.flow -= 1;
+        state.nodeStart = false;
+        i += 1;
+        continue;
+      }
+      if (ch === ',') {
+        i += 1;
+        continue;
+      }
+      // `- `, `? ` and `: ` open a node without being one.
+      if ((ch === '-' || ch === '?' || ch === ':') && breaks) {
+        i += 1;
+        continue;
+      }
+      // A block scalar header (`|`, `>`): its content is INDENTED, so nothing
+      // on a following column-0 line belongs to it.
+      if (ch === '|' || ch === '>') break;
+      // An anchor, alias or tag prefixes the node without ending the node start.
+      if (ch === '&' || ch === '*' || ch === '!') {
+        while (i < line.length && line[i] !== ' ' && line[i] !== '\t') i += 1;
+        continue;
+      }
+      state.nodeStart = false;
+      i += 1;
+      continue;
+    }
+
+    // Inside (or just after) a scalar.
+    if (ch === ':' && (breaks || (state.flow > 0 && (next === ',' || next === ']' || next === '}')))) {
+      state.nodeStart = true;
+      i += 1;
+      continue;
+    }
+    if (state.flow > 0) {
+      if (ch === ',') {
+        state.nodeStart = true;
+        i += 1;
+        continue;
+      }
+      if (ch === ']' || ch === '}') {
+        state.flow -= 1;
+        i += 1;
+        continue;
+      }
+    }
+    i += 1;
+  }
+
+  // Nothing open: the next line starts a fresh node at column 0.
+  if (state.quote === null && state.flow === 0) state.nodeStart = true;
+}
+
+interface TopLevelStart {
+  index: number;
+  /** The key the line spells, or `undefined` when the spelling is unreadable. */
+  key: string | undefined;
+}
+
+/**
+ * Every line the parser would read as opening a top-level entry, with the key it
+ * spells when that spelling is readable.
+ */
+function topLevelStarts(block: string[]): TopLevelStart[] {
+  const state: ScanState = { quote: null, flow: 0, nodeStart: true };
+  const starts: TopLevelStart[] = [];
+
+  for (let index = 0; index < block.length; index += 1) {
+    const line = block[index] ?? '';
+    const open = state.quote !== null || state.flow > 0;
+    if (!open && line !== '' && !/^[ \t]/.test(line) && !line.startsWith('#')) {
+      starts.push({ index, key: topLevelKeyOf(line) });
+    }
+    advance(line, state);
+  }
+  return starts;
+}
+
+/**
+ * How many lines of unreadable spelling `verifiedEdit` will try per key.
+ *
+ * Each attempt costs a YAML parse of the whole block, so an unbounded retry is
+ * O(lines²) on a block built to have many of them. In a real note the count is
+ * zero; a handful is generous.
+ *
+ * This bound is also where the structure tracking earns its keep. `verifiedEdit`
+ * would REJECT an edit to a continuation line anyway — but every rejection burns
+ * one of these slots, so without `topLevelStarts` the continuations of a `resumo`
+ * folded over a dozen lines (ordinary content in a clipped note) exhaust the
+ * budget before the line that really declares the key is ever tried, and the key
+ * stays unfilled forever. The scanner keeps the candidate set to lines the
+ * parser actually reads as top-level entries, which is what makes a small bound
+ * both safe and sufficient.
+ */
+const MAX_OPAQUE_CANDIDATES = 8;
+
+/** A comparable rendering of a parsed YAML value, Dates and all. */
+function shapeOf(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? 'undefined';
+  } catch {
+    return ' incomparável';
+  }
+}
+
+/**
+ * Applies one edit and keeps it ONLY if js-yaml agrees it did what was intended.
+ *
+ * This is the guarantee the line-reading heuristics cannot give on their own.
+ * Every way `topLevelKeyOf` can be wrong — a spelling it cannot read, a
+ * continuation the scanner mis-tracks, a construct nobody enumerated — ends in
+ * the same place: a block js-yaml refuses, after which the next pass demotes the
+ * user's frontmatter into the note body. So the edit is not trusted, it is
+ * CHECKED, against the same parser that will read the file back:
+ *
+ *  - the modified block still parses, and still to a mapping;
+ *  - its key set is exactly the old one plus `key`;
+ *  - every other key still resolves to exactly what it did before — compared
+ *    THROUGH the parser, so `criado: 2026-08-24` coming back as a `Date` on both
+ *    sides is a match rather than a mismatch.
+ *
+ * Those two together also settle the value of `key` itself, which is why nothing
+ * here checks it: a mapping js-yaml accepts has no duplicated key, so if `key`
+ * is in the key set then the line just written is the only thing declaring it.
+ * That is the same invariant this module's entire failure model rests on — a
+ * duplicate is precisely what makes js-yaml refuse the block — and the tests
+ * exercise it directly, so re-asserting it here would be untestable ceremony.
+ *
+ * The two checks overlap: for a REPLACEMENT, dropping either one is caught by
+ * the other, since replacing a line always removes the key it declared. They are
+ * kept as a pair because they answer different questions — "did this add
+ * anything I did not ask for" and "did this disturb anything" — and only the
+ * first constrains the APPEND path, where nothing is removed.
+ *
+ * A check that asks the parser cannot be wrong about the parser, and the cost is
+ * one parse of a frontmatter-sized block per key filled.
+ */
+function verifiedEdit(
+  block: string[],
+  data: Frontmatter,
+  key: string,
+  line: string,
+  index: number,
+): { block: string[]; data: Frontmatter } | undefined {
+  const next = [...block];
+  if (index >= 0) next[index] = line;
+  else next.push(line);
+
+  const parsed = parseBlock(next);
+  if (!isPlainMapping(parsed)) return undefined;
+
+  const expected = new Set([...Object.keys(data), key]);
+  const got = Object.keys(parsed);
+  if (got.length !== expected.size || !got.every((k) => expected.has(k))) return undefined;
+
+  for (const other of Object.keys(data)) {
+    if (other === key) continue;
+    if (shapeOf(parsed[other]) !== shapeOf(data[other])) return undefined;
+  }
+
+  return { block: next, data: parsed };
+}
+
+/**
+ * Fills `key` in, REPLACING the line that declares it when there is one and
+ * appending only when there is not — or leaving the block untouched when neither
+ * can be verified.
+ *
+ * Refusing is a deliberate outcome, not a gap. Some spellings cannot be resolved
+ * from the block alone: an explicit key (`? tipo` on its own line, its `:` on the
+ * next) spans two lines, and replacing either one is a different mapping. Rather
+ * than reimplement js-yaml's scanner here — a fork that would drift from the
+ * installed parser, which is the very thing `keyRoundTripsAsString` and
+ * `verifiedEdit` exist to avoid — the module declines the edit. The user then
+ * sees a key that is still blank, which is visible and fixable in one keystroke.
+ * The alternative it replaces was appending a duplicate: silent on the pass that
+ * writes it, and on the NEXT pass it costs the note every key it had. An
+ * unfilled key is a smaller wrong answer than a destroyed block, and it is the
+ * only one that is recoverable.
+ */
+function fillKey(
+  block: string[],
+  data: Frontmatter,
+  key: string,
+  line: string,
+): { block: string[]; data: Frontmatter } | undefined {
+  const starts = topLevelStarts(block);
+  const named = starts.filter((start) => start.key === key);
+  const opaque = starts.filter((start) => start.key === undefined).slice(0, MAX_OPAQUE_CANDIDATES);
+
+  for (const candidate of [...named, ...opaque]) {
+    const applied = verifiedEdit(block, data, key, line, candidate.index);
+    if (applied) return applied;
+  }
+
+  // No line declares it: appending adds an entry rather than a duplicate. Still
+  // verified — a block can end inside a construct an appended line would join.
+  if (!Object.prototype.hasOwnProperty.call(data, key)) {
+    return verifiedEdit(block, data, key, line, -1);
+  }
+  return undefined;
 }
 
 /**
@@ -474,16 +791,16 @@ export function ensureFrontmatter(content: string, required: Frontmatter): strin
     return `---\n${block.join('\n')}\n---\n${suffix}`;
   }
 
-  const block = [...split.block];
-  const data = split.data;
+  let block = split.block;
+  let data = split.data;
 
   for (const [key, value] of entries) {
     if (!isEmptyValue(data[key])) continue;
 
-    const line = serializeEntry(key, value);
-    const index = topLevelKeyIndex(block, key);
-    if (index >= 0) block[index] = line;
-    else block.push(line);
+    // `data` advances with `block`: each fill is verified against the block as
+    // the fills before it left it, never against the original.
+    const applied = fillKey(block, data, key, serializeEntry(key, value));
+    if (applied) ({ block, data } = applied);
   }
 
   return `---\n${block.join('\n')}\n---\n${split.body}`;
