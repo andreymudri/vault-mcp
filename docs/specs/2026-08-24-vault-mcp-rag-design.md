@@ -118,6 +118,14 @@ O corpo anterior ao primeiro heading vira um chunk próprio, atribuído ao títu
   prática, é alteração localizada em `index/`.
 - Tokens preservam dígitos e hífen interno (`multi-stage`, `v6`, `oauth2`).
 
+### Normalização de datas do frontmatter
+
+YAML resolve data não-aspada (`criado: 2026-01-10`) para um objeto `Date`, não string — comportamento
+padrão do js-yaml, que o `gray-matter` usa. Todas as notas do vault escrevem datas assim. O parser
+converte `criado` e `atualizado` de volta para string `YYYY-MM-DD` na normalização, porque o resto do
+sistema compara e serializa essas datas como texto: `atualizado:` é reescrito por string e a captura
+diária monta um nome de arquivo. Um `Date` vazando para lá vira erro silencioso, não exceção.
+
 ### Scoring BM25
 
 Parâmetros `k1 = 1.2`, `b = 0.75`.
@@ -134,21 +142,49 @@ Pesos por campo, aplicados como multiplicador na frequência do termo:
 O peso reduzido em bloco de código impede que um Dockerfile ou um dump de tipos domine
 qualquer query por acúmulo de termos.
 
+**Peso por tipo de nota.** Depois do BM25, o score de cada chunk é multiplicado por um fator que
+depende do `tipo` da nota: `moc` e `daily` valem **0.3**, qualquer outro tipo vale **1.0**.
+
+A razão é estrutural, não ajuste empírico. Um MOC contém linhas como
+`- [[bullmq-worker]] — worker de fila separado do API`: elas repetem a query inteira num chunk de
+~11 tokens contra uma média de ~18, e a normalização por comprimento do BM25 então coloca **o
+ponteiro acima da coisa apontada**. Capturas diárias (`- 09:14 [[nota]] (pattern, projeto)`) têm o
+mesmo formato e o mesmo efeito. MOC e daily são navegação e log — listas de ponteiros para
+conhecimento, não o conhecimento. O fator os mantém alcançáveis quando são de fato a melhor
+resposta, sem deixá-los superar a nota que indexam.
+
 ### Expansão pelo grafo
 
 - Toma os 8 melhores chunks do BM25.
 - Coleta as notas de origem desses chunks.
 - Para cada uma, reúne vizinhos: notas linkadas e notas que a linkam (backlinks).
-- Pontua os chunks dessas vizinhas multiplicando o score BM25 delas por **0.4**.
+- Pontua os chunks dessas vizinhas com **0.4 × o score do chunk de origem** que as alcançou —
+  não com o BM25 do próprio chunk vizinho.
 - Merge com o conjunto original, dedupe por chunk id (mantendo o maior score), reordena.
 
-Expansão é de **um salto apenas**. Dois saltos, num vault com essa densidade de links,
-alcança praticamente todo o conteúdo e destrói a precisão.
+Herdar o score da origem, em vez de re-pontuar o vizinho com BM25, é o que faz a expansão
+existir. Se o vizinho fosse pontuado por BM25 e depois amortecido, um vizinho que não casa
+lexicalmente com a query valeria `0 × 0.4 = 0` e nunca apareceria — a expansão só reordenaria o
+que o BM25 já encontrou, que é precisamente o que ela não deve fazer. O caso que ela existe para
+cobrir é a nota relevante escrita com outro vocabulário, alcançável apenas pelo link.
+
+Quando um chunk chega pelas duas vias, o merge mantém o **maior** dos dois scores, então expansão
+nunca rebaixa um acerto direto.
+
+Expansão é de **um salto apenas**. Dois saltos, num vault com essa densidade de links, alcança
+praticamente todo o conteúdo e destrói a precisão.
 
 ### Orçamento de retorno
 
 Padrão: até 6 chunks ou ~8000 caracteres, o que vier primeiro; `limit` sobrescreve a
 contagem. Retorna trecho, nunca a nota inteira — `vault_get_note` cobre esse caso.
+
+### Diretórios fora do índice
+
+`.git/`, `.obsidian/`, `node_modules/` e qualquer entrada iniciada por ponto são ignorados, e
+**`_templates/` também**. Os templates carregam frontmatter real (`tipo: projeto`), então indexá-los
+faria `vault_list` com `tipo: 'projeto'` devolver o template junto dos projetos de verdade. Template
+é andaime de escrita, não conteúdo.
 
 ### Reindexação incremental
 
