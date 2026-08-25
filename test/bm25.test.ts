@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { chunkNote } from '../src/index/chunker.js';
 import { FIELD_WEIGHTS, InvertedIndex, NOTE_TYPE_WEIGHTS } from '../src/index/inverted-index.js';
 import { B, idf, K1, search, suggestTerms } from '../src/index/bm25.js';
-import { MAX_TOKEN_LENGTH } from '../src/index/tokenizer.js';
+import { MAX_TOKEN_LENGTH, tokenize } from '../src/index/tokenizer.js';
 import type { Chunk } from '../src/types.js';
 
 const FIXTURE_ROOT = join(__dirname, 'fixtures/vault');
@@ -484,7 +484,7 @@ describe('suggestTerms', () => {
   });
 });
 
-describe('suggestTerms — orçamento total de pares (vocabulário × termos da query)', () => {
+describe('suggestTerms — corte de termos da query e orçamento de células', () => {
   /** Chunk sintético mínimo, um termo de vocabulário por chunk. */
   function vocabChunk(id: string, term: string): Chunk {
     return {
@@ -511,10 +511,15 @@ describe('suggestTerms — orçamento total de pares (vocabulário × termos da 
     // A prova é determinística, não cronometrada (um relógio nesta fixture mede sobretudo o custo
     // de MONTAR o índice, e passaria mesmo sem corte nenhum): uma query de 5.000 termos devolve
     // exatamente o que devolve o prefixo de MAX_SCANNED_QUERY_TERMS termos, o que só acontece se o
-    // resto da query nunca tiver sido escaneado. O termo que casa está logo DEPOIS do corte —
-    // "workorx" (distância 2 de "workers", no vocabulário) é o 9º termo da query —, o que fixa o
-    // bracket SUPERIOR do corte: qualquer teto maior que 8 devolveria ['workers'] à esquerda e
-    // falharia aqui, e remover o corte também.
+    // resto da query nunca tiver sido escaneado.
+    //
+    // O que este teste NÃO faz é isolar MAX_SCANNED_QUERY_TERMS: nesta fixture as duas defesas
+    // suprimem o mesmo resultado. Com o corte elevado a 64, os 20.001 termos de vocabulário vezes
+    // 64 termos de query passam de 5e7 células, o orçamento de MAX_LEVENSHTEIN_CELLS estoura, o
+    // scan do vocabulário para antes de chegar a "workers" (inserido por último) e o resultado
+    // volta a ser `[]` — igual, por outro motivo. Ou seja: aqui só se prova que a cauda da query
+    // não muda o resultado, por uma das duas defesas. Quem fixa a CONSTANTE, com o orçamento de
+    // células comprovadamente fora do caminho, é o teste seguinte.
     const index = new InvertedIndex();
     for (let i = 0; i < 20000; i++) {
       index.addChunk(vocabChunk(`v#${i}`, `voc${String(i).padStart(6, '0')}xy`));
@@ -534,6 +539,57 @@ describe('suggestTerms — orçamento total de pares (vocabulário × termos da 
     expect(suggestTerms(index, queryTerms.join(' '), 10)).toEqual(suggestTerms(index, scannedPrefix, 10));
     expect(suggestTerms(index, queryTerms.join(' '), 10)).toEqual([]);
   }, 15000);
+
+  it('MAX_SCANNED_QUERY_TERMS fixa em 8 os termos escaneados, com o orçamento de células fora do caminho', () => {
+    // Fixa a CONSTANTE, e é o único teste que consegue: o de cima não distingue os dois
+    // mecanismos, porque naquele vocabulário elevar o corte estoura o orçamento de células e
+    // suprime o mesmo resultado por outro motivo. Aqui o vocabulário tem QUATRO termos curtos, e
+    // uma query de 12 termos gasta 623 células (medido por instrumentação do contador; 919 com o
+    // corte elevado a 64, isto é, escaneando a query inteira), quatro ordens de grandeza abaixo de
+    // MAX_LEVENSHTEIN_CELLS (2e7). O orçamento não é atingido em nenhuma das variantes, então o
+    // que decide o resultado aqui só pode ser a posição do termo na query.
+    //
+    // A query tem dois termos que casam, em posições escolhidas para prender o corte dos dois
+    // lados: "workorx" (distância 2 de "workers") é o 5º termo, DENTRO do corte, e "consultaxy"
+    // (distância 2 de "consulta") é o 9º, logo FORA dele. A única resposta compatível com um corte
+    // em exatamente 8 é ['workers']:
+    //   - corte >= 9, ou removido: "consultaxy" também é escaneado -> ['consulta', 'workers'];
+    //   - corte <= 4: nem "workorx" é escaneado -> [].
+    const index = new InvertedIndex();
+    for (const term of ['nestjs', 'bullmq', 'workers', 'consulta']) {
+      index.addChunk(vocabChunk(`c#${term}`, term));
+    }
+    expect(index.postings.size).toBe(4);
+
+    const queryTerms = [
+      'zzz001',
+      'zzz002',
+      'zzz003',
+      'zzz004',
+      'workorx',
+      'zzz006',
+      'zzz007',
+      'zzz008',
+      'consultaxy',
+      'zzz010',
+      'zzz011',
+      'zzz012',
+    ];
+    expect(queryTerms[4]).toBe('workorx');
+    expect(queryTerms[8]).toBe('consultaxy');
+    // A query chega inteira ao corte: nenhum destes termos é stopword nem cai por comprimento.
+    expect(tokenize(queryTerms.join(' '))).toEqual(queryTerms);
+
+    expect(suggestTerms(index, queryTerms.join(' '), 10)).toEqual(['workers']);
+
+    // Controle do MECANISMO, não do resultado: os mesmos 12 termos, com "consultaxy" movido para a
+    // primeira posição, devolvem as duas sugestões. Se fosse o orçamento de células (ou qualquer
+    // custo do vocabulário) a esconder "consulta", mover o termo não mudaria nada — o vocabulário
+    // é o mesmo, a query é a mesma, só a ordem muda. Isto é o que prova que o corte por POSIÇÃO é
+    // o mecanismo em jogo nas asserções acima.
+    const moved = ['consultaxy', ...queryTerms.filter((term) => term !== 'consultaxy')];
+    expect(suggestTerms(index, moved.join(' '), 10)).toEqual(['consulta', 'workers']);
+  });
 
   it('vocabulário de termos longos com prefixo comum não roda a matriz inteira do vocabulário todo', () => {
     // O orçamento por CONTAGEM de pares supunha que cada par custa O(1) por causa de
