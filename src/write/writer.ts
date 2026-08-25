@@ -1,10 +1,10 @@
 import { promises as fs } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 
 import matter from 'gray-matter';
 
 import type { Frontmatter } from '../types.js';
-import { resolveWritePath, assertNoSymlinkEscape } from './paths.js';
+import { resolveWritePath, assertNoSymlinkEscape, PathGuardError } from './paths.js';
 import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
 import { commitFiles } from './git.js';
 import { atomicWrite } from './atomic.js';
@@ -53,6 +53,49 @@ const TEMPLATED_TIPOS = new Set(['wiki', 'projeto']);
 const DEFAULT_TIPO = 'nota';
 
 /**
+ * Directory names that are MACHINE STATE, not vault content, matched as a whole path
+ * segment at any depth.
+ *
+ * `resolveWritePath`'s `DENIED_PREFIXES` is about READ-ONLY AREAS of the vault
+ * (`99-archive/`, `_templates/`) and only looks at the first segment. That is a different
+ * question from this one, and it left `.git/` wide open: `writeNote({path:
+ * '.git/refs/heads/pwn.md'})` created the file and reported success, after which `git gc`,
+ * `git log --all` and `git fsck` all failed on the user's real vault with `badRefContent`.
+ * A malformed loose ref is not a note the user can delete and move on from — it breaks
+ * every subsequent git operation, including the commits this module makes itself.
+ *
+ * The set is the ignore list T6's scanner uses. That is deliberate: a path the indexer
+ * will never read is a path this module has no business writing, and the two disagreeing
+ * is how a note becomes permanently invisible. Nothing enforces the agreement — the
+ * scanner is not on this branch — so the two lists have to be changed together by hand.
+ *
+ * NOTE: this duplicates a boundary `paths.ts` should own. `resolveWritePath` is the one
+ * place that already knows the vault's layout, and this check belongs beside
+ * `DENIED_PREFIXES` — but `paths.ts` is outside this task's file set, so the guard lives
+ * at the only other point every write passes through. Move it when the two are touched
+ * together.
+ */
+const DENIED_SEGMENTS = new Set(['.git', '.obsidian', 'node_modules', '_templates']);
+
+/**
+ * Control characters, which cannot appear in a path this module will accept.
+ *
+ * A newline in a filename is not merely odd, it FORGES REPORTS. `unifiedDiff` labels its
+ * output `--- a/${path}`, and a path carrying `\n+++ b/CLAUDE.md\n@@ -1 +1 @@\n-real\n+forjado`
+ * produced a diff containing a complete, fabricated hunk attributing an edit to a file that
+ * was never opened. The same string reaches `commitFiles` as a commit message subject.
+ * A user reading either has no way to tell the forged lines from the real ones.
+ *
+ * `unifiedDiff` escapes its own header too — this is the outer lock, refusing the input
+ * rather than rendering it, because a path no legitimate note ever has is better rejected
+ * than sanitised into something the user did not ask for. NUL matters separately: it makes
+ * `fs` throw a bare `TypeError` from deep inside the write instead of a `PathGuardError`
+ * the tool layer knows how to report.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/**
  * Both halves of the path guard, in the order they have to run.
  *
  * `resolveWritePath` is purely SYNTACTIC — it rejects `..`, absolute paths, non-`.md`,
@@ -63,7 +106,26 @@ const DEFAULT_TIPO = 'nota';
  * impossible for the two callers below.
  */
 async function guardedPath(vaultRoot: string, relPath: string): Promise<string> {
+  // First, before any `fs` call and before `resolveWritePath` interpolates the string into
+  // a message: a NUL makes `fs` throw its own `TypeError` from inside the write.
+  if (CONTROL_CHARS.test(relPath)) {
+    throw new PathGuardError(
+      `caminho não pode conter caractere de controle: ${JSON.stringify(relPath)}`
+    );
+  }
+
   const absPath = resolveWritePath(vaultRoot, relPath);
+
+  // Segment-wise, on the RESOLVED path, so `02-wiki/./.git/x.md` is caught with the plain
+  // `.git/x.md`. Matching whole segments and not string prefixes is what keeps an ordinary
+  // note at `02-wiki/git/rebase-interativo.md` legal, exactly as `99-archive-notes/` stays
+  // legal beside the denied `99-archive/`.
+  for (const segment of relative(resolve(vaultRoot), absPath).split(sep)) {
+    if (DENIED_SEGMENTS.has(segment)) {
+      throw new PathGuardError(`escrita negada em ${segment}/ (área interna, não é conteúdo)`);
+    }
+  }
+
   await assertNoSymlinkEscape(vaultRoot, absPath);
   return absPath;
 }
@@ -181,8 +243,69 @@ function joinWarnings(parts: Array<string | undefined>): string | undefined {
   return kept.length === 0 ? undefined : kept.join('; ');
 }
 
+/** Lines in `text`, counting a trailing newline as a terminator, without allocating. */
+function countLines(text: string): number {
+  if (text === '') return 0;
+  let lines = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) === 10) lines += 1;
+  }
+  return text.charCodeAt(text.length - 1) === 10 ? lines : lines + 1;
+}
+
+/**
+ * The diff, and the warning to carry when it could not be produced.
+ *
+ * `unifiedDiff` bounds itself and returns its own coarse summary for an input too large to
+ * diff line by line, so in normal operation this never catches anything. It exists for the
+ * case where that self-defence is not enough — a `RangeError` from a typed-array
+ * allocation the process could not satisfy, say — and the question that case forces is
+ * which of two wrongs to commit.
+ *
+ * Losing the user's content to a REPORTING failure is the larger wrong: the note is what
+ * they asked for, the diff is how it gets narrated. So the throw is swallowed here, the
+ * report degrades to a summary that says plainly it is one, and the failure travels back
+ * as a `warning`. The caller learns the note was written and that the diff is not
+ * trustworthy — which is the truth, and is strictly more than a rejection would tell them
+ * about a file that is already on disk.
+ *
+ * The summary is built HERE rather than borrowed from `diff.js`: this is the path taken
+ * when that module has just failed, and reaching back into it for the recovery would make
+ * the recovery depend on the thing that broke.
+ */
+function safeDiff(
+  before: string,
+  after: string,
+  relPath: string
+): { diff: string; warning?: string } {
+  try {
+    return { diff: unifiedDiff(before, after, relPath) };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    // `relPath` is already through `guardedPath`, so it carries no control character and
+    // cannot add a line to this header.
+    const diff = [
+      before === '' ? '--- /dev/null' : `--- a/${relPath}`,
+      after === '' ? '+++ /dev/null' : `+++ b/${relPath}`,
+      '@@ diff indisponível @@',
+      ` falha ao gerar o diff (${reason}); ${countLines(before)} linhas antes, ` +
+        `${countLines(after)} linhas depois`,
+      '',
+    ].join('\n');
+    return { diff, warning: `diff não pôde ser gerado (${reason})` };
+  }
+}
+
 /**
  * Writes `text` to a path already guarded, then commits it unless the caller is batching.
+ *
+ * The diff is computed BEFORE the write, and that order is the whole point of this
+ * function. It is a pure function of the two strings already in memory — nothing about it
+ * needs the file on disk — so computing it first makes "written but unreported" a state
+ * this code cannot reach, rather than one it merely avoids as long as `unifiedDiff`'s size
+ * bounds are set correctly. Written the other way round, a diff that threw left the
+ * replacement published and the call rejecting, and the user was never shown what changed.
+ * `safeDiff` closes the other half: a diff failure must not swallow the content either.
  *
  * The commit is deliberately the LAST thing and deliberately cannot undo the write.
  * `commitFiles` never throws; a git failure comes back as a warning and the note stays on
@@ -202,8 +325,8 @@ async function writeAndCommit(
   },
   extraWarning?: string
 ): Promise<WriteResult> {
+  const { diff, warning: diffWarning } = safeDiff(opts.before, opts.after, opts.relPath);
   await atomicWrite(opts.absPath, opts.after);
-  const diff = unifiedDiff(opts.before, opts.after, opts.relPath);
 
   const base = {
     path: opts.relPath,
@@ -213,14 +336,14 @@ async function writeAndCommit(
   };
 
   if (opts.deferCommit === true) {
-    const warning = joinWarnings([extraWarning]);
+    const warning = joinWarnings([extraWarning, diffWarning]);
     return warning === undefined
       ? { ...base, committed: false }
       : { ...base, committed: false, warning };
   }
 
   const commit = await commitFiles(opts.vaultRoot, [opts.absPath], opts.message);
-  const warning = joinWarnings([extraWarning, commit.warning]);
+  const warning = joinWarnings([extraWarning, diffWarning, commit.warning]);
   return warning === undefined
     ? { ...base, committed: commit.committed }
     : { ...base, committed: commit.committed, warning };
@@ -306,13 +429,23 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
   );
 }
 
-/** Non-overlapping occurrences of `needle` in `haystack`. */
+/**
+ * Occurrences of `needle` in `haystack`, INCLUDING overlapping ones.
+ *
+ * Advancing by `needle.length` — the obvious way to count — asks "how many copies fit
+ * side by side", which is a different question from the one `editNote` needs answered.
+ * `aa` sits in `aaa` at offset 0 and at offset 1: two distinct places the edit could land,
+ * and no way to know which the caller meant. Counting non-overlapping matches reported ONE
+ * and silently replaced the first — precisely the "edited a line the caller never looked
+ * at" outcome the exactly-one-occurrence rule exists to prevent. Advancing by 1 counts
+ * every starting position, so ambiguity is refused wherever it actually exists.
+ */
 function countOccurrences(haystack: string, needle: string): number {
   let count = 0;
   let at = haystack.indexOf(needle);
   while (at !== -1) {
     count += 1;
-    at = haystack.indexOf(needle, at + needle.length);
+    at = haystack.indexOf(needle, at + 1);
   }
   return count;
 }

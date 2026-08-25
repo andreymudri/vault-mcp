@@ -11,20 +11,45 @@
 const CONTEXT = 3;
 
 /**
- * The largest edit distance the Myers search will explore before giving up.
+ * The largest combined input, in characters, that will be diffed line by line at all.
  *
- * The greedy algorithm keeps one V array per D, so the trace costs O(D²) memory: on two
- * files that share nothing, D is the sum of their lengths and a pair of 50k-line inputs
- * would allocate on the order of 10¹⁰ integers. That is not a slow diff, it is a dead
- * MCP server — `unifiedDiff` is synchronous and never awaits, so nothing at the tool
- * layer can interrupt it.
+ * `MAX_EDIT_DISTANCE` caps the SEARCH DEPTH, which is not the same thing as capping
+ * memory: every round pushes an `Int32Array` of `2*(n+m)+3` onto the trace, so the trace
+ * costs roughly `D * 8 * (n+m)` bytes and grows without bound in `n+m` however small D
+ * stays. A 6.5 MB note replaced by a 12-byte string measured 4.4 s of blocked event loop
+ * and 5,035 MB of RSS. `--max-old-space-size` does not help, because a typed array's
+ * backing store is EXTERNAL to the V8 heap: the process walks past the flag straight into
+ * the OS OOM killer, which is not an error anything can catch.
  *
- * Beyond the cap the answer is still CORRECT, just less minimal: `fallbackOps` reports
- * the whole remaining region as deleted-then-added, which is what a diff of two texts
- * with nothing in common looks like anyway. The common-affix trim below runs first, so
- * an ordinary note edit has a D in the single digits and never approaches this.
+ * So the first bound is on the input itself, checked before the text is even split into
+ * lines. Past it the answer is a coarse "N lines changed" summary. That is a real loss of
+ * detail, and it is the right loss: this is a single-event-loop MCP server, and a diff
+ * that takes the whole process down with it reports nothing at all.
  */
-const MAX_EDIT_DISTANCE = 3000;
+const MAX_DIFF_INPUT_CHARS = 2 * 1024 * 1024;
+
+/**
+ * The largest trace the Myers search may allocate, in bytes — the ONE bound on the search.
+ *
+ * The greedy algorithm keeps one V array per round, so the trace is what makes a diff of
+ * two texts with nothing in common expensive. Storing only the WINDOW each round can reach
+ * (see `myersOps`) removes the `n+m` factor from each entry, leaving an honest O(D²) in
+ * BYTES — which is the point: with the width gone, a byte budget is simultaneously a depth
+ * budget (8 MB is reached at D ≈ 1445) and a time budget, because the work per round is
+ * proportional to the window that round writes. One number bounds both, and it bounds them
+ * whatever the input looks like.
+ *
+ * An earlier version also carried a separate `MAX_EDIT_DISTANCE` of 3000 rounds. Windowing
+ * made it DEAD: 3000 rounds cost about 36 MB, so the byte budget always tripped first and
+ * the depth cap could never be observed — a bound no test could reach is a bound that is
+ * not there. It is gone, and this is the only thing `myersOps` gives up on.
+ *
+ * Past it the answer is still CORRECT, just less minimal: `fallbackOps` reports the whole
+ * remaining region as deleted-then-added, which is what a diff of two unrelated texts looks
+ * like anyway. The common-affix trim in `diffOps` runs first, so an ordinary note edit has
+ * a D in the single digits and never approaches this.
+ */
+const MAX_TRACE_BYTES = 8 * 1024 * 1024;
 
 type OpKind = '=' | '-' | '+';
 
@@ -73,9 +98,9 @@ function fallbackOps(a: string[], b: string[], aFrom: number, bFrom: number): Op
  * Myers' greedy O(ND) line diff, recording the search trace so the edit script can be
  * recovered by walking it backwards.
  *
- * Returns `undefined` when the edit distance exceeds `MAX_EDIT_DISTANCE`; the caller
- * falls back rather than allocating without bound. `aFrom`/`bFrom` shift the emitted
- * indices back into the caller's un-trimmed coordinates.
+ * Returns `undefined` when the trace would exceed `MAX_TRACE_BYTES`; the caller falls back
+ * rather than allocating without bound. `aFrom`/`bFrom` shift the emitted indices back
+ * into the caller's un-trimmed coordinates.
  */
 function myersOps(
   a: string[],
@@ -85,7 +110,9 @@ function myersOps(
 ): Op[] | undefined {
   const n = a.length;
   const m = b.length;
-  const max = Math.min(n + m, MAX_EDIT_DISTANCE);
+  // `n + m` is the true worst-case edit distance, so the loop is unbounded only in the
+  // sense that `MAX_TRACE_BYTES` is what stops it early.
+  const max = n + m;
   // `off` shifts the diagonal index `k` (which runs from `-d` to `d`) into a non-negative
   // array index. The `+1` of `off` and the `+3` of `size` are one slot of headroom each:
   // `k + 1 + off` is read at `k === d === n + m`, and with the tight `2(n+m)+1` sizing that
@@ -97,9 +124,21 @@ function myersOps(
 
   const v = new Int32Array(size);
   const trace: Int32Array[] = [];
+  let traceBytes = 0;
 
   for (let d = 0; d <= max; d += 1) {
-    trace.push(v.slice());
+    // Only the diagonals in `[-d, d]` are written this round, and the reads reach one
+    // further on each side, so `[-(d+1), d+1]` is everything round `d` can touch. Keeping
+    // a copy of the WHOLE `v` instead — `v.slice()` — is what made the trace cost
+    // `D * (n+m)` and let a 6.5 MB note allocate gigabytes: the width of the array has
+    // nothing to do with how much of it the search has actually reached. `d <= max <= n+m`
+    // keeps this window inside the array without clamping, so the index of diagonal `k`
+    // within it is exactly `k + d + 1`.
+    const window = v.slice(off - d - 1, off + d + 2);
+    traceBytes += window.byteLength;
+    if (traceBytes > MAX_TRACE_BYTES) return undefined;
+    trace.push(window);
+
     for (let k = -d; k <= d; k += 2) {
       let x: number;
       if (k === -d || (k !== d && v[k - 1 + off]! < v[k + 1 + off]!)) {
@@ -113,7 +152,7 @@ function myersOps(
         y += 1;
       }
       v[k + off] = x;
-      if (x >= n && y >= m) return backtrack(trace, a, b, off, aFrom, bFrom);
+      if (x >= n && y >= m) return backtrack(trace, a, b, aFrom, bFrom);
     }
   }
   return undefined;
@@ -126,12 +165,15 @@ function myersOps(
  * "which neighbour did we come from" test below identical to the one the forward pass
  * made — the two must agree or the reconstruction wanders off the path that was
  * actually taken.
+ *
+ * Each entry holds only the window `[-(d+1), d+1]` that round `d` could reach, so
+ * diagonal `k` lives at `k + d + 1` rather than at `k + off`. The window is exactly the
+ * set of diagonals this walk reads, since `k` here is confined to `[-d, d]`.
  */
 function backtrack(
   trace: Int32Array[],
   a: string[],
   b: string[],
-  off: number,
   aFrom: number,
   bFrom: number
 ): Op[] {
@@ -141,9 +183,10 @@ function backtrack(
 
   for (let d = trace.length - 1; d >= 0; d -= 1) {
     const v = trace[d]!;
+    const w = d + 1;
     const k = x - y;
-    const prevK = k === -d || (k !== d && v[k - 1 + off]! < v[k + 1 + off]!) ? k + 1 : k - 1;
-    const prevX = v[prevK + off]!;
+    const prevK = k === -d || (k !== d && v[k - 1 + w]! < v[k + 1 + w]!) ? k + 1 : k - 1;
+    const prevX = v[prevK + w]!;
     const prevY = prevX - prevK;
 
     while (x > prevX && y > prevY) {
@@ -235,6 +278,123 @@ function hunkRanges(ops: Op[]): Array<[number, number]> {
 const NO_NEWLINE = '\\ No newline at end of file';
 
 /**
+ * The path as it may appear inside a header line.
+ *
+ * A unified diff is a LINE-structured format, and this function's only job is that a
+ * header occupies exactly one line whatever it is handed. Interpolating the path raw let
+ * a filename containing a newline inject fabricated `+++`/`@@` lines, and a diff carrying
+ * a forged hunk that attributes attacker-chosen content to a file that was never touched
+ * defeats the entire point of showing the user a diff.
+ *
+ * `writer.ts` already refuses control characters in a note path, so nothing reaching the
+ * write path arrives here dirty. This is the second lock on the same door: `unifiedDiff`
+ * is exported and its output is a security boundary in its own right, so its structure
+ * must not depend on a caller having validated anything.
+ */
+function headerPath(path: string): string {
+  // eslint-disable-next-line no-control-regex
+  return path.replace(/[\u0000-\u001f\u007f]/g, (ch) => {
+    if (ch === '\n') return '\\n';
+    if (ch === '\r') return '\\r';
+    if (ch === '\t') return '\\t';
+    return `\\x${ch.charCodeAt(0).toString(16).padStart(2, '0')}`;
+  });
+}
+
+/**
+ * Lines in `text[from, to)`, counting a trailing newline as a terminator rather than a
+ * separator. Takes a range rather than a substring so the caller never has to allocate a
+ * copy of a region that can be megabytes wide.
+ */
+function countLines(text: string, from = 0, to = text.length): number {
+  if (to <= from) return 0;
+  let lines = 0;
+  for (let i = from; i < to; i += 1) {
+    if (text.charCodeAt(i) === 10) lines += 1;
+  }
+  return text.charCodeAt(to - 1) === 10 ? lines : lines + 1;
+}
+
+/** `1 linha removida` / `4 linhas removidas`, so the summary reads as Portuguese. */
+function lineCount(count: number, participle: string): string {
+  return count === 1
+    ? `1 linha ${participle}`
+    : `${count} linhas ${participle}${participle.endsWith('a') ? 's' : ''}`;
+}
+
+/**
+ * The half-open span `[start, endBefore)` of `before` and `[start, endAfter)` of `after`
+ * that the two texts do NOT share, snapped outwards to whole lines.
+ *
+ * Character-level, deliberately: this runs on inputs too big to split into lines at all,
+ * so it may only walk the strings with `charCodeAt` — O(n) time, O(1) memory, no
+ * allocation. The common prefix and suffix are the same in both texts by construction, so
+ * one `start` indexes both.
+ *
+ * The snap outwards to line boundaries is what makes the result honest in LINES. Without
+ * it, `hello world` → `hello brave world` trims to `''` against `brave` and counts zero
+ * lines removed, when a line was plainly rewritten.
+ */
+function changedSpan(
+  before: string,
+  after: string
+): { start: number; endBefore: number; endAfter: number } {
+  const min = Math.min(before.length, after.length);
+  let start = 0;
+  while (start < min && before.charCodeAt(start) === after.charCodeAt(start)) start += 1;
+
+  let endBefore = before.length;
+  let endAfter = after.length;
+  while (
+    endBefore > start &&
+    endAfter > start &&
+    before.charCodeAt(endBefore - 1) === after.charCodeAt(endAfter - 1)
+  ) {
+    endBefore -= 1;
+    endAfter -= 1;
+  }
+
+  // Back to the start of the line the change begins on.
+  while (start > 0 && before.charCodeAt(start - 1) !== 10) start -= 1;
+  // Forward to the end of the line it ends on. Both ends move together: the untouched
+  // suffix is the same length on each side, so stepping one steps the other.
+  while (endBefore < before.length && before.charCodeAt(endBefore - 1) !== 10) {
+    endBefore += 1;
+    endAfter += 1;
+  }
+
+  return { start, endBefore, endAfter };
+}
+
+/**
+ * The coarse answer for an input too large to diff line by line.
+ *
+ * It keeps the header shape a caller can recognise and says plainly that the detail is
+ * missing, because silently returning something that LOOKS like a complete diff of a
+ * 7 MB rewrite would be worse than admitting the limit.
+ *
+ * The counts describe the CHANGED REGION, not the whole file. Counting whole files here
+ * made the summary technically true and practically useless: a one-word fix in a 2 MB note
+ * reported "50000 linhas removidas, 50000 linhas adicionadas", which tells the user
+ * nothing except how big their note is. "1 linha removida, 1 linha adicionada" tells them
+ * the edit was small even though the detail could not be rendered.
+ */
+function coarseSummary(before: string, after: string, path: string): string {
+  const span = changedSpan(before, after);
+  const removed = countLines(before, span.start, span.endBefore);
+  const added = countLines(after, span.start, span.endAfter);
+  const label = headerPath(path);
+  return [
+    before === '' ? '--- /dev/null' : `--- a/${label}`,
+    after === '' ? '+++ /dev/null' : `+++ b/${label}`,
+    '@@ diff omitido @@',
+    ` entrada de ${before.length + after.length} caracteres excede o limite de ` +
+      `${MAX_DIFF_INPUT_CHARS}; ${lineCount(removed, 'removida')}, ${lineCount(added, 'adicionada')}`,
+    '',
+  ].join('\n');
+}
+
+/**
  * A unified diff of `before` → `after`, labelled with `path`.
  *
  * Returns `''` when the texts are identical — an empty diff is how a caller reports
@@ -243,6 +403,13 @@ const NO_NEWLINE = '\\ No newline at end of file';
  */
 export function unifiedDiff(before: string, after: string, path: string): string {
   if (before === after) return '';
+
+  // Checked BEFORE `toSides` splits anything: on a 6.5 MB note the split alone allocates
+  // an array of every line, and the point of this bound is to not touch the input at all
+  // once it is too big to handle inside one tick of a single-threaded server.
+  if (before.length + after.length > MAX_DIFF_INPUT_CHARS) {
+    return coarseSummary(before, after, path);
+  }
 
   const a = toSides(before);
   const b = toSides(after);
@@ -269,9 +436,10 @@ export function unifiedDiff(before: string, after: string, path: string): string
   const ranges = hunkRanges(ops);
   if (ranges.length === 0) return '';
 
+  const label = headerPath(path);
   const out: string[] = [
-    before === '' ? '--- /dev/null' : `--- a/${path}`,
-    after === '' ? '+++ /dev/null' : `+++ b/${path}`,
+    before === '' ? '--- /dev/null' : `--- a/${label}`,
+    after === '' ? '+++ /dev/null' : `+++ b/${label}`,
   ];
 
   // Line numbers are 1-based and count only the lines present on each side.
