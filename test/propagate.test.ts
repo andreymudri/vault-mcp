@@ -426,6 +426,32 @@ describe('insertUnderSection e cercas de código', () => {
     expect(lines.indexOf('- [[b]] — dois')).toBe(lines.indexOf('- [[a]] — um') + 1);
   });
 
+  it('fecha a cerca cujo delimitador tem espaços em branco no fim', () => {
+    // CommonMark allows trailing whitespace on both delimiters, and Obsidian leaves it behind
+    // whenever a line is edited. A closing fence read as having an info string never closes,
+    // so everything below the example — including the real section — stays "inside the block"
+    // and the entry is appended into a brand new duplicate section at the end of the file.
+    const before = [
+      '## Notas',
+      '',
+      '```md  ',
+      '## Notas',
+      '- [[falso]] — dentro do código',
+      '```   ',
+      '',
+      '- [[a]] — um',
+      '',
+      '## Fim',
+      '',
+    ].join('\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+    const linhas = after.split('\n');
+    expect(linhas.indexOf('- [[b]] — dois')).toBe(linhas.indexOf('- [[a]] — um') + 1);
+    expect(linhas.filter((l) => l === '## Notas')).toHaveLength(2);
+    expect(linhas.filter((l) => l === '- [[falso]] — dentro do código')).toHaveLength(1);
+  });
+
   it('enxerga a cerca num arquivo CRLF, e não enfia a entrada dentro do bloco', () => {
     // `split('\n')` hands every line of a CRLF file over with its `\r` still attached, so a
     // fence delimiter arrives as "```\r". A fence pattern anchored with `$` matches none of
