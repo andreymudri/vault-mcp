@@ -120,7 +120,7 @@ function makeRedactor(vaultRoot: string): (text: string) => string {
 }
 
 /** How much of a note's body `vault_get_note` returns before cutting it. */
-const MAX_NOTE_CHARS = 20_000;
+export const MAX_NOTE_CHARS = 20_000;
 
 /**
  * Brings the vault up to date THROUGH the retriever, which is the only component allowed to

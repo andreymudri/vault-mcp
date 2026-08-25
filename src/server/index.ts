@@ -140,23 +140,28 @@ export async function main(): Promise<void> {
 }
 
 /**
- * True when this file is the program being run, as opposed to a module something imported.
+ * True when `entry` (i.e. `process.argv[1]`) is the module at `moduleUrl` — that is, when this file
+ * is the PROGRAM being run rather than a module something imported.
  *
  * Compared through `realpathSync` because `npx` and `npm` install `bin` as a SYMLINK: `argv[1]` is
- * then the link inside `node_modules/.bin/` while `import.meta.url` is the file it points at, and
- * a raw string comparison would decide the entrypoint is a library and start nothing.
+ * then the link inside `node_modules/.bin/` while `import.meta.url` is the file it points at, and a
+ * raw string comparison would decide the entrypoint is a library and start nothing — `npx vault-mcp`
+ * would exit 0 having printed nothing, with the client waiting forever for an `initialize` reply.
+ *
+ * Both arguments are parameters rather than globals so this decision is testable as the pure
+ * function it is: the failure it guards against is invisible from inside a test runner, where
+ * `argv[1]` is always the runner.
  */
-function isDirectRun(): boolean {
-  const entry = process.argv[1];
-  if (entry === undefined) return false;
+export function isDirectRun(entry: string | undefined, moduleUrl: string): boolean {
+  if (entry === undefined || entry === '') return false;
   try {
-    return realpathSync(entry) === fileURLToPath(import.meta.url);
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
   } catch {
     return false;
   }
 }
 
-if (isDirectRun()) {
+if (isDirectRun(process.argv[1], import.meta.url)) {
   void main().catch((err: unknown) => {
     process.stderr.write(`vault-mcp falhou ao iniciar: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);

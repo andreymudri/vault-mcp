@@ -1,10 +1,10 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -12,12 +12,26 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { TRUNCATION_MARKER } from '../src/retrieval/budget.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
-import { WriteQueue, createTools, type ToolDefinition, type ToolResult } from '../src/server/tools.js';
-import { VaultPathError, createVaultServer, resolveVaultPath } from '../src/server/index.js';
+import {
+  MAX_NOTE_CHARS,
+  WriteQueue,
+  createTools,
+  type ToolDefinition,
+  type ToolResult,
+} from '../src/server/tools.js';
+import {
+  VaultPathError,
+  createVaultServer,
+  isDirectRun,
+  main,
+  resolveVaultPath,
+} from '../src/server/index.js';
 
 const execFileAsync = promisify(execFile);
 
-const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'vault');
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const FIXTURE = path.join(TEST_DIR, 'fixtures', 'vault');
+const REPO_ROOT = path.dirname(TEST_DIR);
 
 const AUTH_GUARD = '02-wiki/nestjs/auth-guard.md';
 const BULLMQ = '02-wiki/nestjs/bullmq-worker.md';
@@ -166,6 +180,96 @@ async function vaultContains(vaultRoot: string, needle: string): Promise<string[
     if (content.includes(needle)) hits.push(path.relative(vaultRoot, file));
   }
   return hits;
+}
+
+/**
+ * O binário compilado, construído uma vez por arquivo de teste.
+ *
+ * Compilar de verdade é o ponto: `package.json` aponta `bin` para `dist/server/index.js`, e é esse
+ * arquivo — com shebang, com o guard de execução direta, com a escolha de stream — que o usuário
+ * executa. Nada disso é observável importando o módulo dentro do vitest, onde `process.argv[1]` é
+ * sempre o próprio runner.
+ */
+let buildOnce: Promise<string> | undefined;
+
+async function buildServer(): Promise<string> {
+  buildOnce ??= (async () => {
+    const tsc = path.join(REPO_ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
+    await execFileAsync(process.execPath, [tsc, '--project', REPO_ROOT]);
+    return path.join(REPO_ROOT, 'dist', 'server', 'index.js');
+  })();
+  return buildOnce;
+}
+
+interface RunResult {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+}
+
+/**
+ * Roda o servidor compilado, escreve as requisições JSON-RPC no stdin, fecha o stdin e espera o
+ * processo terminar.
+ *
+ * O `timeout` mata o filho e REJEITA: um servidor que não responde tem que reprovar o teste, nunca
+ * pendurar a suíte.
+ */
+async function runServer(
+  binPath: string,
+  env: NodeJS.ProcessEnv,
+  requests: unknown[],
+  timeoutMs = 20_000,
+): Promise<RunResult> {
+  const child = spawn(process.execPath, [binPath], {
+    env: { ...process.env, VAULT_PATH: undefined, ...env },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => (stdout += chunk));
+  child.stderr.on('data', (chunk: string) => (stderr += chunk));
+
+  for (const request of requests) child.stdin.write(`${JSON.stringify(request)}\n`);
+  child.stdin.end();
+
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`servidor não terminou em ${timeoutMs} ms; stdout=${stdout.slice(0, 200)}`));
+    }, timeoutMs);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      resolve(status);
+    });
+  });
+
+  return { stdout, stderr, code };
+}
+
+const INITIALIZE = {
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'initialize',
+  params: {
+    protocolVersion: '2024-11-05',
+    capabilities: {},
+    clientInfo: { name: 'teste', version: '0' },
+  },
+};
+const INITIALIZED = { jsonrpc: '2.0', method: 'notifications/initialized' };
+
+function jsonLines(text: string): Array<Record<string, unknown>> {
+  return text
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 describe('createTools: catálogo', () => {
@@ -560,6 +664,35 @@ describe('vault_get_note', () => {
     for (const line of rendered.split('\n')) expect(line.startsWith('nota encontrada')).toBe(false);
   });
 
+  it('devolve a nota inteira quando ela cabe no limite', async () => {
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+
+    // A nota do fixture tem ~1 KB: nada nela pode ser cortado.
+    const rendered = await text('vault_get_note', { path: AUTH_GUARD });
+    expect(rendered).toContain('rotação de chaves de assinatura do JWT');
+    expect(rendered).not.toContain('nota cortada');
+
+    // E uma nota logo abaixo do limite também sai inteira, incluindo o último caractere.
+    const corpo = `# Quase\n\n${'a'.repeat(MAX_NOTE_CHARS - 200)}\n\nzzfimintacto\n`;
+    await write(vaultRoot, '02-wiki/docker/quase.md', corpo);
+    const quase = await text('vault_get_note', { path: '02-wiki/docker/quase.md' });
+    expect(quase).toContain('zzfimintacto');
+    expect(quase).not.toContain('nota cortada');
+  });
+
+  it('corta a nota que passa do limite, dizendo que cortou', async () => {
+    const vaultRoot = await makeVault();
+    const corpo = `# Gigante\n\n${'b'.repeat(MAX_NOTE_CHARS + 5_000)}\n\nzzfimcortado\n`;
+    await write(vaultRoot, '02-wiki/docker/gigante.md', corpo);
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_get_note', { path: '02-wiki/docker/gigante.md' });
+
+    expect(rendered).toContain(`nota cortada em ${MAX_NOTE_CHARS} caracteres`);
+    expect(rendered).not.toContain('zzfimcortado');
+    expect(rendered.length).toBeLessThan(MAX_NOTE_CHARS + 1_000);
+  });
+
   it('não engole o delta do scanner: a busca depois de uma leitura ainda acha a nota nova', async () => {
     const vaultRoot = await makeVault();
     const { text } = makeTools(vaultRoot);
@@ -615,6 +748,31 @@ describe('vault_list', () => {
     // …e nenhuma nota do fixture tem `jwt` E `docker` ao mesmo tempo.
     const impossivel = await text('vault_list', { tags: ['jwt', 'docker'] });
     expect(impossivel).toMatch(/nenhuma nota/i);
+  });
+
+  it('compara tags sem diferenciar maiúsculas, dos dois lados', async () => {
+    const vaultRoot = await makeVault();
+    // Tag pedida em caixa alta contra a tag minúscula do fixture…
+    const { text } = makeTools(vaultRoot);
+    expect(await text('vault_list', { tags: ['JWT'] })).toContain(AUTH_GUARD);
+
+    // …e tag pedida em minúscula contra uma nota que escreveu a dela em caixa mista.
+    await write(
+      vaultRoot,
+      '02-wiki/docker/caixa.md',
+      '---\ntipo: wiki\ntags: [DockerCompose]\n---\n\n# Caixa\n',
+    );
+    expect(await text('vault_list', { tags: ['dockercompose'] })).toContain('02-wiki/docker/caixa.md');
+  });
+
+  it('aceita folder com barra sobrando no começo ou no fim', async () => {
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+    for (const folder of ['02-wiki/nestjs', '02-wiki/nestjs/', '/02-wiki/nestjs', '/02-wiki/nestjs//']) {
+      const rendered = await text('vault_list', { folder });
+      expect(rendered).toContain(AUTH_GUARD);
+      expect(rendered).not.toContain(CACHE_WRAPPER);
+    }
   });
 
   it('casa folder em fronteira de segmento', async () => {
@@ -1066,6 +1224,129 @@ describe('WriteQueue', () => {
     expect(primeira.warning).toBeUndefined();
     expect(segunda.warning).toBeUndefined();
   });
+});
+
+describe('entrypoint: o processo que o usuário inicia', () => {
+  it('isDirectRun reconhece o próprio arquivo como programa', () => {
+    const arquivo = fileURLToPath(import.meta.url);
+    expect(isDirectRun(arquivo, pathToFileURL(arquivo).href)).toBe(true);
+  });
+
+  it('isDirectRun segue o symlink que npx/npm criam para o bin', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-bin-'));
+    trash.push(tmp);
+    const alvo = path.join(tmp, 'real.js');
+    await fs.writeFile(alvo, '// programa\n', 'utf8');
+    const link = path.join(tmp, 'vault-mcp');
+    await fs.symlink(alvo, link);
+
+    // É exatamente o caso do `npx`: argv[1] é o link, import.meta.url é o arquivo real.
+    expect(isDirectRun(link, pathToFileURL(alvo).href)).toBe(true);
+    // E comparar as strings cruas diria o contrário — o que faria `npx vault-mcp` não subir nada.
+    expect(link).not.toBe(alvo);
+  });
+
+  it('isDirectRun diz não quando o módulo foi apenas importado', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-bin-'));
+    trash.push(tmp);
+    const programa = path.join(tmp, 'outro.js');
+    const modulo = path.join(tmp, 'modulo.js');
+    await fs.writeFile(programa, '// programa\n', 'utf8');
+    await fs.writeFile(modulo, '// módulo\n', 'utf8');
+
+    expect(isDirectRun(programa, pathToFileURL(modulo).href)).toBe(false);
+    expect(isDirectRun(undefined, pathToFileURL(modulo).href)).toBe(false);
+    expect(isDirectRun('', pathToFileURL(modulo).href)).toBe(false);
+    expect(isDirectRun(path.join(tmp, 'nao-existe.js'), pathToFileURL(modulo).href)).toBe(false);
+  });
+
+  it('importar o módulo não sobe servidor nenhum', () => {
+    // Este arquivo de teste importou `src/server/index.ts` no topo. Se o guard estivesse invertido,
+    // o import teria conectado um StdioServerTransport ao stdin do runner.
+    const moduloUrl = pathToFileURL(path.join(REPO_ROOT, 'src/server/index.ts')).href;
+    expect(isDirectRun(process.argv[1], moduloUrl)).toBe(false);
+  });
+
+  it('main sem VAULT_PATH escreve no stderr, nunca no stdout, e sai com 1', async () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`exit:${code}`);
+    }) as never);
+    const anterior = process.env['VAULT_PATH'];
+    delete process.env['VAULT_PATH'];
+
+    try {
+      await expect(main()).rejects.toThrow('exit:1');
+      expect(stderr).toHaveBeenCalled();
+      const escrito = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(escrito).toContain('VAULT_PATH');
+      expect(escrito.endsWith('\n')).toBe(true);
+      expect(stdout).not.toHaveBeenCalled();
+    } finally {
+      if (anterior !== undefined) process.env['VAULT_PATH'] = anterior;
+      exit.mockRestore();
+      stderr.mockRestore();
+      stdout.mockRestore();
+    }
+  });
+});
+
+describe('binário compilado (dist/server/index.js)', () => {
+  it('sobe pelo stdio e responde o handshake MCP com as sete tools', async () => {
+    const bin = await buildServer();
+    const vaultRoot = await makeVault();
+    const { stdout, stderr, code } = await runServer(bin, { VAULT_PATH: vaultRoot }, [
+      INITIALIZE,
+      INITIALIZED,
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'vault_search', arguments: { query: 'jwt guard', limit: 1 } },
+      },
+    ]);
+
+    expect(code).toBe(0);
+    const respostas = jsonLines(stdout);
+    expect(respostas).toHaveLength(3);
+    const lista = respostas.find((resposta) => resposta['id'] === 2);
+    const tools = (lista?.['result'] as { tools: Array<{ name: string }> }).tools;
+    expect(tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
+
+    const chamada = respostas.find((resposta) => resposta['id'] === 3);
+    const conteudo = (chamada?.['result'] as { content: Array<{ text: string }> }).content;
+    expect(headers(conteudo.map((parte) => parte.text).join('\n')).length).toBeGreaterThan(0);
+
+    // Nada de diagnóstico no canal do protocolo, e nada de ruído no stderr no caminho feliz.
+    for (const resposta of respostas) expect(resposta['jsonrpc']).toBe('2.0');
+    expect(stderr).toBe('');
+  }, 120_000);
+
+  it('sem VAULT_PATH: sai com 1, stdout limpo e a razão no stderr', async () => {
+    const bin = await buildServer();
+    const { stdout, stderr, code } = await runServer(bin, {}, [INITIALIZE]);
+
+    expect(code).toBe(1);
+    // O stdout é o canal JSON-RPC: uma linha de diagnóstico aqui dessincroniza o cliente.
+    expect(stdout).toBe('');
+    expect(stderr).toContain('VAULT_PATH');
+  }, 120_000);
+
+  it('VAULT_PATH apontando para um arquivo: sai com 1 sem sujar o stdout', async () => {
+    const bin = await buildServer();
+    const vaultRoot = await makeVault();
+    const { stdout, stderr, code } = await runServer(
+      bin,
+      { VAULT_PATH: path.join(vaultRoot, 'CLAUDE.md') },
+      [INITIALIZE],
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toBe('');
+    expect(stderr).toMatch(/diretório/i);
+  }, 120_000);
 });
 
 describe('servidor MCP', () => {
