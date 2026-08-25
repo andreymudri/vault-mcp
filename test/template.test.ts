@@ -912,3 +912,173 @@ describe('ensureFrontmatter — grafias exóticas de chave nunca duplicam', () =
     expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
   });
 });
+
+// O `shapeOf` da rodada anterior comparava valores com `JSON.stringify`, e o
+// js-yaml resolve um alias por REFERÊNCIA: `a0: &a0 [q ×10]` seguido de
+// `a1: &a1 [*a0 ×10]` até `a7` parseia em milissegundos e ocupa alguns
+// kilobytes, mas a serialização MATERIALIZA a expansão de 10^8 elementos.
+// Medido através do `ensureFrontmatter`: 394 bytes de entrada custavam 4055ms e
+// ~1GB; com a comparação estrutural limitada, ~2ms.
+//
+// Isso não é "uma função lenta". O servidor MCP é um único event loop e o
+// `ensureFrontmatter` é SÍNCRONO — não há timeout na camada da ferramenta capaz
+// de interromper. O servidor inteiro para. E o `catch` do `shapeOf` ainda
+// engolia o `RangeError` do fim, então o custo era pago para não relatar nada.
+//
+// `src/vault/frontmatter.ts:47` documenta essa obrigação e a entrega ao
+// consumidor: quem serializa chaves arbitrárias de frontmatter impõe o próprio
+// limite. Este é o limite.
+describe('ensureFrontmatter — comparação de valores com custo limitado', () => {
+  /** `a0 … aN`, cada nível referenciando o anterior dez vezes. */
+  function bombaDeAliases(niveis: number): string {
+    const linhas = [`a0: &a0 [${Array.from({ length: 10 }, () => 'q').join(',')}]`];
+    for (let n = 1; n <= niveis; n += 1) {
+      const itens = Array.from({ length: 10 }, () => `*a${n - 1}`).join(',');
+      linhas.push(`a${n}: &a${n} [${itens}]`);
+    }
+    return `---\n${linhas.join('\n')}\n---\ncorpo\n`;
+  }
+
+  it('não expande uma bomba de aliases do YAML ao comparar valores', () => {
+    const entrada = bombaDeAliases(7);
+    // O tamanho é o ponto: nada nesta entrada parece caro.
+    expect(entrada.length).toBeLessThan(500);
+
+    const inicio = Date.now();
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+    const gasto = Date.now() - inicio;
+
+    expect(out).toContain('\ntipo: wiki\n');
+    // A DAG de aliases continua COMPARÁVEL — o que muda é o custo. Comparar
+    // referência a referência colapsa a DAG em vez de expandi-la.
+    expect(matter(out, {}).data).toHaveProperty('a7');
+    // 1500ms: a versão sem limite gasta 4055ms nesta máquina e só piora numa
+    // mais lenta; a limitada gasta ~2ms. São três ordens de grandeza entre as
+    // duas, então o limite absoluto não é frágil nas duas direções.
+    expect(gasto).toBeLessThan(1500);
+  });
+
+  // O outro lado do mesmo defeito. Todo valor que o `JSON.stringify` recusava
+  // virava o MESMO sentinela, então `sentinela === sentinela` e o cheque de
+  // valores passava VAZIO — justamente o cheque cujo único trabalho é recusar.
+  // Aqui `notas` é auto-referente, e a consequência era a linha do usuário
+  // `- "revisar antes de publicar"` ser SUBSTITUÍDA por `tipo: wiki` e sumir do
+  // vault, com o `verifiedEdit` certificando a edição.
+  it('preserva o item que uma lista auto-referente escondia da comparação', () => {
+    const entrada =
+      '---\ntitulo: Guia de Deploy\nnotas: &n\n- *n\n- "chave-api: sk-prod-1234"\n' +
+      '- "revisar antes de publicar"\n---\nCorpo da nota.\n';
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+
+    // A chave é APENDADA; nenhuma linha do usuário é tocada.
+    expect(out).toBe(
+      '---\ntitulo: Guia de Deploy\nnotas: &n\n- *n\n- "chave-api: sk-prod-1234"\n' +
+        '- "revisar antes de publicar"\ntipo: wiki\n---\nCorpo da nota.\n',
+    );
+
+    const depois = matter(out, {}).data as Record<string, unknown>;
+    const notas = depois.notas as unknown[];
+    expect(notas).toHaveLength(3);
+    expect(notas[0]).toBe(notas);
+    expect(notas[1]).toBe('chave-api: sk-prod-1234');
+    expect(notas[2]).toBe('revisar antes de publicar');
+    expect(depois.tipo).toBe('wiki');
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+  });
+
+  // O limite tem de ser um limite de verdade, e "não consegui comparar" tem de
+  // significar RECUSAR. Tratar incomparável como igual é o defeito acima escrito
+  // de outro jeito.
+  it('recusa a edição quando a PROFUNDIDADE estoura o limite', () => {
+    const fundo = `${'['.repeat(200)}${']'.repeat(200)}`;
+    const entrada = `---\nfundo: ${fundo}\ncriado: 2026-01-01\n---\ncorpo\n`;
+
+    // O bloco é válido: o js-yaml o lê sem reclamar.
+    expect(matter(entrada, {}).data).toHaveProperty('fundo');
+
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+    // Recusa = conteúdo intacto. Uma chave por preencher é visível e reparável
+    // num toque; uma edição certificada às cegas não é.
+    expect(out).toBe(entrada);
+    expect(matter(out, {}).data).not.toHaveProperty('tipo');
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+  });
+
+  // O outro limite. A profundidade sozinha não cobre uma estrutura LARGA, e o
+  // orçamento de nós é o que mantém a caminhada total mesmo se a memoização de
+  // pares um dia deixar de colapsar uma DAG. Sem ele o `MAX_COMPARE_DEPTH` é o
+  // único freio, e um grafo raso e enorme passa por baixo dele.
+  it('recusa a edição quando o número de NÓS estoura o orçamento', () => {
+    const itens = Array.from({ length: 25000 }, (_, i) => `t${i}`).join(',');
+    const entrada = `---\ntags: [${itens}]\ncriado: 2026-01-01\n---\ncorpo\n`;
+    expect(ensureFrontmatter(entrada, { tipo: 'wiki' })).toBe(entrada);
+
+    // E a MESMA forma dentro do orçamento continua sendo preenchida: o limite é
+    // um limite, não uma recusa de listas.
+    const pequena = '---\ntags: [t0,t1,t2]\ncriado: 2026-01-01\n---\ncorpo\n';
+    expect(ensureFrontmatter(pequena, { tipo: 'wiki' })).toBe(
+      '---\ntags: [t0,t1,t2]\ncriado: 2026-01-01\ntipo: wiki\n---\ncorpo\n',
+    );
+  });
+
+  // O sentinela anterior era um byte NUL LITERAL no fonte. Como sentinela era
+  // sólido — nada o forja —, mas ele torna o arquivo BINÁRIO para as ferramentas
+  // de busca por conteúdo: `grep`, `ugrep -I` (o grep configurado deste repo) e
+  // `file` passam a tratar `src/write/template.ts` como dados, e um `grep` no
+  // repositório inteiro devolve silenciosamente NADA para este arquivo.
+  it('não deixa byte NUL no fonte — o módulo tem de continuar pesquisável', () => {
+    expect(readFileSync(MODULE_SRC).includes(0)).toBe(false);
+  });
+});
+
+// O comentário do `advance` afirmava que todo construto multi-linha que não é
+// aspa nem coleção em fluxo continua INDENTADO. É falso para a sequência em
+// bloco sob uma chave de mapeamento — os itens ficam na COLUNA 0:
+//
+//     tags:
+//     - projeto
+//     - vault
+//
+// que é a forma mais comum de frontmatter no Obsidian. Cada `- item` virava
+// candidato ILEGÍVEL, e o `verifiedEdit` só rejeitava a substituição por causa
+// do cheque de VALORES: removidos os DOIS — o rastreamento e o cheque de
+// valores —, a saída vira `tags:\n- projeto\ntipo: wiki` e a nota perde uma tag
+// em silêncio, com o cheque de conjunto de chaves passando limpo, porque `tags`
+// continua lá. Ou seja: os dois cheques do `verifiedEdit` NÃO são redundantes, e
+// esta é a forma que os separa.
+//
+// Com o rastreamento corrigido esses itens deixam de ser candidatos, então o
+// primeiro teste abaixo é uma TRAVA DE REGRESSÃO na saída (falha no tip anterior
+// e sob a dupla mutação acima), e o segundo é o que prende o rastreamento
+// sozinho, pelo orçamento de candidatos.
+describe('ensureFrontmatter — item de sequência em bloco não é chave de topo', () => {
+  it('preserva os dois itens de uma `tags` em bloco', () => {
+    const entrada = '---\ntags:\n- projeto\n- vault\n---\ncorpo\n';
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+
+    expect(out).toBe('---\ntags:\n- projeto\n- vault\ntipo: wiki\n---\ncorpo\n');
+    const depois = matter(out, {}).data as Record<string, unknown>;
+    expect(depois.tags).toEqual(['projeto', 'vault']);
+    expect(depois.tipo).toBe('wiki');
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+  });
+
+  // O caso que prende o rastreamento independentemente do cheque de valores:
+  // cada item de sequência consumia uma vaga do orçamento
+  // `MAX_OPAQUE_CANDIDATES`, e uma lista mais longa que o orçamento esgota as
+  // tentativas ANTES da linha que de fato declara a chave. A chave então fica
+  // por preencher para sempre — o mesmo modo de falha que as continuações
+  // longas já exercitam, por uma porta que ninguém tinha fechado.
+  it('alcança a chave real além de uma sequência em bloco mais longa que o orçamento', () => {
+    const itens = Array.from({ length: 12 }, (_, i) => `- t${i + 1}`).join('\n');
+    const entrada = `---\ntags:\n${itens}\n"\\x74ipo":\n---\ncorpo\n`;
+    const out = ensureFrontmatter(entrada, { tipo: 'wiki' });
+
+    const depois = matter(out, {}).data as Record<string, unknown>;
+    expect(depois.tipo).toBe('wiki');
+    expect(depois.tags).toHaveLength(12);
+    // E sem duplicar: uma segunda `tipo` faria o js-yaml recusar o bloco.
+    expect(out.match(/^tipo: wiki$/gm) ?? []).toHaveLength(1);
+    expect(ensureFrontmatter(out, { tipo: 'wiki' })).toBe(out);
+  });
+});

@@ -513,10 +513,28 @@ interface ScanState {
  * Advances `state` across one line.
  *
  * Deliberately a SCANNER, not a parser: it answers one question — is the next
- * line still inside something? — and it only has to be right about quotes and
- * flow collections, because every other multi-line construct YAML has (block
- * scalars, folded plain scalars, nested mappings) continues INDENTED, and an
- * indented line is disqualified as a top-level start on sight.
+ * line still inside something? — and quotes and flow collections are the only
+ * two things it tracks, because they are the only constructs whose CONTINUATION
+ * lands at column 0 while still needing the character-level state of the line
+ * before it. Block scalars, folded plain scalars and nested mappings all
+ * continue INDENTED, and an indented line is disqualified as a top-level start
+ * on sight.
+ *
+ * The one column-0 continuation that is NOT a quote or a flow collection is a
+ * block sequence under a mapping key — YAML allows its items at the SAME
+ * indentation as the key:
+ *
+ *     tags:
+ *     - projeto
+ *     - vault
+ *
+ * That is the most common frontmatter shape Obsidian writes, and it needs no
+ * state at all: `BLOCK_SEQ_ITEM_RE` recognises such an item from the line
+ * itself, and `topLevelStarts` drops it. An earlier version of this comment
+ * claimed every non-quote, non-flow continuation was indented; it was wrong
+ * about exactly this case, each `- item` became an unreadable key CANDIDATE, and
+ * only `verifiedEdit`'s value comparison stood between that and a note silently
+ * losing a tag.
  *
  * `nodeStart` is what keeps the quote tracking honest. A quote opens a quoted
  * scalar only where a node may begin; anywhere else it is literal content, so
@@ -631,8 +649,23 @@ interface TopLevelStart {
 }
 
 /**
- * Every line the parser would read as opening a top-level entry, with the key it
- * spells when that spelling is readable.
+ * A block sequence ENTRY: `-` followed by whitespace or nothing at all.
+ *
+ * At column 0 such a line is never a mapping entry — it is an item of a sequence
+ * that either belongs to the mapping key above it or makes the whole document a
+ * sequence (which `isPlainMapping` refuses). Either way it declares no top-level
+ * key, readable or not, so it must not enter the candidate set.
+ *
+ * The `[ \t]` is what keeps `-foo: bar` — a plain scalar key that merely starts
+ * with a dash — out of this: YAML reads `-` as the sequence indicator only when
+ * whitespace or the end of the line follows it, and this matches that rule
+ * exactly rather than approximating it with `startsWith('-')`.
+ */
+const BLOCK_SEQ_ITEM_RE = /^-(?:[ \t]|$)/;
+
+/**
+ * Every line the parser would read as opening a top-level MAPPING entry, with
+ * the key it spells when that spelling is readable.
  */
 function topLevelStarts(block: string[]): TopLevelStart[] {
   const state: ScanState = { quote: null, flow: 0, nodeStart: true };
@@ -641,7 +674,13 @@ function topLevelStarts(block: string[]): TopLevelStart[] {
   for (let index = 0; index < block.length; index += 1) {
     const line = block[index] ?? '';
     const open = state.quote !== null || state.flow > 0;
-    if (!open && line !== '' && !/^[ \t]/.test(line) && !line.startsWith('#')) {
+    if (
+      !open &&
+      line !== '' &&
+      !/^[ \t]/.test(line) &&
+      !line.startsWith('#') &&
+      !BLOCK_SEQ_ITEM_RE.test(line)
+    ) {
       starts.push({ index, key: topLevelKeyOf(line) });
     }
     advance(line, state);
@@ -667,13 +706,101 @@ function topLevelStarts(block: string[]): TopLevelStart[] {
  */
 const MAX_OPAQUE_CANDIDATES = 8;
 
-/** A comparable rendering of a parsed YAML value, Dates and all. */
-function shapeOf(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? 'undefined';
-  } catch {
-    return ' incomparável';
-  }
+/**
+ * How much of a value graph `provablyEqual` will walk before it gives up.
+ *
+ * The caps are what make comparison safe on frontmatter a model controls, and
+ * `JSON.stringify` — the comparison they replace — had none. js-yaml resolves an
+ * alias by REFERENCE, so `a0: &a0 [q ×10]` followed by `a1: &a1 [*a0 ×10]` and
+ * so on parses in linear time and holds a handful of arrays; serialising it
+ * MATERIALISES the full 10ⁿ expansion. Measured through `ensureFrontmatter`: 394
+ * bytes of input cost 4055ms and ~1GB, and 502 bytes never finished at all. That
+ * is not merely a slow function — the MCP server is a single event loop and
+ * `ensureFrontmatter` is synchronous and never awaits, so no timeout at the tool
+ * layer can interrupt it and the whole server stops. `src/vault/frontmatter.ts:47`
+ * documents this obligation and hands it to whoever serialises arbitrary
+ * frontmatter keys; this is that bound.
+ *
+ * Ordinary frontmatter is orders of magnitude under both numbers — a note with
+ * fifty keys and a dozen tags is a few hundred nodes, three deep — so a cap is
+ * reached only by something built to reach it, and reaching one means REFUSING
+ * the edit rather than guessing about it.
+ */
+const MAX_COMPARE_NODES = 20000;
+const MAX_COMPARE_DEPTH = 64;
+
+/**
+ * Whether `a` and `b` are PROVED equal by a bounded structural walk.
+ *
+ * `false` means "not proved", which merges two outcomes deliberately: they
+ * really differ, or the walk hit a cap and cannot say. Both have to lead to the
+ * same place — `verifiedEdit` refuses — so separating them would be a
+ * distinction with no caller. Merging them the OTHER way is the defect this
+ * replaces: every value `JSON.stringify` refused collapsed to one sentinel, so
+ * `sentinel === sentinel` and a check whose entire job is to refuse passed
+ * vacuously on exactly the inputs it exists for. A self-referential
+ * `notas: &n [*n, …]` was enough to make `verifiedEdit` certify an edit that
+ * deleted one of the user's list items.
+ *
+ * Comparison is by REFERENCE, which is the same thing that makes it cheap and
+ * makes it total. `assumed` records every object pair the walk has entered and
+ * answers `true` on re-entry, so a DAG of aliases costs one visit per distinct
+ * PAIR instead of one per path — the alias bomb above collapses from 10ⁿ to n —
+ * and a CYCLE terminates instead of recursing forever. Assuming a pair equal
+ * while still comparing it is sound because a real difference underneath makes
+ * the enclosing call return `false`, and `false` propagates all the way out: a
+ * `true` result requires every assumption on the path to have been confirmed.
+ * That is ordinary co-inductive equality on regular trees.
+ *
+ * Dates are compared by `getTime`, because `criado: 2026-08-24` comes back as a
+ * `Date` on both sides and two distinct `Date` objects are never `===`.
+ */
+function provablyEqual(a: unknown, b: unknown): boolean {
+  const assumed = new Map<object, Set<object>>();
+  let budget = MAX_COMPARE_NODES;
+
+  const walk = (x: unknown, y: unknown, depth: number): boolean => {
+    if (budget <= 0 || depth > MAX_COMPARE_DEPTH) return false;
+    budget -= 1;
+
+    if (x === y) return true;
+
+    const bothObjects =
+      typeof x === 'object' && x !== null && typeof y === 'object' && y !== null;
+    // Not both objects and not `===`: only NaN is left, which is never `===`
+    // itself and is what a `.nan` scalar parses to.
+    if (!bothObjects) return Number.isNaN(x) && Number.isNaN(y);
+
+    const seen = assumed.get(x as object);
+    if (seen) {
+      if (seen.has(y as object)) return true;
+      seen.add(y as object);
+    } else {
+      assumed.set(x as object, new Set([y as object]));
+    }
+
+    if (x instanceof Date || y instanceof Date) {
+      if (!(x instanceof Date) || !(y instanceof Date)) return false;
+      const tx = x.getTime();
+      const ty = y.getTime();
+      return tx === ty || (Number.isNaN(tx) && Number.isNaN(ty));
+    }
+
+    if (Array.isArray(x) || Array.isArray(y)) {
+      if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length) return false;
+      return x.every((item, i) => walk(item, y[i], depth + 1));
+    }
+
+    const xr = x as Record<string, unknown>;
+    const yr = y as Record<string, unknown>;
+    const keys = Object.keys(xr);
+    if (keys.length !== Object.keys(yr).length) return false;
+    return keys.every(
+      (k) => Object.prototype.hasOwnProperty.call(yr, k) && walk(xr[k], yr[k], depth + 1),
+    );
+  };
+
+  return walk(a, b, 0);
 }
 
 /**
@@ -690,7 +817,10 @@ function shapeOf(value: unknown): string {
  *  - its key set is exactly the old one plus `key`;
  *  - every other key still resolves to exactly what it did before — compared
  *    THROUGH the parser, so `criado: 2026-08-24` coming back as a `Date` on both
- *    sides is a match rather than a mismatch.
+ *    sides is a match rather than a mismatch, and by a bounded walk that can
+ *    answer "I could not compare these", which is REFUSED like any other
+ *    mismatch. Treating incomparable as equal is the wrong default for a check
+ *    whose only job is to refuse; see `provablyEqual`.
  *
  * Those two together also settle the value of `key` itself, which is why nothing
  * here checks it: a mapping js-yaml accepts has no duplicated key, so if `key`
@@ -699,11 +829,18 @@ function shapeOf(value: unknown): string {
  * duplicate is precisely what makes js-yaml refuse the block — and the tests
  * exercise it directly, so re-asserting it here would be untestable ceremony.
  *
- * The two checks overlap: for a REPLACEMENT, dropping either one is caught by
- * the other, since replacing a line always removes the key it declared. They are
- * kept as a pair because they answer different questions — "did this add
- * anything I did not ask for" and "did this disturb anything" — and only the
- * first constrains the APPEND path, where nothing is removed.
+ * The two checks are NOT redundant, and an earlier version of this comment
+ * claimed they were. A block sequence separates them:
+ *
+ *     tags:
+ *     - projeto
+ *     - vault
+ *
+ * Replacing `- vault` with `tipo: wiki` yields the key set `{tags, tipo}` —
+ * exactly what was expected, because `tags` still exists — while `tags` has
+ * quietly lost an item. Only the VALUE check catches that. And only the KEY-SET
+ * check constrains the APPEND path, where nothing is removed. Each is the sole
+ * guard on a case the other misses; neither may be dropped as ceremony.
  *
  * A check that asks the parser cannot be wrong about the parser, and the cost is
  * one parse of a frontmatter-sized block per key filled.
@@ -728,7 +865,7 @@ function verifiedEdit(
 
   for (const other of Object.keys(data)) {
     if (other === key) continue;
-    if (shapeOf(parsed[other]) !== shapeOf(data[other])) return undefined;
+    if (!provablyEqual(parsed[other], data[other])) return undefined;
   }
 
   return { block: next, data: parsed };
