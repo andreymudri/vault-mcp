@@ -39,7 +39,7 @@ export function resolveVaultPath(env: NodeJS.ProcessEnv): string {
   if (raw === undefined || raw.trim() === '') {
     throw new VaultPathError(
       'VAULT_PATH não definida: aponte-a para a pasta raiz do vault, ex.: ' +
-        'VAULT_PATH="$HOME/Knowledge Vault" npx vault-mcp',
+        'VAULT_PATH="/caminho/absoluto/do/vault" node /caminho/absoluto/do/vault-mcp/dist/server/index.js',
     );
   }
 
