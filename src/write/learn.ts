@@ -306,12 +306,61 @@ async function existingDomains(vaultRoot: string): Promise<string[]> {
   }
 }
 
-async function fileExists(absPath: string): Promise<boolean> {
+/**
+ * A file bigger than this cannot be blank in any sense worth the read. The check exists to keep
+ * "is this path occupied?" from reading a whole note off disk on every call, and erring towards
+ * OCCUPIED is the safe direction: an occupied path is one this module never writes over.
+ */
+const MAX_BLANK_PROBE_BYTES = 4096;
+
+/**
+ * True when `absPath` holds a note with actual CONTENT.
+ *
+ * Blank is not occupied, and the distinction is the whole point. Obsidian leaves a file holding a
+ * single `\n` — or a couple of spaces — whenever a user clicks an unresolved link or presses Enter
+ * in a new note, and that file is a placeholder, not a note. Treated as occupied, the learning
+ * gets appended INTO it by `editNote`, which runs neither `ensureFrontmatter` nor `applyTemplate`:
+ * the result has no `tipo: wiki`, no tags, no `criado`, no `# H1` and no skeleton, so the next
+ * scan reads it as an untyped note, `vault_list({tipo:'wiki'})` never returns it and the
+ * tag-overlap arm of `decideDuplicate` can never fire for it again. Permanent damage, reported as
+ * a plain success.
+ *
+ * `propagate` (`src/write/propagate.ts`) already draws the line here, with `before.trim() !== ''`
+ * and a docblock naming the same hazard. Two modules in the same directory MUST NOT disagree about
+ * what "blank" means.
+ */
+async function isOccupied(absPath: string): Promise<boolean> {
   try {
     const stat = await fs.stat(absPath);
-    return stat.isFile();
+    if (!stat.isFile()) return false;
+    if (stat.size > MAX_BLANK_PROBE_BYTES) return true;
+    return (await fs.readFile(absPath, 'utf8')).trim() !== '';
   } catch {
     return false;
+  }
+}
+
+/**
+ * Removes a BLANK file standing exactly where the new note is about to be written.
+ *
+ * `writeNote` decides between creating and replacing by whether it could READ the path, so a
+ * blank placeholder there makes it take the replace branch: no `_templates/wiki.md` skeleton, no
+ * `# H1`, and a note that violates the plan's "cria nota nova a partir de _templates/wiki.md".
+ * Taking a different, free name instead would be worse — the user clicked a link to THIS name, so
+ * the placeholder would stay blank forever while the learning sat in a sibling file, and nothing
+ * reports that: the link is not broken, the file exists, and it is empty.
+ *
+ * Deleting is safe precisely because the file is blank: there is no content to lose. It is the
+ * only way to reach `writeNote`'s create branch from here, since `writer.ts` is outside this
+ * task's file set.
+ */
+async function clearBlankStub(absPath: string): Promise<void> {
+  try {
+    const content = await fs.readFile(absPath, 'utf8');
+    if (content.trim() !== '') return;
+    await fs.rm(absPath);
+  } catch {
+    // Nothing there, or nothing readable: `writeNote` owns whatever happens next.
   }
 }
 
@@ -486,6 +535,11 @@ async function attemptAppend(
  * the numeric suffixes after it keep the search bounded and terminating. Exhausting them means a
  * vault state no ordinary use produces, and it is refused loudly rather than written over: the
  * caller still holds the text, which a silent overwrite would not leave true of the note.
+ *
+ * A sibling name loses nothing only because `isOccupied` reads BLANK as free: were a placeholder
+ * counted as occupied, the user who clicked a link to `cache-wrapper-ttl` would be left with that
+ * file blank forever while the learning sat in `cache-wrapper-ttl-2026-08-20.md` — and nothing
+ * would report it, since the link is not broken and the file exists.
  */
 async function freeNotePath(
   vaultRoot: string,
@@ -498,7 +552,7 @@ async function freeNotePath(
     const room = MAX_SLUG_CHARS - suffix.length - 1;
     const head = (noteSlug.length <= room ? noteSlug : noteSlug.slice(0, room)).replace(/-$/, '');
     const candidate = `${WIKI_PREFIX}${dominio}/${head}-${suffix}.md`;
-    if (!(await fileExists(resolveWritePath(vaultRoot, candidate)))) return candidate;
+    if (!(await isOccupied(resolveWritePath(vaultRoot, candidate)))) return candidate;
   }
   throw new LearnError(
     `não há nome livre para a nota em ${WIKI_PREFIX}${dominio}/: 100 variações já existem`,
@@ -568,6 +622,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
 
   let write: WriteResult | undefined;
   let action: 'appended' | 'created' = 'created';
+  let titleCollision: string | undefined;
   const failures: string[] = [];
 
   if (targetPath !== undefined) {
@@ -589,13 +644,23 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   // rather than once up front — asked up front it leaves the failed-append route going straight
   // to the replace, which is exactly the destruction this guard exists to stop. Same title, same
   // note: append to it instead.
-  if (write === undefined && (await fileExists(resolveWritePath(opts.vaultRoot, newRelPath)))) {
+  if (write === undefined && (await isOccupied(resolveWritePath(opts.vaultRoot, newRelPath)))) {
     if (newRelPath !== targetPath) {
       const attempt = await attemptAppend(opts, newRelPath, titulo, date);
       if (attempt.write !== undefined) {
         write = attempt.write;
         action = 'appended';
-        reason = `nota já existe em ${newRelPath}`;
+        // BOTH halves are kept. This route appends on the strength of the FILE NAME alone, after
+        // the duplicate rule looked at the same note and said no — which is the outcome this
+        // module's own header calls the worst one it can produce, an unrelated insight buried in
+        // a note nobody will look at for it. Taking a free name instead would be worse in the
+        // common case: repeating `vault_learn` under one title would scatter dated siblings
+        // instead of growing the note, which is the accumulation the plan asks for. So the append
+        // stands and the caller is told exactly what happened and what the rule actually decided.
+        reason = `${decision.reason}; nota já existe em ${newRelPath}, anexado nela`;
+        titleCollision =
+          `anexado em ${newRelPath} por coincidência de título; a checagem de duplicata não ` +
+          `indicou essa nota (${decision.reason}) — confira se o assunto é o mesmo`;
       } else if (attempt.failure !== undefined) {
         failures.push(attempt.failure);
       }
@@ -611,6 +676,9 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   }
 
   if (write === undefined) {
+    // A blank placeholder at this exact path is cleared rather than written over, so `writeNote`
+    // takes its CREATE branch and the note is born with the template skeleton and its frontmatter.
+    await clearBlankStub(resolveWritePath(opts.vaultRoot, newRelPath));
     write = await writeNote({
       vaultRoot: opts.vaultRoot,
       path: newRelPath,
@@ -658,6 +726,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     .join('');
 
   const warning = joinWarnings([
+    titleCollision,
     appendFailure,
     truncated
       ? `insight truncado em ${MAX_QUERY_SOURCE_CHARS} caracteres para a checagem de duplicata`

@@ -116,6 +116,23 @@ function occurrences(haystack: string, needle: string): number {
   return count;
 }
 
+const CONTEUDO_FORA = 'conteudo real, fora do vault\n';
+
+/**
+ * A note that EXISTS and holds content, and that the write guard will not write to: a symlink
+ * pointing out of the vault, which `assertNoSymlinkEscape` refuses.
+ *
+ * It is the deterministic way to reach the "occupied and unappendable" branch. A blank stub no
+ * longer reaches it (blank is not occupied), and the other routes - a file vanishing, an edit
+ * losing its anchor - are races.
+ */
+async function notaBlindada(vaultRoot: string, rel: string): Promise<string> {
+  const fora = path.join(path.dirname(vaultRoot), `fora-${path.basename(rel)}`);
+  await fs.writeFile(fora, CONTEUDO_FORA, 'utf8');
+  await fs.symlink(fora, path.join(vaultRoot, rel));
+  return fora;
+}
+
 /** A synthetic scored chunk, for the pure duplicate rule. */
 function scored(
   notePath: string,
@@ -472,6 +489,14 @@ describe('learn — roteamento', () => {
     // note: writing it would have replaced `cache-wrapper.md` with three paragraphs.
     expect(result.action).toBe('appended');
     expect(result.path).toBe(CACHE_WRAPPER);
+    // This route appends on the FILE NAME alone, after the duplicate rule looked at that same
+    // note and said no. Both halves have to reach the caller, and the warning has to say the
+    // append rests on a title coincidence - otherwise the one outcome this module calls its worst
+    // is the only one it reports as an ordinary success.
+    expect(result.reason).toContain('razão');
+    expect(result.reason).toContain(`nota já existe em ${CACHE_WRAPPER}`);
+    expect(result.warning).toContain('coincidência de título');
+
     const after = await read(vaultRoot, CACHE_WRAPPER);
     expect(after.startsWith(before.trimEnd())).toBe(true);
     expect(after).toContain('## Solução');
@@ -1054,46 +1079,55 @@ describe('learn - o insight nunca se perde', () => {
     await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
   });
 
-  it('cria nota nova quando a anexação é impossível, em vez de derrubar a chamada', async () => {
-    // An empty stub note - Obsidian makes these - is a target `editNote` cannot anchor to: it
-    // refuses an empty `oldText`. Before the fallback this threw and the insight was lost.
-    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
-    await fs.writeFile(path.join(vaultRoot, stub), '', 'utf8');
+  // Obsidian leaves exactly these behind: click an unresolved link, or press Enter in a new note.
+  // A placeholder is not a note, and the outcome must not turn on which whitespace byte is in it.
+  for (const [rotulo, conteudo] of [
+    ['zero bytes', ''],
+    ['uma quebra de linha', '\n'],
+    ['só espaços', '   '],
+  ] as const) {
+    it(`escreve a nota no lugar do stub em branco (${rotulo}), com o esqueleto do template`, async () => {
+      const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+      await fs.writeFile(path.join(vaultRoot, stub), conteudo, 'utf8');
 
-    const result = await learn({
-      vaultRoot,
-      retriever: makeRetriever(vaultRoot),
-      titulo: 'Cache Wrapper TTL',
-      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
-      contexto: 'Revisando o wrapper de cache',
-      dominio: 'patterns',
-      tags: ['redis', 'cache'],
-      now: NOW,
+      const result = await learn({
+        vaultRoot,
+        retriever: makeRetriever(vaultRoot),
+        titulo: 'Cache Wrapper TTL',
+        insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+        contexto: 'Revisando o wrapper de cache',
+        dominio: 'patterns',
+        tags: ['redis', 'cache'],
+        now: NOW,
+      });
+
+      // The path the user's own link points at, not a dated sibling that would leave the
+      // placeholder blank forever.
+      expect(result.action).toBe('created');
+      expect(result.path).toBe(stub);
+      expect(await exists(path.join(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md')))
+        .toBe(false);
+
+      // `editNote` would have appended into the placeholder and run neither `ensureFrontmatter`
+      // nor `applyTemplate`, leaving a note with no tipo, no tags and no skeleton - invisible to
+      // `vault_list({tipo:'wiki'})` and unreachable by the tag arm of the duplicate rule.
+      const nota = await read(vaultRoot, stub);
+      const parsed = matter(nota, {});
+      expect(parsed.data.tipo).toBe('wiki');
+      expect(parsed.data.tags).toEqual(['redis', 'cache']);
+      expect(nota).toContain('TTL configuravel');
+      expect(nota).toContain('## Contexto');
+      expect(nota).toContain('## Solução');
+      expect(nota).toContain('## Exemplo');
+      expect(nota.split('\n').some((l) => l.startsWith('# '))).toBe(true);
+
+      // Created, so it is listed: a note nobody links to is a note nobody finds.
+      expect(await read(vaultRoot, '02-wiki/patterns/patterns-moc.md')).toContain(
+        '- [[cache-wrapper-ttl]] —',
+      );
+      expect(await read(vaultRoot, DAILY_REL)).toContain('[[cache-wrapper-ttl]]');
     });
-
-    expect(result.action).toBe('created');
-    // NOT over the stub: `writeNote` is create-OR-REPLACE, so an occupied path is never handed to
-    // it. A free name keeps both files.
-    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
-    expect(await read(vaultRoot, stub)).toBe('');
-    expect(result.warning).toContain(stub);
-    expect(result.committed).toBe(true);
-
-    const nota = await read(vaultRoot, result.path);
-    expect(nota).toContain('TTL configuravel');
-    // A genuinely new file, so the `_templates/wiki.md` skeleton applies - which `writeNote`
-    // skips for any path that already exists, a zero-byte stub included.
-    expect(nota).toContain('## Contexto');
-    expect(nota).toContain('## Solução');
-    expect(nota).toContain('## Exemplo');
-    expect(nota.split('\n').some((l) => l.startsWith('# '))).toBe(true);
-
-    // The MOC and the daily point at the file that exists, not at the name the call started from.
-    expect(await read(vaultRoot, '02-wiki/patterns/patterns-moc.md')).toContain(
-      '- [[cache-wrapper-ttl-2026-08-20]] —',
-    );
-    expect(await read(vaultRoot, DAILY_REL)).toContain('[[cache-wrapper-ttl-2026-08-20]]');
-  });
+  }
 
   it('grava o aprendizado quando a nota alvo sumiu entre o índice e a escrita', async () => {
     // The index can name a note that is no longer on disk - the user deleted it in Obsidian
@@ -1155,10 +1189,34 @@ describe('learn - o insight nunca se perde', () => {
     expect(await logLines(vaultRoot)).toBe(1);
   });
 
+  it('usa um nome livre quando a nota do título existe e não aceita anexação', async () => {
+    const alvo = '02-wiki/patterns/cache-wrapper-ttl.md';
+    const fora = await notaBlindada(vaultRoot, alvo);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
+    expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
+    // The warning has to say BOTH which target failed and where the learning ended up: a user
+    // told only the first half has to go looking for their own insight.
+    expect(result.warning).toContain(alvo);
+    expect(result.warning).toContain(`aprendizado gravado em ${result.path}`);
+    expect(await fs.readFile(fora, 'utf8')).toBe(CONTEUDO_FORA);
+  });
+
   it('procura o próximo nome livre quando o nome com data também está ocupado', async () => {
-    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
     const datado = '02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md';
-    await fs.writeFile(path.join(vaultRoot, stub), '', 'utf8');
+    await notaBlindada(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl.md');
     await fs.writeFile(path.join(vaultRoot, datado), 'conteudo anterior sem relacao\n', 'utf8');
 
     const result = await learn({
@@ -1173,9 +1231,74 @@ describe('learn - o insight nunca se perde', () => {
     });
 
     expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20-2.md');
-    // Neither occupied file was written over.
-    expect(await read(vaultRoot, stub)).toBe('');
     expect(await read(vaultRoot, datado)).toBe('conteudo anterior sem relacao\n');
+  });
+
+  it('mantém o nome livre dentro do limite de tamanho do slug', async () => {
+    // 'ab ab ab ...' is chosen for arithmetic, not for looks: it makes the slug exactly 80
+    // characters AND puts a hyphen exactly where the date suffix has to cut it, so both halves of
+    // the bounding - the truncation and the trailing-hyphen trim - are exercised at once.
+    const titulo = 'ab '.repeat(40);
+    const base = slug(titulo);
+    expect(base).toHaveLength(80);
+    await notaBlindada(vaultRoot, `02-wiki/patterns/${base}.md`);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo,
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    const nome = path.basename(result.path, '.md');
+    expect(nome.length).toBeLessThanOrEqual(80);
+    expect(nome.endsWith(`-${TODAY}`)).toBe(true);
+    expect(nome).not.toContain('--');
+    expect(nome.startsWith('ab-ab-ab')).toBe(true);
+  });
+
+  it('recusa em vez de escrever por cima quando não há nome livre', async () => {
+    // The last-resort guard protecting the fix: without the throw, `writeNote` is handed an
+    // OCCUPIED path and is create-OR-REPLACE. It takes 101 files to reach, which is why it is a
+    // coverage gap and not a live bug - and why it still has to be pinned.
+    await notaBlindada(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl.md');
+    const nomes = [`cache-wrapper-ttl-${TODAY}`];
+    for (let i = 2; i <= 100; i += 1) nomes.push(`cache-wrapper-ttl-${TODAY}-${i}`);
+    await Promise.all(
+      nomes.map((nome) =>
+        fs.writeFile(path.join(vaultRoot, '02-wiki/patterns', `${nome}.md`), 'ocupado\n', 'utf8'),
+      ),
+    );
+
+    // A stub with NO results, because the 100 extra files are enough to move BM25's corpus
+    // statistics: with the real retriever the duplicate rule starts pointing at
+    // `cache-wrapper.md`, the append succeeds there, and the name search under test never runs.
+    const retriever = { search: () => ({ results: [] }) } as unknown as Retriever;
+
+    await expect(
+      learn({
+        vaultRoot,
+        retriever,
+        titulo: 'Cache Wrapper TTL',
+        insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+        contexto: 'Revisando o wrapper de cache',
+        dominio: 'patterns',
+        tags: ['redis', 'cache'],
+        now: NOW,
+      }),
+    ).rejects.toBeInstanceOf(LearnError);
+
+    // Nothing written, nothing committed, nothing overwritten.
+    for (const nome of nomes) {
+      expect(await read(vaultRoot, `02-wiki/patterns/${nome}.md`)).toBe('ocupado\n');
+    }
+    // Nothing propagated either: the MOC this domain does not have yet was never created.
+    expect(await exists(path.join(vaultRoot, '02-wiki/patterns/patterns-moc.md'))).toBe(false);
+    expect(await logLines(vaultRoot)).toBe(1);
   });
 
   it('nunca substitui uma nota existente quando a anexação no alvo falha', async () => {
