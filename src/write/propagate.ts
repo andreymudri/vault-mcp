@@ -1,8 +1,14 @@
-import { promises as fs, type Stats } from 'node:fs';
+import { promises as fs } from 'node:fs';
 
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
-import { forMessage, guardedPath, INVISIBLE_CHARS, PathGuardError } from './paths.js';
+import {
+  classifyNode,
+  forMessage,
+  guardedPath,
+  INVISIBLE_CHARS,
+  PathGuardError,
+} from './paths.js';
 import { ensureFrontmatter, formatLocal } from './template.js';
 
 /**
@@ -446,15 +452,6 @@ export interface PropagateResult {
   warnings: string[];
 }
 
-/** `lstat` of a path, or `undefined` when nothing is there. */
-async function lstatOrUndefined(absPath: string): Promise<Stats | undefined> {
-  try {
-    return await fs.lstat(absPath);
-  } catch {
-    return undefined;
-  }
-}
-
 /** Everything one target needs, so the read/transform/write/report dance lives in one place. */
 interface Target {
   relPath: string;
@@ -490,13 +487,13 @@ async function applyTarget(
     // copy. Neither is a file this module may touch, and both paths here are built from
     // caller-supplied input. `learn.ts`'s `pathState` draws the same line for the same
     // reason and the two must not disagree.
-    const stat = await lstatOrUndefined(absPath);
-    if (stat !== undefined && !stat.isFile()) {
+    const kind = await classifyNode(absPath);
+    if (kind === 'foreign') {
       throw new PathGuardError('alvo não é um arquivo comum (link, diretório ou dispositivo)');
     }
 
     let before = '';
-    let exists = stat !== undefined;
+    let exists = kind === 'file';
     if (exists) {
       try {
         before = await fs.readFile(absPath, 'utf8');

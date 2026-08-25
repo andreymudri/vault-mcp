@@ -80,7 +80,54 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
- * A throwaway copy of `test/fixtures/vault` in `os.tmpdir()`. The fixture itself is
+ * Runs `work` while WATCHING `fifo` for a reader, and unblocks any reader that appears.
+ *
+ * A read of a FIFO nobody writes to never returns, and a test that hits one does not fail — it
+ * HANGS: vitest prints the failure and then never exits ("close timed out", "Failed to terminate
+ * worker"), which costs a whole run and reports nothing. So the write end is opened NON-BLOCKING,
+ * which answers ENXIO while nobody is reading and succeeds the instant somebody is; closing it
+ * immediately hands the reader EOF. The call under test therefore always finishes, and `opened`
+ * says whether it opened the FIFO at all — which is the thing being asserted, rather than left to
+ * a timeout.
+ */
+async function withFifoWatch<T>(
+  fifo: string,
+  work: () => Promise<T>
+): Promise<{ result: T; opened: boolean }> {
+  let finished = false;
+  let opened = false;
+  const watch = (async (): Promise<void> => {
+    const deadline = Date.now() + 20_000;
+    while (!finished && Date.now() < deadline) {
+      try {
+        const handle = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+        await handle.close();
+        opened = true;
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+  })();
+
+  try {
+    const result = await work();
+    return { result, opened };
+  } finally {
+    finished = true;
+    await watch;
+  }
+}
+
+/** Runs `work`, returning whatever it rejects with instead of letting the rejection escape. */
+async function refusal(work: () => Promise<unknown>): Promise<unknown> {
+  return work().then(
+    () => 'a chamada foi bem-sucedida',
+    (err: unknown) => err
+  );
+}
+
+/** A throwaway copy of `test/fixtures/vault` in `os.tmpdir()`. The fixture itself is
  * read-only shared state across parallel test files, so every write test gets its own
  * copy and never touches the original.
  */
@@ -1415,6 +1462,87 @@ describe('write guard', () => {
     });
     expect(result.created).toBe(true);
     expect(await exists(result.absPath)).toBe(true);
+  });
+
+  it('não abre um FIFO no caminho da nota ao escrever', async () => {
+    // `guardedPath` answers a question about the PATH: containment, suffix, denied segments,
+    // symlink escape. A FIFO inside the vault passes every one of them — it is `.md`, it is
+    // contained, it is in no denied directory — and the read that follows blocks on `open()` of
+    // a pipe with no writer and never returns. The server serialises writes through a queue
+    // that chains onto the previous promise, so ONE of these wedges every later write for the
+    // life of the process while unqueued reads keep answering: a server that looks alive with
+    // its whole write surface dead.
+    const fifo = path.join(vaultRoot, '02-wiki', 'cano.md');
+    await execFileAsync('mkfifo', [fifo]);
+    const antes = await countCommits(vaultRoot);
+
+    const { result, opened } = await withFifoWatch(fifo, () =>
+      refusal(() => writeNote({ vaultRoot, path: '02-wiki/cano.md', content: 'texto' }))
+    );
+
+    expect(opened).toBe(false);
+    expect(result).toBeInstanceOf(PathGuardError);
+    // Nothing was written over it and nothing was committed.
+    expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+    expect(await countCommits(vaultRoot)).toBe(antes);
+  }, 30_000);
+
+  it('não abre um FIFO no caminho da nota ao editar', async () => {
+    // The same hole on the other exported write path, and the same classification closes it.
+    const fifo = path.join(vaultRoot, '02-wiki', 'cano.md');
+    await execFileAsync('mkfifo', [fifo]);
+
+    const { result, opened } = await withFifoWatch(fifo, () =>
+      refusal(() =>
+        editNote({ vaultRoot, path: '02-wiki/cano.md', oldText: 'a', newText: 'b' })
+      )
+    );
+
+    expect(opened).toBe(false);
+    expect(result).toBeInstanceOf(PathGuardError);
+    expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+  }, 30_000);
+
+  it('recusa um diretório e um symlink no caminho da nota', async () => {
+    // `foreign` is not only a FIFO: a directory makes the read fail with EISDIR deep inside the
+    // write instead of a guard rejection the tool layer can report, and a symlink is a name for
+    // a note that lives somewhere else — the atomic rename lands ON the link, so the alias
+    // becomes a regular file holding a divergent copy while the note it named never changes.
+    await fs.mkdir(path.join(vaultRoot, '02-wiki', 'pasta.md'));
+    await fs.writeFile(path.join(vaultRoot, '02-wiki', 'alvo-real.md'), '# Real\n', 'utf8');
+    await fs.symlink('alvo-real.md', path.join(vaultRoot, '02-wiki', 'alias.md'));
+
+    await expect(
+      writeNote({ vaultRoot, path: '02-wiki/pasta.md', content: 'texto' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+    await expect(
+      writeNote({ vaultRoot, path: '02-wiki/alias.md', content: 'texto' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+    await expect(
+      editNote({ vaultRoot, path: '02-wiki/alias.md', oldText: 'Real', newText: 'Falso' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+
+    // The link is still a link and the note it names is untouched.
+    expect((await fs.lstat(path.join(vaultRoot, '02-wiki', 'alias.md'))).isSymbolicLink()).toBe(
+      true
+    );
+    expect(await fs.readFile(path.join(vaultRoot, '02-wiki', 'alvo-real.md'), 'utf8')).toBe(
+      '# Real\n'
+    );
+  });
+
+  it('ainda cria uma nota num caminho livre e ainda substitui uma nota comum', async () => {
+    // The classification must not turn into "refuse everything that is not already a file":
+    // creating is the ordinary case, and replacing an ordinary note is what `writeNote` is for.
+    const criada = await writeNote({ vaultRoot, path: '02-wiki/nova-comum.md', content: 'um' });
+    expect(criada.created).toBe(true);
+    const substituida = await writeNote({
+      vaultRoot,
+      path: '02-wiki/nova-comum.md',
+      content: 'dois',
+    });
+    expect(substituida.created).toBe(false);
+    expect(await fs.readFile(substituida.absPath, 'utf8')).toContain('dois');
   });
 
   it('refuses an edit inside .git just as it refuses a write', async () => {

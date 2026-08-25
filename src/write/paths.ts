@@ -249,6 +249,46 @@ async function pathSegments(vaultRoot: string, absPath: string): Promise<string[
 }
 
 /**
+ * What stands on `absPath`, answered WITHOUT opening it.
+ *
+ * - `missing`: nothing is there. The ordinary "create it" case.
+ * - `file`: a regular file, safe to read and to rename over.
+ * - `foreign`: a SYMLINK, a directory, a FIFO, a socket, a device. Not a note.
+ *
+ * `guardedPath` answers a question about the PATH — containment, suffix, denied segments,
+ * symlink escape — and none of that says what the NODE is. A FIFO inside the vault passes
+ * every one of those checks (it is `.md`, it is contained, it is in no denied directory) and
+ * the read that follows blocks on `open()` of a pipe with no writer and never returns.
+ * Measured: still pending after 4 seconds, and the process had to be killed. The server
+ * serialises writes by chaining each onto the previous promise, so ONE call that never settles
+ * wedges every later write for the life of the process while unqueued reads keep answering —
+ * a server that looks alive with its whole write surface dead.
+ *
+ * `lstat` and not `stat`, so a symlink is seen as itself: a `stat` would answer for the target,
+ * including by hanging on a FIFO behind it. And a symlink is not a note either way — an atomic
+ * rename lands ON the link, so the user's alias becomes a regular file holding a divergent copy
+ * while the note it named never receives the write.
+ *
+ * This is the one mechanism for that question in this directory: `writer.ts` uses it before both
+ * of its reads and before the template read, and `propagate.ts` before each of its three
+ * targets. `learn.ts`'s `pathState` asks a strictly finer version of it — it also separates a
+ * blank placeholder from a note and refuses a hard link — and answers `foreign` for exactly the
+ * same nodes.
+ */
+export type NodeKind = 'missing' | 'file' | 'foreign';
+
+export async function classifyNode(absPath: string): Promise<NodeKind> {
+  try {
+    return (await fs.lstat(absPath)).isFile() ? 'file' : 'foreign';
+  } catch {
+    // Anything that cannot be lstat'd is not a file this module can read. ENOENT is the common
+    // case by far, and a path whose parent is unreadable fails the write that follows anyway,
+    // with its own errno.
+    return 'missing';
+  }
+}
+
+/**
  * EVERY half of the path guard, in the order they have to run — the one entry point every
  * write in this directory passes through.
  *

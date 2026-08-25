@@ -4,7 +4,13 @@ import { basename, join } from 'node:path';
 import matter from 'gray-matter';
 
 import type { Frontmatter } from '../types.js';
-import { guardedPath } from './paths.js';
+import {
+  classifyNode,
+  forMessage,
+  guardedPath,
+  PathGuardError,
+  type NodeKind,
+} from './paths.js';
 import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
 import { commitFiles } from './git.js';
 import { atomicWrite } from './atomic.js';
@@ -272,20 +278,21 @@ async function writeAndCommit(
 }
 
 /**
- * What stands on a path that is supposed to hold a template.
+ * Refuses a path that holds something other than a note, BEFORE anything is opened.
  *
- * `learn()` reaches `_templates/wiki.md` through TWO routes — this one when the note's path
- * is free, and `learn.ts`'s own `skeletonContent` when a blank placeholder stands on it — and
- * a FIFO there blocked `readFile` forever on the single thread that serves every tool call.
- * `lstat` answers for the name itself, so nothing is opened to find out. The two routes give
- * the same two answers so that the warning does not depend on which one was taken.
+ * The three reads in this module — the note in `writeNote`, the note in `editNote` and the
+ * template — are all `readFile` on a path `guardedPath` has approved, and `guardedPath`
+ * answers about the path rather than about the node standing on it. `classifyNode` is that
+ * second question, shared with `propagate.ts` and mirrored by `learn.ts`'s `pathState`.
  */
-async function templateState(absPath: string): Promise<'missing' | 'foreign' | 'file'> {
-  try {
-    return (await fs.lstat(absPath)).isFile() ? 'file' : 'foreign';
-  } catch {
-    return 'missing';
+async function refuseForeign(absPath: string, relPath: string): Promise<NodeKind> {
+  const kind = await classifyNode(absPath);
+  if (kind === 'foreign') {
+    throw new PathGuardError(
+      `caminho não é uma nota (link, diretório ou dispositivo): ${forMessage(relPath)}`
+    );
   }
+  return kind;
 }
 
 /**
@@ -301,6 +308,11 @@ async function templateState(absPath: string): Promise<'missing' | 'foreign' | '
  */
 export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
   const absPath = await guardedPath(opts.vaultRoot, opts.path);
+  // A FIFO here is `.md`, is inside the vault and is in no denied directory, so every check
+  // above passes it — and the read below never returns. `created` still comes from the read,
+  // which is the only thing that can distinguish "was not there" from "was there and is gone
+  // by the time we look" without a second race.
+  await refuseForeign(absPath, opts.path);
 
   let before = '';
   let created = true;
@@ -320,7 +332,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
     // caller-controlled segment ever enters this join.
     const templatePath = join(opts.vaultRoot, '_templates', `${opts.tipo}.md`);
     let templateText: string | undefined;
-    const state = await templateState(templatePath);
+    const state = await classifyNode(templatePath);
     if (state === 'foreign') {
       templateWarning = `template ignorado: _templates/${opts.tipo}.md não é um arquivo comum`;
     } else {
@@ -415,6 +427,11 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
     // occurrence" is never true of it and counting it would not terminate.
     throw new EditError(`trecho vazio para edição em ${opts.path}`);
   }
+
+  // Same question as `writeNote`'s, and it has to be asked here too: `editNote` is reached
+  // directly by the tool layer, and a `missing` path keeps its raw ENOENT from the read below
+  // rather than being turned into a different error for callers that already handle it.
+  await refuseForeign(absPath, opts.path);
 
   const before = await fs.readFile(absPath, 'utf8');
   const occurrences = countOccurrences(before, opts.oldText);
