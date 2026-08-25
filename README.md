@@ -15,13 +15,15 @@ npm test
 
 ## Configuração
 
-O vault é passado por variável de ambiente:
+O vault é passado por variável de ambiente, e o servidor é executado via node diretamente:
 
 ```bash
-VAULT_PATH="$HOME/Path/To/Your/Vault" npx vault-mcp
+VAULT_PATH="/caminho/absoluto/do/vault" node /caminho/absoluto/do/vault-mcp/dist/server/index.js
 ```
 
-`VAULT_PATH` é **obrigatório**. Se não for definido ou não for um diretório, o servidor sai com código 1 e escreve o motivo em stderr.
+Substitua `/caminho/absoluto/do/vault` pela raiz do seu vault e `/caminho/absoluto/do/vault-mcp` pelo caminho ao diretório do projeto. `VAULT_PATH` é **obrigatório**. Se não for definido ou não for um diretório, o servidor sai com código 1 e escreve o motivo em stderr.
+
+**Nota:** não use `npx vault-mcp` — existe uma colisão com outro pacote no npm e o comando resolveria para o pacote errado quando executado de fora do diretório do projeto.
 
 ## Registro no Claude Code
 
@@ -39,7 +41,7 @@ Substitua `/home/user/Knowledge/Vault` pelo caminho **absoluto** da raiz do seu 
 | Tool | Entrada | Quando Chamar |
 |------|---------|---------------|
 | `vault_search` | `query` (obrigatório); `limit`, `tipo`, `folder`, `include_raw` (opcionais) | Antes de responder sobre decisões, padrões, gotchas ou histórico do usuário. Resultado padrão: 6 trechos. Notas em `01-raw/` excluídas por padrão. |
-| `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota inteira com frontmatter, links resolvidos e links quebrados. |
+| `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota com frontmatter, links resolvidos e links quebrados. O corpo é limitado a 20.000 caracteres; notas maiores são marcadas com `[…nota cortada em 20000 caracteres]`. |
 | `vault_list` | `tipo`, `tags`, `status`, `folder` (todos opcionais) | Inventário de notas por metadado (ex.: "quais projetos ativos?", "quais notas têm a tag jwt?"). Não busca por conteúdo — use `vault_search` para isso. |
 | `vault_backlinks` | `path` (caminho relativo) | Medir conectividade de um assunto, achar o MOC que indexa uma nota, avaliar impacto de mudança. Deduplica links: uma nota que linka o alvo duas vezes conta como um backlink. |
 | `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
@@ -48,9 +50,9 @@ Substitua `/home/user/Knowledge/Vault` pelo caminho **absoluto** da raiz do seu 
 
 ## Como o `vault_learn` Decide
 
-`vault_learn` busca o assunto combinando título e insight. Se encontrar um match forte:
+`vault_learn` busca o assunto combinando título e insight. Apenas notas **já em `02-wiki/` e atingidas por BM25 direto** (não pela expansão de grafo) são candidatas a receber o aprendizado. Se encontrar tal candidata:
 
-1. **Razão de 1,8×**: o topo de resulta precisa se destacar sobre o segundo colocado por fator de pelo menos 1,8. Sem isso, há dúvida e cria nota nova.
+1. **Razão de 1,8×**: o topo deve se destacar sobre o segundo colocado por fator de pelo menos 1,8. Sem isso, há dúvida e cria nota nova.
 2. **Overlap conjuntivo**: o top deve compartilhar uma tag COM A ENTRADA, OU estar no mesmo domínio (`02-wiki/<dominio>/`). Sem overlap, cria nota nova mesmo que o score seja alto.
 
 Quando ambas as condições são atendidas, **anexa** à nota existente numa seção `## YYYY-MM-DD — Título`. Caso contrário, **cria** nota nova em `02-wiki/<dominio>/`.
@@ -63,7 +65,7 @@ Duas exceções podem mudar o destino final:
 
 1. **Colisão de título**: a regra de duplicata recusa, mas um arquivo com aquele nome já existe (nota antiga com o mesmo slug). O servidor **anexa nela mesmo assim** e avisa `anexado em <path> por coincidência de título; a checagem de duplicata não indicou essa nota`. Isso traz uma nota perdida de volta para o fluxo de acúmulo.
 
-2. **Criação com nome livre**: o servidor decide anexar, mas o alvo não pode receber o texto (arquivo desapareceu, está vazio, é um symlink ou FIFO). O servidor **cria nota nova com um nome diferente** (`2026-08-25-titulo.md` em vez de `titulo.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
+2. **Criação com nome livre**: o servidor decide anexar, mas o alvo não pode receber o texto (arquivo desapareceu, está vazio, é um symlink ou FIFO). O servidor **cria nota nova com um nome diferente** (`titulo-2026-08-25.md` em vez de `titulo.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
 
 Em ambos os casos, nenhuma insight é perdida — a resposta diz exatamente onde o aprendizado foi a parar.
 
