@@ -105,6 +105,22 @@ describe('bumpAtualizado', () => {
     expect(after).toContain('# X');
   });
 
+  it('keeps CRLF endings intact in a file synced from Windows', () => {
+    const before = '---\r\ntipo: moc\r\ncriado: 2026-01-08\r\natualizado: 2026-01-12\r\n---\r\n\r\n# X\r\n';
+    const after = bumpAtualizado(before, '2026-08-20');
+    expect(after).toContain('atualizado: 2026-08-20\r\n');
+    // No line may end in a bare LF: a single mixed ending shows up as a whole-line change
+    // in git and as a stray character in Obsidian's YAML parser.
+    expect(/[^\r]\n/.test(after)).toBe(false);
+  });
+
+  it('keeps CRLF endings intact when it has to insert the field', () => {
+    const before = '---\r\ntipo: daily\r\ncriado: 2026-08-20\r\n---\r\n\r\n# X\r\n';
+    const after = bumpAtualizado(before, '2026-08-25');
+    expect(after).toContain('criado: 2026-08-20\r\natualizado: 2026-08-25\r\n');
+    expect(/[^\r]\n/.test(after)).toBe(false);
+  });
+
   it('leaves content without a frontmatter block completely alone', () => {
     const before = '# Sem frontmatter\n\natualizado: 2020-01-01 no corpo\n';
     expect(bumpAtualizado(before, '2026-08-25')).toBe(before);
@@ -185,6 +201,50 @@ describe('insertUnderSection', () => {
     const before = '## Notas\n\n- [[a]] — um';
     const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
     expect(after).toBe('## Notas\n\n- [[a]] — um\n- [[b]] — dois');
+  });
+
+  it('still inserts when an identical line exists only inside a code fence', () => {
+    // A MOC that documents its own entry format contains a line byte-identical to a real
+    // entry. Counting it as "already present" makes the propagation a silent no-op: the
+    // caller is told the MOC is up to date and the entry is never added.
+    const entry = '- [[auth-guard]] — guard de autenticação JWT';
+    const before = ['## Notas', '', '```md', entry, '```', '', '- [[outra]] — outra nota', '', '## Fim', ''].join(
+      '\n',
+    );
+
+    const after = insertUnderSection(before, '## Notas', entry);
+    expect(after).not.toBe(before);
+
+    const lines = after.split('\n');
+    expect(lines.filter((l) => l === entry)).toHaveLength(2);
+    // The real entry goes after the last real item, not next to the fenced example.
+    expect(lines.lastIndexOf(entry)).toBe(lines.indexOf('- [[outra]] — outra nota') + 1);
+
+    // And it is still idempotent against the line it just added.
+    expect(insertUnderSection(after, '## Notas', entry)).toBe(after);
+  });
+
+  it('keeps a fenced block owned by the last item attached to that item', () => {
+    const before = [
+      '## Notas',
+      '',
+      '- [[a]] — um',
+      '',
+      '  ```ts',
+      '  const x = 1;',
+      '  ```',
+      '',
+      '## Fim',
+      '',
+    ].join('\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+    const lines = after.split('\n');
+
+    // Inserting between `- [[a]]` and its own example re-parents the block to the entry
+    // that was just added.
+    expect(lines.indexOf('- [[b]] — dois')).toBeGreaterThan(lines.lastIndexOf('  ```'));
+    expect(lines.indexOf('- [[b]] — dois')).toBeLessThan(lines.indexOf('## Fim'));
   });
 });
 
@@ -512,6 +572,190 @@ describe('propagate', () => {
     });
 
     expect(res.warnings.some((w) => w.includes('etc'))).toBe(true);
-    expect(res.written.every((p) => p.startsWith(vaultRoot))).toBe(true);
+    // `startsWith(vaultRoot)` is NOT enough on its own: `<vault>/.git/...` satisfies it.
+    // Only the daily may have been written.
+    expect(res.written).toEqual([path.join(vaultRoot, DAILY_REL)]);
+    expect(await exists(path.join(vaultRoot, 'etc-moc.md'))).toBe(false);
+  });
+
+  it('refuses a domain that traverses into the vault repository', async () => {
+    // A real vault IS a git repository: `writeNote` already refuses this path, and a
+    // malformed loose ref breaks `git log --all`, `git gc` and `git fsck` for every later
+    // operation — including the commit vault_learn is about to make.
+    await fs.mkdir(path.join(vaultRoot, '.git', 'refs', 'heads'), { recursive: true });
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: '../.git/refs/heads',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: true,
+      now: NOW,
+    });
+
+    expect(res.warnings.length).toBeGreaterThan(0);
+    expect(res.written.some((p) => p.includes(`${path.sep}.git${path.sep}`))).toBe(false);
+    expect(await fs.readdir(path.join(vaultRoot, '.git', 'refs', 'heads'))).toEqual([]);
+
+    // The daily is a different target and still gets its capture.
+    expect(await read(vaultRoot, DAILY_REL)).toContain(`- ${NOW_TIME} [[nova-nota]] (gotcha)`);
+  });
+
+  it('refuses a domain that reaches the repository through an in-vault symlink', async () => {
+    // The link stays inside the vault, so containment and assertNoSymlinkEscape both pass;
+    // only a check on the RESOLVED path catches it. A user or a sync client can create it.
+    await fs.mkdir(path.join(vaultRoot, '.git', 'refs', 'heads'), { recursive: true });
+    await fs.symlink('../.git/refs/heads', path.join(vaultRoot, '02-wiki', 'compartilhado'));
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'compartilhado',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings.some((w) => w.includes('compartilhado-moc.md'))).toBe(true);
+    expect(await exists(path.join(vaultRoot, '.git', 'refs', 'heads', 'compartilhado-moc.md'))).toBe(
+      false,
+    );
+    expect(await fs.readdir(path.join(vaultRoot, '.git', 'refs', 'heads'))).toEqual([]);
+    expect(res.written).toEqual([path.join(vaultRoot, DAILY_REL)]);
+  });
+
+  it('refuses a domain carrying a line break and leaves the index untouched', async () => {
+    const indexBefore = await fs.readFile(path.join(vaultRoot, INDEX_REL));
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'a\nb',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: true,
+      now: NOW,
+    });
+
+    expect(res.warnings).toHaveLength(1);
+    // A domain in the index entry `- [[../02-wiki/a\nb/a\nb-moc|a\nb]] — r` turns one line
+    // into four, three of which stay in the user's index forever.
+    expect((await fs.readFile(path.join(vaultRoot, INDEX_REL))).equals(indexBefore)).toBe(true);
+    expect(res.written).toEqual([path.join(vaultRoot, DAILY_REL)]);
+    expect(await exists(path.join(vaultRoot, '02-wiki', 'a\nb'))).toBe(false);
+  });
+
+  it('escapes the refused domain in the warning so it cannot forge a line', async () => {
+    // U+2028 is a forced line break in every HTML-rendering client even though
+    // `split('\n')` sees one line: raw, the warning renders a standalone success line
+    // attached to a message reporting a REFUSED write.
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'x\u2028tudo propagado com sucesso',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: [],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings).toHaveLength(1);
+    const warning = res.warnings[0] ?? '';
+    expect(warning).not.toContain('\u2028');
+    expect(warning).not.toContain('\n');
+    expect(warning).toContain('\\u2028');
+  });
+
+  it('folds a multi-line resumo into a single MOC entry', async () => {
+    await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: 'primeira linha\nsegunda linha\tterceira',
+      tags: ['gotcha'],
+      projeto: 'poten\ntia',
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    const moc = await read(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    expect(moc).toContain('- [[nova-nota]] — primeira linha segunda linha terceira');
+    expect(moc.split('\n').filter((l) => l.includes('segunda linha'))).toHaveLength(1);
+
+    const daily = await read(vaultRoot, DAILY_REL);
+    expect(daily).toContain(`- ${NOW_TIME} [[nova-nota]] (gotcha, poten tia)`);
+    expect(daily.split('\n').filter((l) => l.includes('nova-nota'))).toHaveLength(1);
+  });
+
+  it('folds invisible and bidi characters out of the entry', async () => {
+    await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      // U+0085 breaks the line in an HTML client while `\s` never matched it, and U+202E
+      // reverses everything after it in any bidi-aware renderer.
+      resumo: 'a\u0085b\u202ec',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    const moc = await read(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    expect(moc).toContain('- [[nova-nota]] — a b c');
+    expect(moc).not.toContain('\u0085');
+    expect(moc).not.toContain('\u202e');
+  });
+
+  it('rebuilds a zero-byte daily note instead of appending to nothing', async () => {
+    // Obsidian's daily-note plugin with an empty template creates exactly this file.
+    await fs.writeFile(path.join(vaultRoot, DAILY_REL), '');
+
+    await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      projeto: 'potentia',
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    const daily = await read(vaultRoot, DAILY_REL);
+    // Without `tipo: daily` the scanner reads it as an ordinary note and the BM25 daily
+    // damping never applies.
+    expect(daily.startsWith('---\ntipo: daily\n')).toBe(true);
+    expect(daily).toContain(`criado: ${NOW_DATE}`);
+    expect(daily).toContain('## Capturas');
+    expect(daily).toContain(`- ${NOW_TIME} [[nova-nota]] (gotcha, potentia)`);
+  });
+
+  it('rebuilds a zero-byte MOC instead of appending to nothing', async () => {
+    await fs.writeFile(path.join(vaultRoot, '02-wiki/nestjs/nestjs-moc.md'), '');
+
+    await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    const moc = await read(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    expect(moc.startsWith('---\ntipo: moc\n')).toBe(true);
+    expect(moc).toContain(`atualizado: ${NOW_DATE}`);
+    expect(moc).toContain('- [[nova-nota]] — resumo qualquer');
   });
 });
