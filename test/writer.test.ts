@@ -91,8 +91,33 @@ async function makeVault(): Promise<{ tmp: string; vaultRoot: string }> {
   return { tmp, vaultRoot };
 }
 
+/**
+ * A throwaway git repository with no background writer.
+ *
+ * `git gc --auto` runs in the BACKGROUND after a commit and keeps writing inside `.git`
+ * after the awaited command has returned, which races the teardown below: the phase gate —
+ * not a teammate's laptop — failed once with `ENOTEMPTY: rmdir '.../vault/.git'`, on a run
+ * whose only job is to be evidence. Turning the writer off is the half that removes the
+ * cause; `removeTree` is the half that survives anything else still holding the directory.
+ */
+async function initScratchRepo(repo: string): Promise<void> {
+  await git(repo, ['init']);
+  await git(repo, ['config', 'gc.auto', '0']);
+}
+
+/**
+ * Teardown that tolerates a transient writer inside a throwaway repository.
+ *
+ * A plain `fs.rm` raced git and failed with ENOTEMPTY on `.git/` under a loaded machine. The
+ * retries are `fs.rm`'s own answer to exactly that, and `gc.auto 0` above removes the writer.
+ * The same hardening `test/learn.test.ts` already carries.
+ */
+async function removeTree(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
 async function initRepo(vaultRoot: string): Promise<void> {
-  await git(vaultRoot, ['init']);
+  await initScratchRepo(vaultRoot);
   await git(vaultRoot, ['config', 'user.name', 'Vault MCP Test']);
   await git(vaultRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
   await git(vaultRoot, ['add', '--all']);
@@ -280,11 +305,11 @@ describe('unifiedDiff round-trip', () => {
 
   beforeEach(async () => {
     repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-roundtrip-'));
-    await git(repo, ['init']);
+    await initScratchRepo(repo);
   });
 
   afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
+    await removeTree(repo);
   });
 
   /** Applies `unifiedDiff(before, after)` to `before` with git, returning the result. */
@@ -368,7 +393,7 @@ describe('atomicWrite', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('creates the parent directory when it is missing', async () => {
@@ -402,7 +427,7 @@ describe('writeNote', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('creates the note, resolves every template token, and makes one commit', async () => {
@@ -584,7 +609,7 @@ describe('writeNote', () => {
       expect(result.warning).toBeTruthy();
       expect(await fs.readFile(result.absPath, 'utf8')).toContain('Escrito mesmo sem git.');
     } finally {
-      await fs.rm(bare, { recursive: true, force: true });
+      await removeTree(bare);
     }
   });
 
@@ -689,7 +714,7 @@ describe('editNote', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('replaces the single occurrence, commits, and reports the diff', async () => {
@@ -742,14 +767,14 @@ describe('editNote', () => {
 
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-diff-apply-'));
     try {
-      await git(repo, ['init']);
+      await initScratchRepo(repo);
       await fs.mkdir(path.join(repo, path.dirname(rel)), { recursive: true });
       await fs.writeFile(path.join(repo, rel), beforeBytes, 'utf8');
       await fs.writeFile(path.join(repo, 'p.diff'), result.diff, 'utf8');
       await execFileAsync('git', ['-C', repo, 'apply', '--whitespace=nowarn', 'p.diff']);
       expect(await fs.readFile(path.join(repo, rel), 'utf8')).toBe(afterBytes);
     } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+      await removeTree(repo);
     }
   });
 
@@ -853,7 +878,7 @@ describe('editNote', () => {
       expect(result.warning).toBeTruthy();
       expect(await fs.readFile(result.absPath, 'utf8')).toContain('GuardaSemGit');
     } finally {
-      await fs.rm(bare, { recursive: true, force: true });
+      await removeTree(bare);
     }
   });
 });
@@ -1080,7 +1105,7 @@ describe('atomicWrite guarantees', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   /**
@@ -1223,7 +1248,7 @@ describe('write guard', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('refuses to write inside .git', async () => {
@@ -1411,7 +1436,7 @@ describe('write ordering', () => {
   afterEach(async () => {
     vi.doUnmock('../src/write/diff.js');
     vi.resetModules();
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   /**
@@ -1567,7 +1592,7 @@ describe('editNote occurrence counting', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('refuses an ambiguous edit whose occurrences overlap', async () => {

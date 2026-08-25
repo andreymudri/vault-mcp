@@ -435,11 +435,13 @@ function isWritable(state: PathState): boolean {
  * ever.
  *
  * The two routes are pinned against each other by test, and they agree byte for byte except in
- * ONE field: `criado`. `writeNote` stamps it from wall-clock time on the free path, while this one
- * passes `opts.now` — the same instant the MOC entry, the daily capture and the append heading of
- * this very call already use. `opts.now` is the right value and `writeNote` is the outlier, but
- * `writer.ts` is outside this task's file set, so the divergence stands and is asserted rather
- * than described.
+ * ONE field: `criado`. `writeNote` stamps it from wall-clock time on the free path (through the
+ * template's own `tp.date.now`), while this one passes `opts.now` — the same instant the MOC
+ * entry, the daily capture and the append heading of this very call already use. `opts.now` is
+ * the right value and `writeNote` is the outlier, but its stamp is its contract with every other
+ * caller and not only with this one, so the divergence stands and is ASSERTED by test rather than
+ * described here. The assertion names both calendar days the wall clock can be on, because a
+ * single sample taken after the call fails on a correct note whenever the run crosses midnight.
  */
 function titleFromPath(relPath: string): string {
   return basename(relPath, '.md')
