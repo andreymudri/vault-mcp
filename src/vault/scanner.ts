@@ -144,6 +144,7 @@ export class VaultScanner {
         body: parsed.body,
         links: [],
         brokenLinks: [],
+        bodyStartLine: bodyStartLine(raw, parsed.body),
         mtimeMs,
       });
       this.mtimes.set(path, mtimeMs);
@@ -265,6 +266,31 @@ function extractTitle(body: string, path: string): string {
     if (heading !== undefined && heading !== '') return heading;
   }
   return basenameWithoutExtension(path);
+}
+
+/** `'\n'.charCodeAt(0)`. */
+const NEWLINE = 10;
+
+/**
+ * The 1-based line of `raw` where `body` starts. This is the one place in the system that still
+ * holds both, which is why the offset is computed here and carried on `Note`.
+ *
+ * It reads the offset from the LENGTHS rather than re-parsing the delimiters: `body` is always a
+ * suffix of `raw` — `parseFile` either hands back gray-matter's `content`, which is a plain slice
+ * of the input, or `stripFrontmatterBlock`'s slice for a malformed block — so the number of
+ * newlines in the part that was cut away is exactly how many lines the body starts below the top
+ * of the file. Re-deriving the closing `---` here instead would be a second, independently
+ * drifting frontmatter parser: it would have to reproduce gray-matter's own edge cases (the BOM
+ * it strips, the single `\r` and single `\n` it eats after the delimiter, a `---` that never
+ * closes) and the two would disagree on exactly the files that are already malformed.
+ *
+ * Counting `\n` treats CRLF identically to LF, since a line is what a newline terminates.
+ */
+function bodyStartLine(raw: string, body: string): number {
+  const offset = raw.length - body.length;
+  let line = 1;
+  for (let i = 0; i < offset; i++) if (raw.charCodeAt(i) === NEWLINE) line++;
+  return line;
 }
 
 function basenameWithoutExtension(path: string): string {

@@ -853,3 +853,134 @@ describe('applyBudget', () => {
     expect(applyBudget([], 10, 100)).toEqual([]);
   });
 });
+
+/** O arquivo bruto da fixture, dividido em linhas 1-based por índice `linha - 1`. */
+function rawLines(relative: string): string[] {
+  return readFileSync(join(FIXTURE, relative), 'utf8').split('\n');
+}
+
+describe('Retriever.search — citação de linha real', () => {
+  /**
+   * A prova do contrato, na mesma forma que `test/chunker.test.ts` usa: fatiar o ARQUIVO BRUTO
+   * pelo intervalo que o resultado anuncia e exigir o texto do chunk de volta. Comparar ids entre
+   * si não serviria — eles deslocam todos juntos quando o offset está errado, então um vault
+   * inteiro citado 5 linhas adiantado passaria intacto.
+   */
+  it('o intervalo anunciado reslicia exatamente o arquivo bruto da fixture', () => {
+    const retriever = diskRetriever();
+    const queries = ['jwt', 'docker camadas', 'cache', 'potentia', 'bullmq filas'];
+
+    let comFrontmatter = 0;
+    let total = 0;
+    for (const query of queries) {
+      for (const { chunk } of retriever.search({ query, limit: 20 }).results) {
+        const lines = rawLines(chunk.path);
+        expect(lines.slice(chunk.lineStart - 1, chunk.lineEnd).join('\n')).toBe(chunk.text);
+        // A linha citada — a que a ferramenta de busca imprime como `caminho:lineStart` — tem de
+        // conter de fato a abertura do texto do chunk.
+        expect(lines[chunk.lineStart - 1]).toBe(chunk.text.split('\n')[0]);
+        expect(chunk.id).toBe(`${chunk.path}#${chunk.lineStart}`);
+        total++;
+        if (lines[0] === '---') comFrontmatter++;
+      }
+    }
+
+    // Sem notas com frontmatter entre os resultados a asserção acima é vácua: o offset só existe
+    // por causa do bloco, e as duas notas da fixture sem ele acertam com qualquer constante.
+    expect(total).toBeGreaterThan(20);
+    expect(comFrontmatter).toBeGreaterThan(10);
+  });
+
+  it('o primeiro chunk de uma nota com frontmatter cita a linha do arquivo, não a do corpo', () => {
+    const retriever = diskRetriever();
+    const { results } = retriever.search({ query: 'jwt', limit: 20 });
+
+    const lines = rawLines(AUTH_GUARD);
+    // `## Contexto` existe uma vez só em `auth-guard.md`; a linha dele no arquivo é o número que
+    // o chunk correspondente tem de anunciar.
+    const contexto = lines.indexOf('## Contexto') + 1;
+    expect(contexto).toBeGreaterThan(1);
+
+    const chunk = results
+      .map((result) => result.chunk)
+      .find((c) => c.path === AUTH_GUARD && c.headingPath[0] === 'Contexto');
+    expect(chunk).toBeDefined();
+    expect(chunk!.lineStart).toBe(contexto);
+    expect(chunk!.id).toBe(`${AUTH_GUARD}#${contexto}`);
+    // O bloco de frontmatter tem cinco linhas: numerar a partir do corpo daria 5 linhas a menos.
+    expect(chunk!.lineStart).toBeGreaterThan(5);
+  });
+});
+
+describe('Retriever.search — sinal estruturado de truncamento', () => {
+  const HUGE = '02-wiki/gigante.md';
+  const TERM = 'termograndalhao';
+
+  function withHugeNote(): ReturnType<typeof memoryRetriever> {
+    const made = memoryRetriever();
+    // Uma nota sem `##` é um chunk só, e este passa do orçamento inteiro sozinho.
+    made.fs.write(
+      HUGE,
+      ['---', 'tipo: wiki', '---', '', `# Grandalhao`, '', `${TERM} `.repeat(1200), ''].join('\n'),
+    );
+    return made;
+  }
+
+  it('marca `truncated` no chunk que o orçamento cortou', () => {
+    const { retriever } = withHugeNote();
+    const { results } = retriever.search({ query: TERM, limit: 6 });
+
+    expect(results).toHaveLength(1);
+    const result = results[0]!;
+    expect(result.chunk.path).toBe(HUGE);
+    expect(result.truncated).toBe(true);
+    // O corte é real, não apenas anunciado.
+    expect(result.chunk.text.length).toBeLessThanOrEqual(DEFAULT_CHAR_BUDGET);
+    expect(result.chunk.text.endsWith(TRUNCATION_MARKER)).toBe(true);
+  });
+
+  it('resultado inteiro não vem marcado', () => {
+    const { retriever } = withHugeNote();
+    const { results } = retriever.search({ query: 'jwt', limit: 12 });
+
+    expect(results.length).toBeGreaterThan(1);
+    for (const result of results) {
+      expect(result.truncated).toBeUndefined();
+      expect(result.chunk.text).not.toContain(TRUNCATION_MARKER);
+    }
+  });
+
+  /**
+   * O ponto do campo. `TRUNCATION_MARKER` é prosa comum e uma nota pode contê-lo literalmente —
+   * uma nota SOBRE este servidor, por exemplo. Um consumidor que decida "isto foi cortado" pelo
+   * texto erra nas duas direções; o campo tem de sair do lado estrutural.
+   */
+  it('nota que contém o marcador literalmente não é confundida com um corte', () => {
+    const { retriever, fs } = memoryRetriever();
+    const relative = '02-wiki/sobre-marcador.md';
+    fs.write(
+      relative,
+      [
+        '---',
+        'tipo: wiki',
+        '---',
+        '',
+        '# Marcador',
+        '',
+        `O servidor anexa o texto abaixo quando corta um trecho: ${TRUNCATION_MARKER.trim()}`,
+        '',
+        'Termo de controle: marcadorliteral.',
+        '',
+      ].join('\n'),
+    );
+
+    const { results } = retriever.search({ query: 'marcadorliteral', limit: 6 });
+    const found = results.find((result) => result.chunk.path === relative);
+    expect(found).toBeDefined();
+    // O texto casa o que um detector textual procuraria...
+    expect(found!.chunk.text).toContain(TRUNCATION_MARKER.trim());
+    // ...e mesmo assim o chunk está inteiro, então nada foi cortado.
+    expect(found!.truncated).toBeUndefined();
+    expect(found!.chunk.text).toContain('Termo de controle');
+  });
+});

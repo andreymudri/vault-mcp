@@ -4,6 +4,7 @@ import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import type { Note } from '../src/types.js';
 import { VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
@@ -412,5 +413,100 @@ describe('VaultScanner: diagnostics', () => {
     expect(scanner.diagnostics.map((d) => d.path)).toContain('99-archive/antigo.md');
     // As outras notas seguem normais.
     expect(scanner.getNote('02-wiki/nestjs/auth-guard.md')?.title).toBe('Auth Guard');
+  });
+});
+
+/**
+ * Reslicing proof, the same one `test/chunker.test.ts` uses on `lineStart`: the body a note
+ * carries has to be exactly what the raw file holds from `bodyStartLine` onwards. Recomputing
+ * the expected number with a second frontmatter parser here would only prove two parsers agree.
+ */
+function bodyMatchesRawFromLine(relative: string, note: Note): boolean {
+  const raw = readFileSync(join(root, relative), 'utf8');
+  return raw.split('\n').slice(note.bodyStartLine - 1).join('\n') === note.body;
+}
+
+/** The 1-based line of the closing `---`, read straight off the raw file. */
+function closingDelimiterLine(relative: string): number {
+  const lines = readFileSync(join(root, relative), 'utf8').split('\n');
+  expect(lines[0]).toBe('---');
+  for (let i = 1; i < lines.length; i++) if (lines[i] === '---') return i + 1;
+  throw new Error(`sem fechamento de frontmatter: ${relative}`);
+}
+
+describe('VaultScanner: bodyStartLine', () => {
+  it('nota sem bloco de frontmatter começa na linha 1', () => {
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    for (const relative of ['01-raw/inbox/rascunho.md', 'CLAUDE.md']) {
+      const note = scanner.getNote(relative)!;
+      expect(readFileSync(join(root, relative), 'utf8').startsWith('---')).toBe(false);
+      expect(note.bodyStartLine).toBe(1);
+      expect(bodyMatchesRawFromLine(relative, note)).toBe(true);
+    }
+  });
+
+  it('nota com frontmatter começa na linha seguinte ao fechamento `---`', () => {
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    const relative = '02-wiki/nestjs/auth-guard.md';
+    const note = scanner.getNote(relative)!;
+    // Valor absoluto, não uma relação: o frontmatter de `auth-guard.md` fecha na linha 5, então o
+    // corpo abre na 6 — cinco linhas abaixo do `1` que o retriever passava para o chunker.
+    expect(closingDelimiterLine(relative)).toBe(5);
+    expect(note.bodyStartLine).toBe(6);
+    expect(bodyMatchesRawFromLine(relative, note)).toBe(true);
+  });
+
+  it('corpo que abre com linha em branco conta essa linha em branco', () => {
+    // O `---` fecha na 3 e a 4 está vazia: o corpo COMEÇA nela, porque o parser come um único
+    // newline depois do delimitador, não todos. Apontar para o `# Título` da linha 5 citaria o
+    // chunk uma linha adiante de onde ele realmente começa.
+    writeFileSync(
+      join(root, 'branco.md'),
+      ['---', 'tipo: wiki', '---', '', '# Título', '', 'corpo', ''].join('\n'),
+    );
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    const note = scanner.getNote('branco.md')!;
+    expect(note.bodyStartLine).toBe(4);
+    expect(note.body.startsWith('\n# Título')).toBe(true);
+    expect(bodyMatchesRawFromLine('branco.md', note)).toBe(true);
+  });
+
+  it('CRLF conta igual a LF', () => {
+    const lines = ['---', 'tipo: wiki', 'tags: [docker]', '---', '', '# Título', '', 'corpo', ''];
+    writeFileSync(join(root, 'crlf.md'), lines.join('\r\n'));
+    writeFileSync(join(root, 'lf.md'), lines.join('\n'));
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    const crlf = scanner.getNote('crlf.md')!;
+    const lf = scanner.getNote('lf.md')!;
+    expect(readFileSync(join(root, 'crlf.md'), 'utf8')).toContain('\r\n');
+    expect(crlf.bodyStartLine).toBe(5);
+    expect(crlf.bodyStartLine).toBe(lf.bodyStartLine);
+    expect(bodyMatchesRawFromLine('crlf.md', crlf)).toBe(true);
+  });
+
+  it('vale para toda nota da fixture, inclusive a de frontmatter inválido', () => {
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    let comFrontmatter = 0;
+    for (const relative of ALL_PATHS) {
+      const note = scanner.getNote(relative)!;
+      expect(bodyMatchesRawFromLine(relative, note)).toBe(true);
+      if (note.bodyStartLine > 1) comFrontmatter++;
+    }
+    // Sem esta contagem o teste passaria com um vault inteiro de notas sem frontmatter — que é
+    // exatamente o caso em que a constante `1` acerta por acaso.
+    expect(comFrontmatter).toBe(11);
+    // `quebrada.md` não passa pelo gray-matter e sim pelo caminho de recuperação de `parseFile`;
+    // o deslocamento tem de sair certo nos dois.
+    expect(scanner.getNote('quebrada.md')!.bodyStartLine).toBeGreaterThan(1);
   });
 });
