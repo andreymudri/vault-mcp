@@ -88,7 +88,7 @@ git revert <commit-hash>
 Qualquer mudança nos seguintes parâmetros precisa passar na suíte completa: `npm test`. Cada constante é pinada em um local específico:
 
 - **`FIELD_WEIGHTS`** (`src/index/inverted-index.ts`): `heading: 3.0, tags: 2.0, prose: 1.0, code: 0.5`. Peso na frequência de cada campo. Pinado em `test/bm25.test.ts`.
-- **`NOTE_TYPE_WEIGHTS`** (`src/index/inverted-index.ts`): `moc: 0.3, daily: 0.3`. Multiplica o score final de notas do tipo MOC ou daily. Existe porque essas notas repetem a query em chunks curtos — sem o fator, o MOC supera a nota apontada. Pinado em `test/golden-queries.test.ts` e `test/retrieval.test.ts`.
+- **`NOTE_TYPE_WEIGHTS`** (`src/index/inverted-index.ts`): `moc: 0.3, daily: 0.3`. Multiplica o score final de notas do tipo MOC ou daily. Existe porque essas notas repetem a query em chunks curtos — sem o fator, o MOC supera a nota apontada. Pinado em asserção literal em `test/bm25.test.ts:370-374`; `test/golden-queries.test.ts` e `test/retrieval.test.ts` falham apenas se removido, não se reajustado.
 - **`GRAPH_DAMPING`** (`src/retrieval/budget.ts`): `0.4`. Multiplica o score de vizinhos do grafo — notas linkadas. Um salto, não múltiplos. Pinado em `test/retrieval.test.ts:522`.
 - **`K1`** e **`B`** (`src/index/bm25.ts`): `1.2` e `0.75`. Parâmetros do BM25. Pinado em `test/bm25.test.ts:232-233`.
 - **`DUPLICATE_SCORE_RATIO`** (`src/write/learn.ts`): `1.8`. Razão mínima entre topo e segundo colocado para anexar. Pinado em `test/learn.test.ts:336`.
