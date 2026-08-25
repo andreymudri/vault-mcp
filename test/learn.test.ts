@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import matter from 'gray-matter';
 
 import { tokenize } from '../src/index/tokenizer.js';
+import { extractLinkTargets } from '../src/vault/links.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import type { Chunk, ScoredChunk } from '../src/types.js';
@@ -36,6 +37,7 @@ const MOC_NESTJS = '02-wiki/nestjs/nestjs-moc.md';
 const BULLMQ = '02-wiki/nestjs/bullmq-worker.md';
 const CACHE_WRAPPER = '02-wiki/patterns/cache-wrapper.md';
 const INDEX_REL = '00-index/index-knowledge.md';
+const MOC_DOCKER = '02-wiki/docker/docker-moc.md';
 
 /**
  * A base64-ish blob pasted into an insight — a JWT, a log line, a clipped payload. It is ONE
@@ -195,6 +197,19 @@ describe('duplicateQuery', () => {
     expect(query.length).toBeLessThanOrEqual(MAX_QUERY_CHARS);
   });
 
+  it('pula um termo longo que não cabe e mantém os termos curtos depois dele', () => {
+    // This is the LIVE case for skipping instead of stopping. A multi-kilobyte blob is discarded
+    // by the tokenizer's own term-length cap before it ever reaches the budget loop; what does
+    // reach it is an ordinary 60-character identifier arriving with less budget left than it
+    // needs. Ending the scan there would throw away every plain word behind it — measured here:
+    // 16 fillers fit, the 17th does not, and `bullmq`/`worker` still do.
+    const gordo = 'g'.repeat(60);
+    const { query } = duplicateQuery('Assunto', `${`${gordo} `.repeat(20)} bullmq worker`);
+    expect(query.length).toBeLessThanOrEqual(MAX_QUERY_CHARS);
+    expect(query.split(' ')).toContain('bullmq');
+    expect(query.split(' ')).toContain('worker');
+  });
+
   it('reports truncation instead of silently dropping the tail of a huge insight', () => {
     expect(duplicateQuery('Titulo', 'a'.repeat(MAX_QUERY_SOURCE_CHARS + 1)).truncated).toBe(true);
     expect(duplicateQuery('Titulo', 'palavra '.repeat(20)).truncated).toBe(false);
@@ -269,6 +284,28 @@ describe('decideDuplicate', () => {
       tagsFrom({}),
     );
     expect(decision.isDuplicate).toBe(false);
+  });
+
+  it('refuses a top hit that is not a wiki note', () => {
+    // A project README, a daily, the knowledge index and an archived note can all top the list
+    // for a learning. None of them is a place to file one, and `99-archive/` and `_templates/`
+    // are read-only areas the write guard refuses outright.
+    for (const forapath of [
+      '03-projects/potentia/README.md',
+      '99-archive/antigo.md',
+      '04-daily/2026-08-20.md',
+      '00-index/index-knowledge.md',
+      'quebrada.md',
+    ]) {
+      const decision = decideDuplicate(
+        [scored(forapath, 10, ['bullmq']), scored(CACHE_WRAPPER, 1)],
+        ['bullmq'],
+        'nestjs',
+        tagsFrom({ [forapath]: ['bullmq'] }),
+      );
+      expect(decision.isDuplicate).toBe(false);
+      expect(decision.reason).toContain('02-wiki/');
+    }
   });
 
   it('refuses a top hit that only entered through graph expansion', () => {
@@ -799,8 +836,112 @@ describe('learn — links', () => {
       vaultRoot,
       retriever: makeRetriever(vaultRoot),
       titulo: 'Retry de worker BullMQ',
-      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila de notificacoes',
+      // MULTI-LINE on purpose: with a single-line insight `withEol` has nothing to rewrite and
+      // the test passes against an implementation that always emits LF.
+      insight:
+        'O worker BullMQ aplica retry com backoff exponencial na fila de notificacoes.\n\n' +
+        'Segunda linha do insight, que precisa terminar em CRLF como o resto do arquivo.',
       contexto: 'Investigando jobs que falhavam sem nova tentativa',
+      dominio: 'nestjs',
+      tags: ['bullmq'],
+      links: ['auth-guard'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('appended');
+    const note = await read(vaultRoot, BULLMQ);
+    const appended = note.slice(note.indexOf(`## ${TODAY} —`));
+    expect(appended).toContain('Segunda linha do insight');
+    expect(appended.split('\r\n').length).toBeGreaterThan(6);
+    expect(appended.replace(/\r\n/g, '')).not.toContain('\n');
+  });
+});
+
+describe('learn - texto livre nao vira estrutura', () => {
+  let vaultRoot: string;
+
+  beforeEach(async () => {
+    vaultRoot = await makeVault();
+  });
+
+  afterEach(async () => {
+    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+  });
+
+  const terminus = {
+    titulo: 'Health check com Terminus',
+    contexto: 'Subindo o healthcheck do cluster',
+  };
+
+  it('não cria arestas de grafo a partir do resumo nem do projeto', async () => {
+    const mocBefore = extractLinkTargets(await read(vaultRoot, MOC_DOCKER));
+    const dailyBefore = extractLinkTargets(await read(vaultRoot, DAILY_REL));
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      ...terminus,
+      // The shape of an insight clipped off a page: its first sentence becomes the `resumo`, and
+      // the `resumo` is written into a MOC list item.
+      insight:
+        'a]] - [[cache-wrapper]] e [[auth-guard]] fim. O modulo terminus expoe um indicador de saude.',
+      dominio: 'docker',
+      tags: ['docker'],
+      projeto: 'x]] (nada) [[auth-guard]] (',
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+
+    // Assert on PARSED EDGES with this project's own parser, not on the raw string: what matters
+    // is what `graph.ts` and the one-hop expansion will see.
+    const mocAfter = extractLinkTargets(await read(vaultRoot, MOC_DOCKER));
+    const dailyAfter = extractLinkTargets(await read(vaultRoot, DAILY_REL));
+    expect(mocAfter.filter((t) => !mocBefore.includes(t))).toEqual(['health-check-com-terminus']);
+    expect(dailyAfter.filter((t) => !dailyBefore.includes(t))).toEqual([
+      'health-check-com-terminus',
+    ]);
+
+    // The text itself is kept - only the brackets are dropped, so the entry still reads.
+    expect(await read(vaultRoot, MOC_DOCKER)).toContain('cache-wrapper e auth-guard fim.');
+    expect(await read(vaultRoot, DAILY_REL)).toContain('(aprendizado, x (nada) auth-guard (');
+
+    // The BODY is the other side of the boundary: a wiki-link the user wrote inside their own
+    // insight is authored content and stays a link.
+    expect(extractLinkTargets(await read(vaultRoot, result.path))).toEqual([
+      'cache-wrapper',
+      'auth-guard',
+    ]);
+  });
+
+  it('não cria arestas a partir do resumo na entrada do índice de conhecimento', async () => {
+    const indexBefore = extractLinkTargets(await read(vaultRoot, INDEX_REL));
+
+    await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Ownership no Rust',
+      insight: 'a]] - [[cache-wrapper]] e [[auth-guard]] fim. O borrow checker move a posse.',
+      contexto: 'Portando o worker para Rust',
+      dominio: 'rust',
+      tags: ['rust'],
+      confirmNovoDominio: true,
+      now: NOW,
+    });
+
+    const indexAfter = extractLinkTargets(await read(vaultRoot, INDEX_REL));
+    expect(indexAfter.filter((t) => !indexBefore.includes(t))).toEqual([
+      '../02-wiki/rust/rust-moc',
+    ]);
+  });
+
+  it('não deixa título nem contexto forjarem um heading dentro da nota', async () => {
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Retry de worker BullMQ\n## Forjado pelo titulo',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila de notificacoes',
+      contexto: 'Investigando jobs\n## Forjado pelo contexto',
       dominio: 'nestjs',
       tags: ['bullmq'],
       now: NOW,
@@ -808,8 +949,110 @@ describe('learn — links', () => {
 
     expect(result.action).toBe('appended');
     const note = await read(vaultRoot, BULLMQ);
-    const appended = note.slice(note.indexOf(`## ${TODAY} —`));
-    expect(appended).toContain('\r\n');
-    expect(appended.replace(/\r\n/g, '')).not.toContain('\n');
+    const appended = note.slice(note.indexOf(`## ${TODAY} `));
+    expect(appended.split('\n').filter((l) => l.startsWith('## '))).toHaveLength(1);
+    expect(appended).toContain('Forjado pelo titulo');
+    expect(appended).toContain('Forjado pelo contexto');
+
+    // The same title is the commit subject, where a newline forges a message body.
+    const message = await git(vaultRoot, ['log', '-1', '--pretty=format:%B']);
+    expect(message.trim().split('\n')).toHaveLength(1);
+  });
+
+  it('remove caracteres invisíveis do insight, da nota e do diff', async () => {
+    const ESC = String.fromCharCode(0x1b);
+    const NUL = String.fromCharCode(0x00);
+    const RLO = String.fromCharCode(0x202e);
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      ...terminus,
+      insight:
+        `O modulo terminus expoe ${ESC}[31mvermelho${ESC}[0m um indicador${NUL} de ` +
+        `saude${RLO} edaus ed.`,
+      dominio: 'nestjs',
+      tags: ['nestjs'],
+      now: NOW,
+    });
+
+    const note = await read(vaultRoot, result.path);
+    expect(note).toContain('vermelho');
+    // The plan says the diff is shown to the user: a terminal printing it executes SGR sequences.
+    for (const invisivel of [ESC, NUL, RLO]) {
+      expect(note).not.toContain(invisivel);
+      expect(result.diff).not.toContain(invisivel);
+    }
+  });
+
+  it('recusa um insight que abre com o delimitador de frontmatter', async () => {
+    const promise = learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      ...terminus,
+      insight: '---\ntipo: moc\ntags: [urgentissimo]\n---\nO modulo terminus expoe indicadores.',
+      dominio: 'nestjs',
+      tags: ['nestjs'],
+      now: NOW,
+    });
+
+    await expect(promise).rejects.toBeInstanceOf(LearnError);
+    await expect(promise).rejects.toThrow(/frontmatter/);
+    expect(await logLines(vaultRoot)).toBe(1);
+  });
+
+  it('aceita um bloco de --- depois da primeira linha e mantém o frontmatter da nota', async () => {
+    // The guard is about offset 0, so an insight that merely CONTAINS a rule or a YAML sample is
+    // written as it is - refusing those would be refusing ordinary technical prose.
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      ...terminus,
+      insight: 'O frontmatter do indicador terminus fica assim:\n\n---\ntipo: moc\n---\n',
+      dominio: 'nestjs',
+      tags: ['nestjs'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    const parsed = matter(await read(vaultRoot, result.path), {});
+    expect(parsed.data.tipo).toBe('wiki');
+    expect(parsed.data.tags).toEqual(['nestjs']);
+    expect(parsed.content).toContain('tipo: moc');
+  });
+});
+
+describe('learn - o insight nunca se perde', () => {
+  let vaultRoot: string;
+
+  beforeEach(async () => {
+    vaultRoot = await makeVault();
+  });
+
+  afterEach(async () => {
+    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+  });
+
+  it('cria nota nova quando a anexação é impossível, em vez de derrubar a chamada', async () => {
+    // An empty stub note - Obsidian makes these - is a target `editNote` cannot anchor to: it
+    // refuses an empty `oldText`. Before the fallback this threw and the insight was lost.
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '', 'utf8');
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe(stub);
+    expect(result.warning).toContain(stub);
+    expect(result.committed).toBe(true);
+    expect(await read(vaultRoot, stub)).toContain('TTL configuravel');
   });
 });

@@ -6,10 +6,10 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { ScoredChunk } from '../types.js';
 import { commitFiles } from './git.js';
-import { resolveWritePath } from './paths.js';
+import { PathGuardError, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { formatLocal } from './template.js';
-import { editNote, writeNote, type WriteResult } from './writer.js';
+import { EditError, editNote, writeNote, type WriteResult } from './writer.js';
 
 /**
  * `vault_learn`: one call that decides between appending to a note that already covers the
@@ -45,10 +45,12 @@ export const DUPLICATE_SCORE_RATIO = 1.8;
  * never reach the index) and returns `bullmq-worker.md` at a ratio of 2.5 through the term
  * path.
  *
- * So the terms are extracted here, in order, and a term that does not fit the budget is
- * SKIPPED rather than ending the scan: one oversized token — a JWT, a hash, a log line — must
- * not swallow the whole query. Re-tokenizing the result is lossless, since `tokenize` output
- * is already folded, hyphen-trimmed, stopword-free and separator-free.
+ * So the terms are extracted here, in order, and a term that does not fit the REMAINING budget
+ * is skipped rather than ending the scan. Once the tokenizer discards over-long tokens, a
+ * multi-kilobyte blob never reaches this loop at all; what still does is an ordinary long term —
+ * a 60-character identifier — arriving with less budget left than it needs, and ending the scan
+ * there would discard every plain word behind it. Re-tokenizing the result is lossless, since
+ * `tokenize` output is already folded, hyphen-trimmed, stopword-free and separator-free.
  */
 export const MAX_QUERY_TERMS = 64;
 export const MAX_QUERY_CHARS = 1024;
@@ -64,6 +66,9 @@ export const MAX_QUERY_CHARS = 1024;
  * truncation of the duplicate check is the failure mode this whole design is about.
  */
 export const MAX_QUERY_SOURCE_CHARS = 8192;
+
+/** Where knowledge notes live. A learning is filed here or it is not filed at all. */
+const WIKI_PREFIX = '02-wiki/';
 
 /** Longest slug this module will turn a title into, so a long title cannot make an unwritable name. */
 const MAX_SLUG_CHARS = 80;
@@ -86,9 +91,46 @@ const INVISIBLE_CHARS =
   /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
+/**
+ * The same set MINUS the two characters that carry meaning in a note body: `\n`, which is what
+ * makes prose prose, and `\t`. Everything else goes — NUL, ESC (whose SGR sequences a terminal
+ * printing the returned `diff` would execute), bare CR, the bidi overrides, U+2028.
+ */
+// eslint-disable-next-line no-control-regex
+const BLOCK_INVISIBLE_CHARS_GLOBAL =
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
 /** Folds a fragment into something safe to splice into a single markdown or commit line. */
 function oneLine(text: string): string {
   return text.replace(INVISIBLE_CHARS_GLOBAL, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Free text on its way into the note BODY: line structure kept, every invisible dropped, line
+ * endings normalised to LF for `withEol` to rewrite.
+ *
+ * Brackets are deliberately NOT touched here. The body is the user's own prose, and `[[nota]]`
+ * written inside an insight is an authored link — the one place in this module where a wiki-link
+ * out of free text is legitimate. `indexText` is the other half of that boundary.
+ */
+function blockText(text: string): string {
+  return text.replace(/\r\n?/g, '\n').replace(BLOCK_INVISIBLE_CHARS_GLOBAL, ' ');
+}
+
+/**
+ * Free text on its way into a line the MACHINE writes ABOUT the note — a MOC entry, a knowledge
+ * index entry, a daily capture, a link name.
+ *
+ * One line, and no brackets at all. Those lines are structure rather than prose, and this
+ * project's own `extractLinkTargets` reads them back as graph edges, which `graph.ts` turns into
+ * backlinks and retrieval's one-hop expansion turns into search results. A `resumo` of
+ * `a]] - [[cache-wrapper]] e [[auth-guard]] fim.` — the shape of an insight clipped off a page —
+ * writes two edges the user never authored and quietly pulls unrelated notes into later searches;
+ * a `projeto` of `x]] (nada) [[auth-guard]] (` does the same through the daily capture line. No
+ * legitimate entry needs a bracket, so every one of them is dropped.
+ */
+function indexText(text: string): string {
+  return oneLine(text).replace(/[[\]]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -167,6 +209,23 @@ export function decideDuplicate(
   const top = results[0];
   if (!top) return { isDuplicate: false, reason: 'nenhum match' };
 
+  // An append target is a WIKI note or it is nothing. The best match for a learning is perfectly
+  // capable of being a project README, a daily, the knowledge index or an archived note, and
+  // appending to each is wrong in its own way — `99-archive/` and `_templates/` are read-only
+  // areas the write guard refuses outright, so routing there does not merely misfile the insight,
+  // it is the one path that could throw it away.
+  if (!top.chunk.path.startsWith(WIKI_PREFIX)) {
+    return { isDuplicate: false, reason: `topo fora de ${WIKI_PREFIX}: ${top.chunk.path}` };
+  }
+
+  // UNREACHABLE as retrieval stands, and kept as an assertion rather than as a live branch: a
+  // neighbour inherits `GRAPH_DAMPING` (0.4) times the best DIRECT score and every idf here is
+  // strictly positive, so a graph-only chunk cannot outrank the hit it inherited from — a sweep
+  // of 4497 queries over the test fixture found 1546 results carrying a graph chunk and not one
+  // of them at rank 1. It becomes reachable the moment `GRAPH_DAMPING` rises above 1, and what it
+  // refuses then is the worst outcome this rule has: appending an insight to a note whose own
+  // words never matched the query. The unit test below builds the state synthetically, which is
+  // the only way to reach it.
   if (top.viaGraph) {
     return { isDuplicate: false, reason: 'topo entrou por expansão do grafo, não por match direto' };
   }
@@ -178,7 +237,7 @@ export function decideDuplicate(
   }
 
   const shared = noteTags(top.chunk.path).some((t) => tags.includes(t));
-  const sameDomain = top.chunk.path.startsWith(`02-wiki/${dominio}/`);
+  const sameDomain = top.chunk.path.startsWith(`${WIKI_PREFIX}${dominio}/`);
   if (!shared && !sameDomain) {
     return { isDuplicate: false, reason: 'sem overlap de tag nem de domínio' };
   }
@@ -254,6 +313,16 @@ async function fileExists(absPath: string): Promise<boolean> {
   }
 }
 
+/**
+ * True for the three failures that mean "this target cannot take the text", as opposed to a real
+ * fault: the write guard refusing the path, the edit finding nothing to anchor to (an empty stub
+ * note), and the file having vanished between the index read and now.
+ */
+function isRecoverableAppendFailure(err: unknown): boolean {
+  if (err instanceof EditError || err instanceof PathGuardError) return true;
+  return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
 /** Tags of a note as the index knows them, read off the result set rather than re-reading disk. */
 function tagsByPath(results: ScoredChunk[]): (path: string) => string[] {
   const byPath = new Map<string, string[]>();
@@ -266,16 +335,13 @@ function tagsByPath(results: ScoredChunk[]): (path: string) => string[] {
 /**
  * A link name as a wiki-link target: no brackets, no `.md`, no line of its own.
  *
- * The caller may hand over either `nota` or `[[nota]]`, so the outer brackets are unwrapped —
- * and then EVERY remaining bracket is dropped, because a name like `a]] texto forjado [[b`
- * would otherwise close this item's link and open another, putting text into the note that
- * reads as content the user never wrote. No legitimate wiki-link target contains a bracket.
+ * `indexText` drops every bracket, which both unwraps the `[[nota]]` form a caller may hand over
+ * and closes the injection `a]] texto forjado [[b` — a name that would otherwise close this
+ * item's link and open another, putting text into the note that reads as content the user never
+ * wrote. No legitimate wiki-link target contains a bracket.
  */
 function linkName(raw: string): string {
-  return oneLine(raw)
-    .replace(/^\[\[/, '')
-    .replace(/\]\]$/, '')
-    .replace(/[[\]]/g, '')
+  return indexText(raw)
     .replace(/\.md$/i, '')
     .trim();
 }
@@ -308,7 +374,7 @@ function withEol(text: string, eol: string): string {
  */
 function buildBody(opts: LearnOptions, eol: string): string {
   const blocks: string[] = [];
-  const insight = withEol(opts.insight, eol).trim();
+  const insight = withEol(blockText(opts.insight), eol).trim();
   if (insight !== '') blocks.push(insight);
   const contexto = oneLine(opts.contexto);
   if (contexto !== '') blocks.push(`**Contexto:** ${contexto}`);
@@ -333,7 +399,7 @@ function buildSection(opts: LearnOptions, titulo: string, date: string, eol: str
  * budget, so it can never cut inside the first `MAX_RESUMO_CHARS` code points.
  */
 function resumoOf(insight: string): string {
-  const flat = oneLine(insight);
+  const flat = indexText(insight);
   const end = flat.search(/[.!?](\s|$)/);
   const sentence = end === -1 ? flat : flat.slice(0, end + 1);
   const bounded = sliceAtCodePointBoundary(sentence, MAX_RESUMO_CHARS * 2);
@@ -393,6 +459,26 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     throw new LearnError('título inválido: não gera um nome de arquivo (use letras ou números)');
   }
 
+  // `writeNote` hands the composed body to `ensureFrontmatter`, which reads a `---` on the FIRST
+  // line as the note's own frontmatter block. With `_templates/wiki.md` in place the body is
+  // spliced below the skeleton's block and the question never arises — but a missing template is
+  // only a WARNING there, and then the insight sits at offset 0: one opening with
+  // `---\ntipo: moc\ntags: [urgentissimo]\n---` becomes the created note's real frontmatter and
+  // overrides the `tipo: 'wiki'` and the tags this module asked for. `tipo` drives
+  // `NOTE_TYPE_WEIGHTS` and the tags drive how `decideDuplicate` routes every later append, so a
+  // clipped insight would get to choose both.
+  //
+  // Refused rather than escaped, and refused on BOTH routes so the answer never depends on which
+  // one was taken or on whether a template file happens to exist: escaping means silently
+  // rewriting the user's text, while this input is trivially fixable by the caller — and the
+  // message says exactly how.
+  if (blockText(opts.insight).trim().split('\n', 1)[0]?.trim() === '---') {
+    throw new LearnError(
+      'insight não pode começar com o delimitador de frontmatter `---`: ele viraria o ' +
+        'frontmatter da nota. Escreva ao menos uma linha de texto antes do bloco.',
+    );
+  }
+
   const problem = dominioProblem(opts.dominio);
   // The domain is NOT interpolated into this message: it is refused precisely because it can
   // carry a line break or a bidi control, and a warning that can forge a line is worthless.
@@ -426,10 +512,27 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     reason = `nota já existe em ${newRelPath}`;
   }
 
-  let write: WriteResult;
-  let action: 'appended' | 'created';
-  if (targetPath === undefined) {
-    action = 'created';
+  let write: WriteResult | undefined;
+  let action: 'appended' | 'created' = 'created';
+  let appendFailure: string | undefined;
+
+  if (targetPath !== undefined) {
+    try {
+      write = await appendSection(opts, targetPath, titulo, date);
+      action = 'appended';
+    } catch (err) {
+      // Losing the user's insight is the worst outcome this tool has, so a target that cannot
+      // take the text becomes a NEW NOTE rather than an exception: the learning is written either
+      // way and the warning says where it did not land. Anything that is not one of the three
+      // recoverable failures is a real fault and must surface.
+      if (!isRecoverableAppendFailure(err)) throw err;
+      const detail = oneLine(err instanceof Error ? err.message : String(err));
+      appendFailure = `não foi possível anexar em ${oneLine(targetPath)} (${detail}); nota nova criada`;
+      reason = `${reason}; ${appendFailure}`;
+    }
+  }
+
+  if (write === undefined) {
     write = await writeNote({
       vaultRoot: opts.vaultRoot,
       path: newRelPath,
@@ -438,10 +541,11 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
       tipo: 'wiki',
       deferCommit: true,
     });
-  } else {
-    action = 'appended';
-    write = await appendSection(opts, targetPath, titulo, date);
   }
+
+  // `projeto` lands inside the daily capture line, which is one of the machine-written index
+  // lines, so it goes through `indexText` like the `resumo` does.
+  const projeto = opts.projeto === undefined ? '' : indexText(opts.projeto);
 
   const prop = await propagate({
     vaultRoot: opts.vaultRoot,
@@ -451,7 +555,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     slug: action === 'appended' ? basename(write.path, '.md') : noteSlug,
     resumo: resumoOf(opts.insight),
     tags,
-    ...(opts.projeto === undefined ? {} : { projeto: opts.projeto }),
+    ...(projeto === '' ? {} : { projeto }),
     created: action === 'created',
     domainIsNew,
     now: opts.now,
@@ -468,6 +572,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     .join('');
 
   const warning = joinWarnings([
+    appendFailure,
     truncated
       ? `insight truncado em ${MAX_QUERY_SOURCE_CHARS} caracteres para a checagem de duplicata`
       : undefined,
@@ -479,7 +584,8 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const result: LearnResult = {
     action,
     path: write.path,
-    reason,
+    // Folded because it names a path read off the vault index and is rendered back to the user.
+    reason: oneLine(reason),
     diff,
     propagated: prop.written.map((absPath) => toVaultRelative(opts.vaultRoot, absPath)),
     committed: commit.committed,
