@@ -83,8 +83,18 @@ const ITEM_RE = /^\s*(?:[-*+]\s|\d+[.)]\s)/;
  * ` ````md ` around a block that itself contains ``` — the form a MOC uses to document its
  * own entry format. And the info string has to be captured because a CLOSING fence carries
  * none.
+ *
+ * The `\r?` before the anchor is not decoration. `insertUnderSection` splits on `\n`, so every
+ * line of a file synced from Windows arrives with its `\r` still attached and a fence reads as
+ * "```\r" — which `.` cannot match and `$` will not match in front of. Anchoring without it
+ * made EVERY delimiter in a CRLF file invisible, so the file parsed as if it had no code block
+ * at all: a `## Notas` quoted inside an example became the target heading and the entry was
+ * written into the block, reported as a successful propagation with a diff and no warning.
+ * That is the very defect this fence state exists to close, and the anchor reopened it for
+ * CRLF only. It is also why the `\r` is kept OUT of the capture: an info string of `md\r` is
+ * not the empty string, so the opener would never be recognised as closed by its own fence.
  */
-const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})([^\r\n]*)\r?$/;
 
 /**
  * `paths.ts`'s set with `g`, for the two functions that FOLD rather than refuse.

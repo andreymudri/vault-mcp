@@ -71,6 +71,12 @@ export const DENIED_SEGMENTS: ReadonlySet<string> = new Set([
  *
  * `propagate.ts` uses the very same set for a second job — folding the free prose it
  * splices into a single markdown line — which is why this is exported rather than private.
+ *
+ * NAMES, for anyone arriving from a docblock that still points at the old ones: this set was
+ * `CONTROL_CHARS` in `writer.ts` and `INVISIBLE_CHARS` in `propagate.ts` and in `learn.ts`
+ * before it moved here, and `write/diff.ts`'s docblock names the first of those. Nothing was
+ * dropped in the move — the literal is byte-identical to all three — and `diff.ts` still
+ * escapes exactly this set on the rendering side. There is one copy now and this is it.
  */
 // eslint-disable-next-line no-control-regex
 export const INVISIBLE_CHARS =

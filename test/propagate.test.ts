@@ -426,6 +426,67 @@ describe('insertUnderSection e cercas de código', () => {
     expect(lines.indexOf('- [[b]] — dois')).toBe(lines.indexOf('- [[a]] — um') + 1);
   });
 
+  it('enxerga a cerca num arquivo CRLF, e não enfia a entrada dentro do bloco', () => {
+    // `split('\n')` hands every line of a CRLF file over with its `\r` still attached, so a
+    // fence delimiter arrives as "```\r". A fence pattern anchored with `$` matches none of
+    // them — `.` does not match a carriage return — and the whole file reads as if it had no
+    // code block at all: the `## Notas` quoted inside the example becomes the target heading
+    // and the new entry is written INTO the block, with the real section left as it was.
+    // Reported as a successful write, with a diff and no warning. The two halves were covered
+    // separately (CRLF above, fences above) and the combination was covered by nothing.
+    const before = [
+      '# Moc',
+      '',
+      '## Exemplo',
+      '',
+      '````md',
+      '```',
+      '## Notas',
+      '',
+      '- [[falso]] — exemplo do formato',
+      '````',
+      '',
+      '## Notas',
+      '',
+      '- [[real]] — nota real',
+      '',
+    ].join('\r\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[nova]] — nota nova');
+    const lines = after.split('\n');
+
+    expect(lines.indexOf('- [[nova]] — nota nova\r')).toBe(
+      lines.indexOf('- [[real]] — nota real\r') + 1,
+    );
+    expect(lines.indexOf('- [[nova]] — nota nova\r')).toBeGreaterThan(lines.indexOf('````\r'));
+    expect(lines.filter((l) => l === '- [[falso]] — exemplo do formato\r')).toHaveLength(1);
+    // And the file is still CRLF from end to end.
+    expect(after.split('\n').filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
+  });
+
+  it('fecha a cerca CRLF pelo marcador, não por qualquer delimitador', () => {
+    // The marker kind and length have to survive the `\r` too: an info string of `md\r`
+    // compares against a closing marker of `md` and never matches, so the block never closes.
+    const before = [
+      '## Notas',
+      '',
+      '```md',
+      '## Notas',
+      '- [[falso]] — dentro do código',
+      '```',
+      '',
+      '- [[a]] — um',
+      '',
+      '## Fim',
+      '',
+    ].join('\r\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+    const lines = after.split('\n');
+    expect(lines.indexOf('- [[b]] — dois\r')).toBe(lines.indexOf('- [[a]] — um\r') + 1);
+    expect(lines.filter((l) => l === '- [[falso]] — dentro do código\r')).toHaveLength(1);
+  });
+
   it('mantém o \\r da linha inserida num arquivo CRLF', () => {
     // `insertUnderSection` and `bumpAtualizado` both run over every propagation target, and
     // the module docstring says they have to agree about line endings. Only the second was
@@ -750,6 +811,114 @@ describe('propagate', () => {
     expect(res.warnings[0]).toContain('nestjs-moc.md');
     expect((await fs.lstat(mocPath)).isSymbolicLink()).toBe(true);
     expect(await read(vaultRoot, '02-wiki/nestjs/moc-real.md')).toBe(conteudo);
+  });
+
+  it('propaga para um MOC CRLF com exemplo cercado sem entrar no bloco', async () => {
+    // End to end, the shape a real vault has: a MOC synced from Windows that documents its own
+    // entry format inside a ````md example. With the fence invisible, `vault_learn` reported
+    // `Propagado para: 02-wiki/docker/docker-moc.md` with a diff and no warning while the entry
+    // went inside the code block — so the MOC never listed the note, and the one-hop graph
+    // expansion never reaches it, because `links.ts` correctly ignores links inside a fence.
+    const mocRel = '02-wiki/docker/docker-moc.md';
+    const antes = [
+      '---',
+      'tipo: moc',
+      'tags: [docker]',
+      'criado: 2026-08-01',
+      'atualizado: 2026-08-01',
+      '---',
+      '',
+      '# Docker — Mapa de Conteúdo',
+      '',
+      '## Exemplo',
+      '',
+      '````md',
+      '```',
+      '## Notas',
+      '',
+      '- [[exemplo]] — como uma entrada fica',
+      '````',
+      '',
+      '## Notas',
+      '',
+      '- [[compose]] — nota real do domínio',
+      '',
+    ].join('\r\n');
+    await fs.writeFile(path.join(vaultRoot, mocRel), antes, 'utf8');
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'docker',
+      slug: 'nova-nota',
+      resumo: 'resumo da nova nota',
+      tags: ['docker'],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings).toEqual([]);
+    expect(res.written).toContain(path.join(vaultRoot, mocRel));
+
+    const moc = await read(vaultRoot, mocRel);
+    const linhas = moc.split('\n');
+    const nova = '- [[nova-nota]] — resumo da nova nota\r';
+    expect(linhas.indexOf(nova)).toBe(linhas.indexOf('- [[compose]] — nota real do domínio\r') + 1);
+    // Outside the block, which still holds exactly its one sample entry.
+    expect(linhas.indexOf(nova)).toBeGreaterThan(linhas.indexOf('````\r'));
+    expect(linhas.filter((l) => l === '- [[exemplo]] — como uma entrada fica\r')).toHaveLength(1);
+    // Still CRLF everywhere, `atualizado:` included.
+    expect(moc).toContain(`atualizado: ${NOW_DATE}\r\n`);
+    expect(linhas.filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
+  });
+
+  it('propaga para uma daily CRLF com exemplo cercado sem entrar no bloco', async () => {
+    // The same root cause on the other target: `## Capturas` quoted inside a fenced example of
+    // a daily synced from Windows takes the capture line that belongs to the real section.
+    const antes = [
+      '---',
+      'tipo: daily',
+      `criado: ${NOW_DATE}`,
+      '---',
+      '',
+      `# ${NOW_DATE}`,
+      '',
+      '## Formato',
+      '',
+      '````md',
+      '```',
+      '## Capturas',
+      '',
+      '- 09:00 [[exemplo]] (aprendizado)',
+      '````',
+      '',
+      '## Capturas',
+      '',
+      '- 08:30 [[anterior]] (gotcha)',
+      '',
+    ].join('\r\n');
+    await fs.writeFile(path.join(vaultRoot, DAILY_REL), antes, 'utf8');
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings).toEqual([]);
+
+    const daily = await read(vaultRoot, DAILY_REL);
+    const linhas = daily.split('\n');
+    const capture = `- ${NOW_TIME} [[nova-nota]] (gotcha)\r`;
+    expect(linhas.indexOf(capture)).toBe(linhas.indexOf('- 08:30 [[anterior]] (gotcha)\r') + 1);
+    expect(linhas.indexOf(capture)).toBeGreaterThan(linhas.indexOf('````\r'));
+    expect(linhas.filter((l) => l === '- 09:00 [[exemplo]] (aprendizado)\r')).toHaveLength(1);
+    expect(linhas.filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
   });
 
   it('adds the note to the domain MOC and bumps atualizado when the note is new', async () => {
