@@ -290,14 +290,28 @@ const NO_NEWLINE = '\\ No newline at end of file';
  * write path arrives here dirty. This is the second lock on the same door: `unifiedDiff`
  * is exported and its output is a security boundary in its own right, so its structure
  * must not depend on a caller having validated anything.
+ *
+ * "One line" is not the same question as "one \n". `\n` and `\r` are what a terminal
+ * breaks on, but CSS Text 3 makes U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR and
+ * U+0085 NEXT LINE forced breaks in every HTML-rendering client, and a chat UI showing a
+ * diff is exactly such a client. A path carrying a raw U+2028 rendered there as a
+ * complete, fabricated `+++`/`@@` hunk while `split('\n')` over the same string saw one
+ * line and reported nothing wrong. So the escaped set is every C0 control, DEL, every C1
+ * control (U+0085 among them), and the two Unicode separators — the same set
+ * `writer.ts`'s `CONTROL_CHARS` refuses, which is not a coincidence and must not drift.
  */
 function headerPath(path: string): string {
   // eslint-disable-next-line no-control-regex
-  return path.replace(/[\u0000-\u001f\u007f]/g, (ch) => {
+  return path.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) => {
     if (ch === '\n') return '\\n';
     if (ch === '\r') return '\\r';
     if (ch === '\t') return '\\t';
-    return `\\x${ch.charCodeAt(0).toString(16).padStart(2, '0')}`;
+    const code = ch.charCodeAt(0);
+    // `\x2028` would read back as `\x20` followed by a literal `28`, so anything wider
+    // than one byte is escaped in the four-digit form that can only mean what it names.
+    return code <= 0xff
+      ? `\\x${code.toString(16).padStart(2, '0')}`
+      : `\\u${code.toString(16).padStart(4, '0')}`;
   });
 }
 
@@ -395,6 +409,81 @@ function coarseSummary(before: string, after: string, path: string): string {
 }
 
 /**
+ * True when this op's line is the LAST line of a side that ends without a terminator.
+ *
+ * `-` never touches side B and `+` never touches side A, so the guard on `kind` is what
+ * keeps `op.a`/`op.b` of `-1` from matching `length - 1` of an empty side.
+ */
+function unterminatedA(op: Op, a: Sides): boolean {
+  return op.kind !== '+' && op.a === a.lines.length - 1 && a.noTrailingNewline;
+}
+
+function unterminatedB(op: Op, b: Sides): boolean {
+  return op.kind !== '-' && op.b === b.lines.length - 1 && b.noTrailingNewline;
+}
+
+/**
+ * Rewrites every `=` whose two sides disagree about the final newline into a delete/add
+ * pair, in place.
+ *
+ * A line's TERMINATOR is part of the line. `a`'s last line without a trailing newline and
+ * `b`'s last line with one are different lines even when their characters match, so the
+ * `=` that `diffOps` pairs them into is not an equality at all — `diffOps` compares the
+ * strings `toSides` split out, and the terminator is not in them.
+ *
+ * Rendering such an op as a CONTEXT line is what made the `\ No newline` marker lie:
+ * the marker after a context line asserts that BOTH sides end there without a terminator,
+ * so on `unifiedDiff('a', 'a\nb\n')` it told `patch` to strip a newline that `b` still
+ * has. Splitting the op is what git does, and it is what gives the marker exactly one
+ * side to describe.
+ *
+ * It subsumes the case the line diff cannot see at all: adding or removing only the file's
+ * final newline changes no LINE, every op comes back `=`, and without this the whole edit
+ * would render as the empty diff that means "the write changed nothing".
+ */
+function splitUnterminatedContext(ops: Op[], a: Sides, b: Sides): void {
+  for (let i = 0; i < ops.length; i += 1) {
+    const op = ops[i]!;
+    if (op.kind !== '=') continue;
+    if (unterminatedA(op, a) === unterminatedB(op, b)) continue;
+    ops.splice(i, 1, { kind: '-', a: op.a, b: -1 }, { kind: '+', a: -1, b: op.b });
+    i += 1;
+  }
+}
+
+/**
+ * Reorders each run of consecutive changed ops into all deletions, then all additions.
+ *
+ * The backtrack can hand back a run interleaved as `-b +b -c`, which is the same edit but
+ * puts a `+` line before a `-` line that follows it. That matters for one reason: a
+ * `\ No newline` marker attaches to the line ABOVE it, so a marker on the last added line
+ * lands in the middle of the hunk with deletions still to come — a shape `git apply` is
+ * entitled to read differently from the one git itself emits.
+ *
+ * Within one run the `-` ops are already in increasing `a` order and the `+` ops in
+ * increasing `b` order, and no `=` separates them, so grouping preserves both the preimage
+ * and the postimage exactly. It only makes the rendering canonical.
+ */
+function groupChanges(ops: Op[]): void {
+  let i = 0;
+  while (i < ops.length) {
+    if (ops[i]!.kind === '=') {
+      i += 1;
+      continue;
+    }
+    let j = i;
+    while (j < ops.length && ops[j]!.kind !== '=') j += 1;
+    const run = ops.slice(i, j);
+    const dels = run.filter((op) => op.kind === '-');
+    const adds = run.filter((op) => op.kind === '+');
+    if (dels.length > 0 && adds.length > 0) {
+      ops.splice(i, j - i, ...dels, ...adds);
+    }
+    i = j;
+  }
+}
+
+/**
  * A unified diff of `before` → `after`, labelled with `path`.
  *
  * Returns `''` when the texts are identical — an empty diff is how a caller reports
@@ -415,23 +504,8 @@ export function unifiedDiff(before: string, after: string, path: string): string
   const b = toSides(after);
   const ops = diffOps(a.lines, b.lines);
 
-  // Adding or removing the file's final newline changes no LINE, so the line diff above
-  // finds nothing and the whole edit would be reported as an empty diff — the one output
-  // that means "the write changed nothing". It did change something, and a note whose
-  // last line lost its terminator is exactly the kind of edit a user wants to see. Git
-  // renders it by rewriting the last line as a delete/add pair; the `\ No newline` marker
-  // below then attaches to whichever side lacks the terminator.
-  if (a.noTrailingNewline !== b.noTrailingNewline && ops.length > 0) {
-    const last = ops[ops.length - 1]!;
-    if (last.kind === '=' && last.a === a.lines.length - 1 && last.b === b.lines.length - 1) {
-      ops.splice(
-        ops.length - 1,
-        1,
-        { kind: '-', a: last.a, b: -1 },
-        { kind: '+', a: -1, b: last.b }
-      );
-    }
-  }
+  splitUnterminatedContext(ops, a, b);
+  groupChanges(ops);
 
   const ranges = hunkRanges(ops);
   if (ranges.length === 0) return '';
@@ -470,9 +544,17 @@ export function unifiedDiff(before: string, after: string, path: string): string
       const line = op.kind === '+' ? b.lines[op.b]! : a.lines[op.a]!;
       out.push(`${op.kind === '=' ? ' ' : op.kind}${line}`);
 
-      const lastOfA = op.kind !== '+' && op.a === a.lines.length - 1 && a.noTrailingNewline;
-      const lastOfB = op.kind !== '-' && op.b === b.lines.length - 1 && b.noTrailingNewline;
-      if (lastOfA || lastOfB) out.push(NO_NEWLINE);
+      const lastOfA = unterminatedA(op, a);
+      const lastOfB = unterminatedB(op, b);
+      // A `-` line exists only on side A and a `+` line only on side B, so for those the
+      // marker describes the one side the line came from and `||` reads the single flag
+      // that can be set. A CONTEXT line is on BOTH sides at once, and the marker after it
+      // asserts that both of them end there without a terminator — emitting it because
+      // only one does is what told `patch` to strip a newline the other side still had.
+      // `splitUnterminatedContext` has already rewritten every `=` whose sides disagree,
+      // so the two flags agree on everything reaching here as `=`; the `&&` is the honest
+      // spelling of that invariant rather than a second, independent check.
+      if (op.kind === '=' ? lastOfA && lastOfB : lastOfA || lastOfB) out.push(NO_NEWLINE);
     }
   }
 

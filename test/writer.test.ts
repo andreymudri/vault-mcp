@@ -102,6 +102,40 @@ describe('unifiedDiff', () => {
     expect(diff).toContain(' c');
   });
 
+  /**
+   * Two changed lines with exactly `gap` unchanged lines between them, in a note long
+   * enough that neither change is near an edge.
+   */
+  function withGap(gap: number): { before: string; after: string } {
+    const lines = Array.from({ length: gap + 14 }, (_, i) => `l${i}`);
+    const changed = [...lines];
+    changed[5] = 'CINCO';
+    changed[6 + gap] = 'DEPOIS';
+    return { before: `${lines.join('\n')}\n`, after: `${changed.join('\n')}\n` };
+  }
+
+  it('joins two changes into one hunk when their context windows meet', () => {
+    // Six unchanged lines is 3 of trailing context plus 3 of leading context with nothing
+    // left over, so splitting would print the same lines twice under two headers.
+    const { before, after } = withGap(2 * 3);
+    const headers = unifiedDiff(before, after, 'nota.md')
+      .split('\n')
+      .filter((l) => l.startsWith('@@'));
+    expect(headers).toHaveLength(1);
+  });
+
+  it('splits at the first gap wider than the two context windows', () => {
+    // Seven: one line more than both windows can cover, so the seventh would be printed as
+    // context belonging to neither change. The threshold has to sit exactly between these
+    // two tests — moving it either way flips one of them, which is what pins `2 * CONTEXT`
+    // rather than any of the values in [7, 27] that leave the far-apart test below green.
+    const { before, after } = withGap(2 * 3 + 1);
+    const headers = unifiedDiff(before, after, 'nota.md')
+      .split('\n')
+      .filter((l) => l.startsWith('@@'));
+    expect(headers).toHaveLength(2);
+  });
+
   it('emits separate hunks for changes far apart', () => {
     const before = Array.from({ length: 40 }, (_, i) => `l${i}`).join('\n') + '\n';
     const after = before.replace('l2\n', 'DOIS\n').replace('l30\n', 'TRINTA\n');
@@ -113,6 +147,56 @@ describe('unifiedDiff', () => {
   it('marks a missing trailing newline', () => {
     const diff = unifiedDiff('a\n', 'a', 'nota.md');
     expect(diff).toContain('\\ No newline at end of file');
+  });
+
+  it('marks the side that lost the newline, not the line that kept it', () => {
+    // `toContain` cannot tell these apart, and that is the whole reason this file grew a
+    // round-trip suite below: the marker was emitted after the CONTEXT line ` a`, where it
+    // asserts that both sides end there without a terminator — false for `after`, which
+    // goes on for another line. Pinned as the exact text git itself produces.
+    expect(unifiedDiff('a', 'a\nb\n', 'nota.md')).toBe(
+      [
+        '--- a/nota.md',
+        '+++ b/nota.md',
+        '@@ -1 +1,2 @@',
+        '-a',
+        '\\ No newline at end of file',
+        '+a',
+        '+b',
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('keeps the marker on a context line only when BOTH sides end there unterminated', () => {
+    const diff = unifiedDiff('x\ny', 'z\ny', 'nota.md');
+    expect(diff).toBe(
+      ['--- a/nota.md', '+++ b/nota.md', '@@ -1,2 +1,2 @@', '-x', '+z', ' y', '\\ No newline at end of file', ''].join(
+        '\n'
+      )
+    );
+  });
+
+  it.each([
+    [
+      'the trailing lines replaced by an unterminated one',
+      'a\nb\nc\n',
+      'a\nb',
+      ['@@ -1,3 +1,2 @@', ' a', '-b', '-c', '+b', '\\ No newline at end of file'],
+    ],
+    [
+      'an unterminated tail rewritten and terminated',
+      'a\nb\nc',
+      'a\nX\nc\n',
+      ['@@ -1,3 +1,3 @@', ' a', '-b', '-c', '\\ No newline at end of file', '+X', '+c'],
+    ],
+  ])('renders deletions before additions, as git does: %s', (_label, before, after, body) => {
+    // The backtrack can hand back a run interleaved as `-b +b -c`, which puts the marker in
+    // the MIDDLE of the hunk with a deletion still to come — and the marker's whole meaning
+    // is "the file ends here". `git apply` happens to tolerate it; the reference renderers
+    // do not produce it. Both expectations below are the byte-exact body of the
+    // corresponding real `git diff`, so a drift away from git's shape shows up here.
+    expect(unifiedDiff(before, after, 'nota.md').split('\n').slice(2)).toEqual([...body, '']);
   });
 
   it('handles a file emptied completely', () => {
@@ -131,6 +215,106 @@ describe('unifiedDiff', () => {
     expect(diff).toContain('-antes 0');
     expect(diff).toContain('+depois 0');
   });
+});
+
+/**
+ * `unifiedDiff`'s output is only worth anything if a real patch tool can put it back, so
+ * this suite asserts the PROPERTY rather than the string: apply the diff to `before` with
+ * `git apply` and the bytes that come out must equal `after` exactly.
+ *
+ * That is deliberate, and it is the lesson of the bug this suite was written for. The
+ * `\ No newline at end of file` marker was emitted on the wrong side for months behind a
+ * single `expect(diff).toContain('\\ No newline at end of file')` — a test three separate
+ * mutations of the emitting condition all satisfy, because the marker being PRESENT says
+ * nothing about which side it describes. `git apply` refuses the wrong side, and byte
+ * comparison catches the cases it accepts and misapplies.
+ *
+ * `git apply` rather than `patch`: git is already a hard dependency of this suite (the
+ * writer commits), and it is the stricter of the two about the marker.
+ */
+describe('unifiedDiff round-trip', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-roundtrip-'));
+    await git(repo, ['init']);
+  });
+
+  afterEach(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  /** Applies `unifiedDiff(before, after)` to `before` with git, returning the result. */
+  async function roundTrip(before: string, after: string): Promise<string> {
+    const diff = unifiedDiff(before, after, 'f.md');
+    expect(diff).not.toBe('');
+    await fs.writeFile(path.join(repo, 'f.md'), before, 'utf8');
+    await fs.writeFile(path.join(repo, 'p.diff'), diff, 'utf8');
+    try {
+      await execFileAsync('git', ['-C', repo, 'apply', '--whitespace=nowarn', 'p.diff']);
+    } catch (err) {
+      throw new Error(
+        `git apply recusou o diff de ${JSON.stringify(before)} -> ${JSON.stringify(after)}:\n` +
+          `${diff}\n${(err as Error).message}`
+      );
+    }
+    return fs.readFile(path.join(repo, 'f.md'), 'utf8');
+  }
+
+  // Every combination of "does this side end in a newline" against every shape of edit
+  // that can touch the last line. The terminator cases are the ones that were broken: a
+  // marker on the wrong side is invisible to a string assertion and fatal to a patch.
+  it.each([
+    ['both sides terminated', 'a\nb\nc\n', 'a\nX\nc\n'],
+    ['before unterminated, after terminated', 'a\nb\nc', 'a\nX\nc\n'],
+    ['before terminated, after unterminated', 'a\nb\nc\n', 'a\nX\nc'],
+    ['both sides unterminated', 'a\nb\nc', 'a\nX\nc'],
+    ['only the terminator removed', 'a\nb\n', 'a\nb'],
+    ['only the terminator added', 'a\nb', 'a\nb\n'],
+    ['unterminated last line kept as context', 'x\ny', 'z\ny'],
+    ['lines appended after an unterminated last line', 'a', 'a\nb\n'],
+    ['lines appended, still unterminated', 'a', 'a\nb'],
+    ['the unterminated last line deleted', 'a\nb\nc', 'a\nb\n'],
+    ['a line removed before an unterminated tail', 'a\nb\nc', 'a\nc'],
+    ['a line inserted before an unterminated tail', 'a\nc', 'a\nb\nc'],
+    ['the whole file rewritten, unterminated', 'a\nb\nc', 'x\ny\nz'],
+    ['a single unterminated line changed', 'a', 'b'],
+    ['an unterminated file given a second line and a terminator', 'solo', 'solo\nmais\n'],
+    ['far apart edits with an unterminated tail', `${'l\n'.repeat(30)}fim`, `${'L\n'.repeat(30)}fim`],
+  ])('applies cleanly and byte-exactly: %s', async (_label, before, after) => {
+    expect(await roundTrip(before, after)).toBe(after);
+  });
+
+  it('round-trips two hundred generated pairs byte-exactly', async () => {
+    // Seeded, so a failure is reproducible. Short texts over a tiny alphabet is what makes
+    // the terminator the interesting variable rather than the diff algorithm.
+    let state = 20260824;
+    const rand = (): number => {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      return state / 0x7fffffff;
+    };
+    const pick = <T>(xs: T[]): T => xs[Math.floor(rand() * xs.length)]!;
+    const text = (): string => {
+      const n = 1 + Math.floor(rand() * 5);
+      const lines = Array.from({ length: n }, () => pick(['a', 'b', 'c', 'dd', '']));
+      return lines.join('\n') + (rand() < 0.5 ? '\n' : '');
+    };
+
+    let checked = 0;
+    for (let i = 0; i < 200; i += 1) {
+      const before = text();
+      const after = text();
+      // An empty side is a creation or a deletion — `git apply` then adds or removes the
+      // file rather than rewriting it, which is a different assertion. The `/dev/null`
+      // headers have their own tests above.
+      if (before === after || before === '' || after === '') continue;
+      expect(await roundTrip(before, after)).toBe(after);
+      checked += 1;
+    }
+    // Guards the loop itself: a generator that produced only identical pairs would make
+    // every assertion above vacuous and the test would still pass.
+    expect(checked).toBeGreaterThan(150);
+  }, 60_000);
 });
 
 describe('atomicWrite', () => {
@@ -488,6 +672,44 @@ describe('editNote', () => {
     expect(result.diff).toContain('+A API precisava de um mecanismo central de autenticação e auditoria');
   });
 
+  it('reports a diff that reproduces the edit it made, on a note with no final newline', async () => {
+    // The end-to-end shape of the marker bug, reachable with no crafted input at all:
+    // `writeNote` with content that does not end in a newline writes an unterminated note,
+    // and the next edit near its end had the marker attached to a context line that was
+    // not unterminated. Applying what the caller was SHOWN and comparing it to what was
+    // actually written is the assertion that cannot be satisfied by the wrong side.
+    const rel = '01-raw/inbox/sem-fim.md';
+    const created = await writeNote({
+      vaultRoot,
+      path: rel,
+      content: 'linha um\nlinha dois\nlinha tres SEM FIM',
+      deferCommit: true,
+    });
+    const beforeBytes = await fs.readFile(created.absPath, 'utf8');
+    expect(beforeBytes.endsWith('\n')).toBe(false);
+
+    const result = await editNote({
+      vaultRoot,
+      path: rel,
+      oldText: 'SEM FIM',
+      newText: 'AINDA SEM FIM',
+      deferCommit: true,
+    });
+    const afterBytes = await fs.readFile(created.absPath, 'utf8');
+
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-diff-apply-'));
+    try {
+      await git(repo, ['init']);
+      await fs.mkdir(path.join(repo, path.dirname(rel)), { recursive: true });
+      await fs.writeFile(path.join(repo, rel), beforeBytes, 'utf8');
+      await fs.writeFile(path.join(repo, 'p.diff'), result.diff, 'utf8');
+      await execFileAsync('git', ['-C', repo, 'apply', '--whitespace=nowarn', 'p.diff']);
+      expect(await fs.readFile(path.join(repo, rel), 'utf8')).toBe(afterBytes);
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  });
+
   it('writes without committing when deferCommit is set', async () => {
     const before = await countCommits(vaultRoot);
 
@@ -607,6 +829,41 @@ describe('unifiedDiff hardening', () => {
     expect(lines.filter((l) => l.startsWith('@@'))).toHaveLength(1);
     expect(lines).not.toContain('+++ b/CLAUDE.md');
     expect(lines).not.toContain('+forjado');
+  });
+
+  /**
+   * Every character that ENDS A LINE somewhere a diff gets rendered, not just the two a
+   * terminal breaks on. CSS Text 3 makes U+2028, U+2029 and U+0085 forced line breaks, so
+   * an HTML client shows them as breaks while `split('\n')` over the same string sees one
+   * line — which is precisely how a forged hunk shipped past the header test above.
+   */
+  const LINE_BREAKS = /\r\n|[\n\r\u0085\u2028\u2029]/;
+
+  it.each([
+    ['U+2028 LINE SEPARATOR', '\u2028'],
+    ['U+2029 PARAGRAPH SEPARATOR', '\u2029'],
+    ['U+0085 NEXT LINE', '\u0085'],
+  ])('escapes %s rather than letting it forge a hunk in an HTML client', (_label, ch) => {
+    const forged = `02-wiki/a${ch}+++ b/CLAUDE.md${ch}@@ -1 +1 @@${ch}-real${ch}+forjado.md`;
+    const diff = unifiedDiff('antes\n', 'depois\n', forged);
+
+    // Shipped raw, this character was the break. It must not survive into the output at
+    // all — escaping is what makes the header one line by every reader's definition.
+    expect(diff).not.toContain(ch);
+
+    const lines = diff.split(LINE_BREAKS);
+    expect(lines.filter((l) => l.startsWith('--- '))).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith('+++ '))).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith('@@'))).toHaveLength(1);
+    expect(lines).not.toContain('+++ b/CLAUDE.md');
+    expect(lines).not.toContain('+forjado.md');
+  });
+
+  it('escapes a C1 control in the path unambiguously', () => {
+    // `\x2028` would read back as `\x20` then a literal `28`, so a codepoint wider than one
+    // byte gets the four-digit form. U+0085 is one byte and keeps the short one.
+    expect(unifiedDiff('a\n', 'b\n', 'nota\u2028.md').split('\n')[0]).toBe('--- a/nota\\u2028.md');
+    expect(unifiedDiff('a\n', 'b\n', 'nota\u0085.md').split('\n')[0]).toBe('--- a/nota\\x85.md');
   });
 
   it('escapes a carriage return in the path instead of splitting the header', () => {
@@ -739,10 +996,16 @@ describe('atomicWrite guarantees', () => {
   async function recordAtomicWrite(
     target: string,
     text: string
-  ): Promise<{ openedPath: string; openedFlags: number | undefined; events: string[] }> {
+  ): Promise<{
+    openedPath: string;
+    openedFlags: number | undefined;
+    openedMode: number | undefined;
+    events: string[];
+  }> {
     const events: string[] = [];
     let openedPath = '';
     let openedFlags: number | undefined;
+    let openedMode: number | undefined;
 
     const realOpen = fs.open.bind(fs);
     const realRename = fs.rename.bind(fs);
@@ -750,6 +1013,7 @@ describe('atomicWrite guarantees', () => {
     vi.spyOn(fs, 'open').mockImplementation((async (p: never, flags: never, mode: never) => {
       openedPath = String(p);
       openedFlags = typeof flags === 'number' ? flags : undefined;
+      openedMode = typeof mode === 'number' ? mode : undefined;
       const handle = await realOpen(p, flags, mode);
       const realSync = handle.sync.bind(handle);
       handle.sync = async () => {
@@ -770,7 +1034,7 @@ describe('atomicWrite guarantees', () => {
       vi.restoreAllMocks();
     }
 
-    return { openedPath, openedFlags, events };
+    return { openedPath, openedFlags, openedMode, events };
   }
 
   it('writes its temporary file in the target directory, not the system temp dir', async () => {
@@ -824,11 +1088,32 @@ describe('atomicWrite guarantees', () => {
     expect(await fs.readFile(target, 'utf8')).toBe('v2\n');
   });
 
-  it('leaves a new note writable at the ordinary default mode', async () => {
+  it('leaves a new note at the ordinary default mode', async () => {
     const target = path.join(tmp, 'nova.md');
     await atomicWrite(target, 'v1\n');
 
     expect((await fs.stat(target)).mode & 0o200).toBe(0o200);
+    // Exactly what `fs.writeFile` would have produced. The temporary file is created 0600,
+    // so a note that never gets widened again would come back owner-only and every other
+    // tool the user points at their vault would suddenly see a private file.
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o666 & ~process.umask());
+  });
+
+  it('never lets the plaintext sit on disk world-readable before the mode is set', async () => {
+    // The bytes were written into a 0644 temporary file and chmod'd to 0600 only
+    // afterwards, so the full plaintext of a note deliberately kept owner-only was
+    // readable by every process on the machine for the length of the write. The mode has
+    // to be right at CREATE time; nothing observable in the finished file says whether it
+    // was, which is why this reads the `open` call itself.
+    const target = path.join(tmp, 'segredo.md');
+    await atomicWrite(target, 'v1\n');
+    await fs.chmod(target, 0o600);
+
+    const { openedMode } = await recordAtomicWrite(target, 'conteudo secreto\n');
+
+    expect(openedMode).toBe(0o600);
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
+    expect(await fs.readFile(target, 'utf8')).toBe('conteudo secreto\n');
   });
 });
 
@@ -883,10 +1168,91 @@ describe('write guard', () => {
     ['tab', '02-wiki/no\tta.md'],
     ['NUL', '02-wiki/no\u0000ta.md'],
     ['escape', '02-wiki/no\u001bta.md'],
+    // Not controls in the C0 sense, and that is exactly why they got through: CSS Text 3
+    // makes all three forced line breaks, so this path rendered as a fabricated diff hunk
+    // in the user's client and `git log --format=%B` showed the injected lines in the
+    // commit message. `split('\n')` sees one line in every one of them.
+    ['line separator', '02-wiki/a\u2028+++ b/CLAUDE.md\u2028@@ -1 +1 @@\u2028-real\u2028+forjado.md'],
+    ['paragraph separator', '02-wiki/a\u2029+++ b/CLAUDE.md\u2029+forjado.md'],
+    ['next line', '02-wiki/a\u0085+++ b/CLAUDE.md\u0085+forjado.md'],
+    ['C1 control', '02-wiki/no\u0090ta.md'],
   ])('refuses a path containing a %s', async (_label, relPath) => {
     await expect(writeNote({ vaultRoot, path: relPath, content: 'x' })).rejects.toBeInstanceOf(
       PathGuardError
     );
+  });
+
+  it('refuses a write that reaches a denied directory through an in-vault symlink', async () => {
+    // The guard used to read the LEXICAL path, and this path has no `.git` segment in it.
+    // The link does not escape the vault either, so `assertNoSymlinkEscape` is satisfied
+    // too — and the write landed in `<vault>/.git/refs/heads/pwn.md`, a malformed loose ref
+    // that breaks `git gc`, `git log --all` and every commit this module makes afterwards.
+    // Reproduced on Linux with an ordinary relative link a sync client could have created.
+    await fs.symlink(
+      path.join('..', '.git', 'refs', 'heads'),
+      path.join(vaultRoot, '02-wiki', 'compartilhado'),
+      'dir'
+    );
+
+    await expect(
+      writeNote({ vaultRoot, path: '02-wiki/compartilhado/pwn.md', content: 'lixo' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+    expect(await exists(path.join(vaultRoot, '.git', 'refs', 'heads', 'pwn.md'))).toBe(false);
+  });
+
+  it('refuses an edit that reaches a denied directory through an in-vault symlink', async () => {
+    await fs.symlink(
+      path.join('..', '.git'),
+      path.join(vaultRoot, '02-wiki', 'interno'),
+      'dir'
+    );
+    await expect(
+      editNote({ vaultRoot, path: '02-wiki/interno/config.md', oldText: 'a', newText: 'b' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+  });
+
+  it('still allows a symlinked directory that leads somewhere ordinary', async () => {
+    // The resolved check must refuse a link INTO a denied directory without refusing links
+    // as such: a vault where `02-wiki/externo` points at another folder of notes is a
+    // perfectly ordinary vault, and the guard has no business breaking it.
+    await fs.mkdir(path.join(vaultRoot, '01-raw', 'compartilhado'), { recursive: true });
+    await fs.symlink(
+      path.join('..', '01-raw', 'compartilhado'),
+      path.join(vaultRoot, '02-wiki', 'externo'),
+      'dir'
+    );
+
+    const result = await writeNote({ vaultRoot, path: '02-wiki/externo/nota.md', content: 'ok' });
+    expect(result.created).toBe(true);
+    expect(await exists(path.join(vaultRoot, '01-raw', 'compartilhado', 'nota.md'))).toBe(true);
+  });
+
+  it.each([
+    ['uppercase', '.GIT/refs/heads/pwn.md'],
+    ['mixed case', '.Git/refs/heads/pwn.md'],
+    ['a trailing dot', '.git./refs/heads/pwn.md'],
+    ['a trailing space', '.git /refs/heads/pwn.md'],
+    ['uppercase .obsidian', '.OBSIDIAN/plugins/p/main.md'],
+    ['uppercase node_modules', '02-wiki/NODE_MODULES/x.md'],
+  ])('refuses a denied directory spelled with %s', async (_label, relPath) => {
+    // All four spellings of `.git` open the REAL `.git` on a case-insensitive volume, which
+    // is every macOS and Windows vault, and Windows strips trailing dots and spaces from a
+    // component before the filesystem ever sees it. All were confirmed creatable. Comparing
+    // the segment as typed answers `false` for each one.
+    await expect(
+      writeNote({ vaultRoot, path: relPath, content: 'lixo' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+  });
+
+  it('does not mistake a note whose name merely starts with a denied one', async () => {
+    // The normalisation must not become a prefix match: `.gitignore-notas.md` is a note.
+    const result = await writeNote({
+      vaultRoot,
+      path: '02-wiki/.gitignore-notas.md',
+      content: 'Sobre .gitignore.',
+    });
+    expect(result.created).toBe(true);
+    expect(await exists(result.absPath)).toBe(true);
   });
 
   it('refuses an edit inside .git just as it refuses a write', async () => {
@@ -986,6 +1352,49 @@ describe('write ordering', () => {
     expect(result.diff).toContain('diff indisponível');
     // Under the old order the note was published and the caller got nothing at all.
     expect(result.diff).not.toBe('');
+  });
+
+  /**
+   * `safeDiff` builds its own summary rather than calling back into `diff.js`, because
+   * this is the path taken when `diff.js` has just failed. That is a defensible reason to
+   * duplicate the shape — and duplication that nothing pins is duplication that drifts:
+   * stubbing this copy's `countLines` to `return 0`, collapsing its header to a constant
+   * `--- /dev/null`, replacing its counts with a constant and deleting its `/dev/null`
+   * branch for the empty side ALL passed the suite. The three tests below read every field
+   * of it, so a drift in either copy has to be a deliberate edit to a test.
+   */
+  it('names the file and both line counts in the recovery summary', async () => {
+    const rel = '02-wiki/patterns/resumo-recuperado.md';
+    await fs.writeFile(path.join(vaultRoot, rel), 'um\nDOIS\ntres\n', 'utf8');
+
+    const editNoteFresh = await withFailingDiff();
+    const result = await editNoteFresh({
+      vaultRoot,
+      path: rel,
+      oldText: 'DOIS',
+      newText: 'dois\nextra',
+    });
+
+    expect(result.diff).toContain(`--- a/${rel}`);
+    expect(result.diff).toContain(`+++ b/${rel}`);
+    expect(result.diff).toContain('@@ diff indisponível @@');
+    // Whole-file counts, unlike `coarseSummary`'s changed-region counts: three lines went
+    // in and four came out. A constant, or a `countLines` that always answers 0, dies here.
+    expect(result.diff).toContain('3 linhas antes, 4 linhas depois');
+    expect(result.diff).toContain('Array buffer allocation failed');
+  });
+
+  it('renders the recovery summary against /dev/null when the edit empties the note', async () => {
+    const rel = '02-wiki/patterns/esvaziada.md';
+    await fs.writeFile(path.join(vaultRoot, rel), 'unica\n', 'utf8');
+
+    const editNoteFresh = await withFailingDiff();
+    const result = await editNoteFresh({ vaultRoot, path: rel, oldText: 'unica\n', newText: '' });
+
+    expect(result.diff).toContain(`--- a/${rel}`);
+    expect(result.diff).toContain('+++ /dev/null');
+    expect(result.diff).toContain('1 linhas antes, 0 linhas depois');
+    expect(await fs.readFile(path.join(vaultRoot, rel), 'utf8')).toBe('');
   });
 
   it('creates a new note and reports the failure rather than rejecting', async () => {

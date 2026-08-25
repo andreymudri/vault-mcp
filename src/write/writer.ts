@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 import matter from 'gray-matter';
 
@@ -88,12 +88,98 @@ const DENIED_SEGMENTS = new Set(['.git', '.obsidian', 'node_modules', '_template
  *
  * `unifiedDiff` escapes its own header too — this is the outer lock, refusing the input
  * rather than rendering it, because a path no legitimate note ever has is better rejected
- * than sanitised into something the user did not ask for. NUL matters separately: it makes
- * `fs` throw a bare `TypeError` from deep inside the write instead of a `PathGuardError`
- * the tool layer knows how to report.
+ * than sanitised into something the user did not ask for. The two are NOT redundant and
+ * neither may be dropped: this one rejects, that one escapes, and each has to hold on its
+ * own — `unifiedDiff` is exported to callers that never pass through here, and a path can
+ * reach a commit message without ever reaching a diff. NUL matters separately again: it
+ * makes `fs` throw a bare `TypeError` from deep inside the write instead of a
+ * `PathGuardError` the tool layer knows how to report.
+ *
+ * The set is every C0 control, DEL, every C1 control and the two Unicode separators, and
+ * the last three are the reason it is not just `\u0000-\u001f`. `split('\n')` sees one
+ * line in a path carrying U+2028, U+2029 or U+0085 — but CSS Text 3 makes all three FORCED
+ * LINE BREAKS in any HTML-rendering client, so `02-wiki/a\u2028+++ b/CLAUDE.md\u2028@@ -1
+ * +1 @@\u2028-real\u2028+forjado.md` shipped raw and rendered as a complete fabricated
+ * hunk in the user's client. `git log --format=%B` showed the injected lines too: the same
+ * string is the commit message subject.
  */
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+/**
+ * A path segment as the FILESYSTEM will compare it, not as the string was typed.
+ *
+ * `.git` is one directory under three different spellings, and the guard has to see all
+ * of them. On macOS's HFS+/APFS and on every Windows volume the comparison is
+ * case-insensitive, so `.GIT/` and `.Git/` open the real `.git`. Windows additionally
+ * STRIPS trailing dots and spaces from a component before it reaches the filesystem, so
+ * `.git./` and `.git /` open it too — all four were confirmed creatable, and each one of
+ * them arrives here as a string that `Set.has('.git')` answers `false` for.
+ *
+ * Normalising on every platform rather than only where it matters is deliberate: a vault
+ * is a directory a user syncs between machines, so a note this Linux process considers
+ * legal is a note that will be checked out on the macOS laptop too. The cost of the extra
+ * strictness is a directory literally named `.Git` that holds notes, which no vault has.
+ */
+function normalizeSegment(segment: string): string {
+  return segment.replace(/[. ]+$/, '').toLowerCase();
+}
+
+/**
+ * The segments of `absPath` as they exist AFTER every symlink on the way has been
+ * followed, relative to the vault's own real root.
+ *
+ * The lexical path is not the path that gets written. An in-vault symlink
+ * `02-wiki/compartilhado → ../.git/refs/heads` is not an escape — it stays inside the
+ * vault, so `assertNoSymlinkEscape` passes it — and `02-wiki/compartilhado/pwn.md` carries
+ * no `.git` segment for a string check to find, yet the write lands in
+ * `<vault>/.git/refs/heads/pwn.md` and breaks every subsequent git operation exactly as
+ * the plain `.git/refs/heads/pwn.md` did. Reproduced on Linux; the same hole exists for
+ * any denied directory reachable through a link a user or a sync client created.
+ *
+ * `assertNoSymlinkEscape` already realpaths the deepest existing ancestor, and this walks
+ * the same ground for a different question — is the RESOLVED path in a denied directory,
+ * rather than is it outside the vault. The duplication is not free and is not wanted; it
+ * is here because the answer belongs beside `DENIED_PREFIXES` in `paths.ts`, which this
+ * task may not touch. Move both there together.
+ */
+async function pathSegments(vaultRoot: string, absPath: string): Promise<string[]> {
+  const lexicalRoot = resolve(vaultRoot);
+  // The lexical segments are checked as well as the resolved ones, and a denied segment in
+  // EITHER refuses the write. A link is capable of pointing both ways: `.git` could itself
+  // be a symlink to an innocent directory, and honouring that would let `.git/x.md` — a
+  // path the user plainly meant as the repository — through on the strength of a link the
+  // repository never had.
+  const segments = relative(lexicalRoot, absPath).split(sep);
+
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(lexicalRoot);
+  } catch {
+    // A vault root that cannot be resolved is `assertNoSymlinkEscape`'s error to raise,
+    // with its own message. Here it just means there is nothing more to add.
+    return segments;
+  }
+
+  // Walk up to the deepest ancestor that exists — a new note's own directories may not
+  // exist yet — realpath it, and put the not-yet-existing tail back on the end.
+  let head = absPath;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      head = await fs.realpath(head);
+      break;
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return segments;
+      tail.unshift(basename(head));
+      head = parent;
+    }
+  }
+
+  const resolved = tail.length === 0 ? head : join(head, ...tail);
+  return [...segments, ...relative(realRoot, resolved).split(sep)];
+}
 
 /**
  * Both halves of the path guard, in the order they have to run.
@@ -116,12 +202,12 @@ async function guardedPath(vaultRoot: string, relPath: string): Promise<string> 
 
   const absPath = resolveWritePath(vaultRoot, relPath);
 
-  // Segment-wise, on the RESOLVED path, so `02-wiki/./.git/x.md` is caught with the plain
-  // `.git/x.md`. Matching whole segments and not string prefixes is what keeps an ordinary
-  // note at `02-wiki/git/rebase-interativo.md` legal, exactly as `99-archive-notes/` stays
-  // legal beside the denied `99-archive/`.
-  for (const segment of relative(resolve(vaultRoot), absPath).split(sep)) {
-    if (DENIED_SEGMENTS.has(segment)) {
+  // Segment-wise, on the RESOLVED path as well as the lexical one, so `02-wiki/./.git/x.md`
+  // and a link that lands in `.git` are both caught. Matching whole segments and not string
+  // prefixes is what keeps an ordinary note at `02-wiki/git/rebase-interativo.md` legal,
+  // exactly as `99-archive-notes/` stays legal beside the denied `99-archive/`.
+  for (const segment of await pathSegments(vaultRoot, absPath)) {
+    if (DENIED_SEGMENTS.has(normalizeSegment(segment))) {
       throw new PathGuardError(`escrita negada em ${segment}/ (área interna, não é conteúdo)`);
     }
   }

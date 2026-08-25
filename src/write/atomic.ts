@@ -21,6 +21,40 @@ const TMP_FLAGS =
   constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
 
 /**
+ * The mode the temporary file is CREATED with — owner-only, always.
+ *
+ * The note's real mode is applied afterwards, and that ordering is the whole point.
+ * Creating the temporary file 0666 and chmod'ing it down after the write meant the entire
+ * plaintext of a note deliberately kept at 0600 — the vault holds credentials, tokens and
+ * client notes — sat world-readable in the vault directory for as long as the write took,
+ * under a name any other process on the machine could stat and open. The window is small
+ * and it is entirely avoidable: a file created 0600 and widened later is never readable by
+ * anyone who was not already allowed to read it.
+ *
+ * A file's mode is fixed at open() and is not affected by a later chmod for handles that
+ * are already open, so nothing that could not read the temporary file at creation gains
+ * access when the mode is widened at the end.
+ */
+const TMP_MODE = 0o600;
+
+/**
+ * The mode a NEW note gets, since there is no existing file whose mode should be kept.
+ *
+ * `0o666` minus the process umask is what `fs.writeFile` would have produced, and a note
+ * this module creates has no business being less readable than one the user created with
+ * an editor. `process.umask()` is read rather than assumed because a server started under
+ * a restrictive umask means it deliberately; it throws in a worker thread, hence the
+ * fallback to the ordinary 022.
+ */
+function defaultMode(): number {
+  try {
+    return 0o666 & ~process.umask();
+  } catch {
+    return 0o666 & ~0o022;
+  }
+}
+
+/**
  * Writes `text` to `absPath` so that no reader ever observes a partial file.
  *
  * The sequence is: create the parent directory, create a UNIQUELY NAMED temporary file
@@ -81,7 +115,7 @@ export async function atomicWrite(absPath: string, text: string): Promise<void> 
     }
 
     try {
-      handle = await fs.open(tmpPath, TMP_FLAGS, 0o666);
+      handle = await fs.open(tmpPath, TMP_FLAGS, TMP_MODE);
       break;
     } catch (err) {
       // EEXIST means either a name collision or a planted symlink; both are answered by
@@ -97,7 +131,9 @@ export async function atomicWrite(absPath: string, text: string): Promise<void> 
   try {
     try {
       await handle.writeFile(text, 'utf8');
-      if (targetMode !== undefined) await handle.chmod(targetMode);
+      // Only now, with the bytes already down in a file nobody else could open: the note's
+      // own mode if it is replacing one, and the ordinary default if it is a new note.
+      await handle.chmod(targetMode ?? defaultMode());
       await handle.sync();
     } finally {
       await handle.close();
