@@ -8,7 +8,7 @@ import type { ScoredChunk } from '../types.js';
 import { commitFiles } from './git.js';
 import { PathGuardError, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
-import { formatLocal } from './template.js';
+import { applyTemplate, formatLocal } from './template.js';
 import { EditError, editNote, writeNote, type WriteResult } from './writer.js';
 
 /**
@@ -307,61 +307,158 @@ async function existingDomains(vaultRoot: string): Promise<string[]> {
 }
 
 /**
- * A file bigger than this cannot be blank in any sense worth the read. The check exists to keep
- * "is this path occupied?" from reading a whole note off disk on every call, and erring towards
- * OCCUPIED is the safe direction: an occupied path is one this module never writes over.
+ * How much of a file is read before deciding it is not blank. A note's first bytes are its
+ * frontmatter, so the answer is settled long before this; the bound is here so that "is anything
+ * standing on this path?" never reads a whole note off disk.
  */
-const MAX_BLANK_PROBE_BYTES = 4096;
+const BLANK_PROBE_BYTES = 4096;
 
 /**
- * True when `absPath` holds a note with actual CONTENT.
+ * What stands on a path, from the point of view of a module that may write a note there.
  *
- * Blank is not occupied, and the distinction is the whole point. Obsidian leaves a file holding a
- * single `\n` — or a couple of spaces — whenever a user clicks an unresolved link or presses Enter
- * in a new note, and that file is a placeholder, not a note. Treated as occupied, the learning
- * gets appended INTO it by `editNote`, which runs neither `ensureFrontmatter` nor `applyTemplate`:
- * the result has no `tipo: wiki`, no tags, no `criado`, no `# H1` and no skeleton, so the next
- * scan reads it as an untyped note, `vault_list({tipo:'wiki'})` never returns it and the
- * tag-overlap arm of `decideDuplicate` can never fire for it again. Permanent damage, reported as
- * a plain success.
+ * - `free`: nothing at all.
+ * - `blank`: a regular file with NO content. Obsidian leaves one whenever a user clicks an
+ *   unresolved link or presses Enter in a new note; it is a placeholder, not a note.
+ * - `note`: a regular file with content — or a SYMLINK, which is never a placeholder because it
+ *   names something living somewhere else, whose bytes are not this path's to judge.
+ * - `foreign`: a directory, a FIFO, a socket, a device. Not a note, and nothing this module may
+ *   read or write. `foreign` exists so that no code path opens one: reading a FIFO never returns,
+ *   which hangs the whole single-threaded server on a path that merely LOOKS like a note.
  *
- * `propagate` (`src/write/propagate.ts`) already draws the line here, with `before.trim() !== ''`
- * and a docblock naming the same hazard. Two modules in the same directory MUST NOT disagree about
- * what "blank" means.
+ * The blank/note line is the one `propagate` already draws with `before.trim() !== ''`, and the
+ * two modules in this directory must not disagree about what blank means: treated as a note, a
+ * placeholder gets APPENDED to by `editNote`, which runs neither `ensureFrontmatter` nor
+ * `applyTemplate` — the result carries no `tipo: wiki`, no tags, no `# H1` and no skeleton, so the
+ * next scan reads it as an untyped note, `vault_list({tipo:'wiki'})` never returns it, and the
+ * tag-overlap arm of `decideDuplicate` can never fire for it again.
  */
-async function isOccupied(absPath: string): Promise<boolean> {
+type PathState = 'free' | 'blank' | 'note' | 'foreign';
+
+async function pathState(absPath: string): Promise<PathState> {
+  let stat;
   try {
-    const stat = await fs.stat(absPath);
-    if (!stat.isFile()) return false;
-    if (stat.size > MAX_BLANK_PROBE_BYTES) return true;
-    return (await fs.readFile(absPath, 'utf8')).trim() !== '';
+    // `lstat`, never `stat`: a symlink has to be seen as itself. Following it answers a question
+    // about the TARGET's bytes and then acts on the LINK, which is how a user's alias into a
+    // shared store ends up treated as an empty placeholder.
+    stat = await fs.lstat(absPath);
   } catch {
-    return false;
+    return 'free';
+  }
+
+  if (stat.isSymbolicLink()) return 'note';
+  if (!stat.isFile()) return 'foreign';
+  if (stat.size === 0) return 'blank';
+
+  try {
+    if (stat.size > BLANK_PROBE_BYTES) {
+      const handle = await fs.open(absPath, 'r');
+      try {
+        const buffer = Buffer.alloc(BLANK_PROBE_BYTES);
+        const { bytesRead } = await handle.read(buffer, 0, BLANK_PROBE_BYTES, 0);
+        if (buffer.subarray(0, bytesRead).toString('utf8').trim() !== '') return 'note';
+      } finally {
+        await handle.close();
+      }
+      // Four kilobytes of nothing but whitespace. No size threshold decides this one — that would
+      // leave an arbitrary byte count deciding between a note born with its skeleton and one
+      // silently appended to — so the rest is read, which only a pathological file ever reaches.
+    }
+    return (await fs.readFile(absPath, 'utf8')).trim() === '' ? 'blank' : 'note';
+  } catch {
+    // Unreadable is not writable: treat it as content rather than risk standing on it.
+    return 'note';
   }
 }
 
+/** True when a note may be written at this path without anything being lost. */
+function isWritable(state: PathState): boolean {
+  return state === 'free' || state === 'blank';
+}
+
 /**
- * Removes a BLANK file standing exactly where the new note is about to be written.
+ * A human title from the file name, and the `_templates/wiki.md` skeleton with the body spliced
+ * in above its first section — the same two rules `writeNote` applies when it CREATES a note
+ * (`titleFromPath` and `spliceBody` in `src/write/writer.ts`), reproduced here for the one case
+ * `writeNote` cannot cover.
  *
- * `writeNote` decides between creating and replacing by whether it could READ the path, so a
- * blank placeholder there makes it take the replace branch: no `_templates/wiki.md` skeleton, no
- * `# H1`, and a note that violates the plan's "cria nota nova a partir de _templates/wiki.md".
- * Taking a different, free name instead would be worse — the user clicked a link to THIS name, so
- * the placeholder would stay blank forever while the learning sat in a sibling file, and nothing
- * reports that: the link is not broken, the file exists, and it is empty.
+ * That case is a BLANK placeholder standing on the new note's path: `writeNote` decides between
+ * creating and replacing by whether it could READ the path, so it takes the replace branch and
+ * skips the template, and the note is born with no `# H1` and no `## Contexto` / `## Solução` /
+ * `## Exemplo` — violating the plan's "cria nota nova a partir de `_templates/wiki.md`".
  *
- * Deleting is safe precisely because the file is blank: there is no content to lose. It is the
- * only way to reach `writeNote`'s create branch from here, since `writer.ts` is outside this
- * task's file set.
+ * Handing `writeNote` the COMPLETE content is what makes that unnecessary. The alternative —
+ * deleting the placeholder so `writeNote` sees a free path — is an unlink running BEFORE
+ * `writeNote`'s own guards (`DENIED_SEGMENTS`, `assertNoSymlinkEscape`): a destructive operation
+ * on a path checked for nothing but its suffix and its containment. This module removes nothing,
+ * ever.
+ *
+ * The two rules staying in step is what the tests pin: a note written onto a placeholder and a
+ * note written on a free path must come out the same shape.
  */
-async function clearBlankStub(absPath: string): Promise<void> {
-  try {
-    const content = await fs.readFile(absPath, 'utf8');
-    if (content.trim() !== '') return;
-    await fs.rm(absPath);
-  } catch {
-    // Nothing there, or nothing readable: `writeNote` owns whatever happens next.
+function titleFromPath(relPath: string): string {
+  return basename(relPath, '.md')
+    .split(/[-_]+/)
+    .filter((word) => word !== '')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+/** Trailing newlines dropped by scanning, not by `/\n+$/`, which backtracks quadratically. */
+function stripTrailingNewlines(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) end -= 1;
+  return text.slice(0, end);
+}
+
+function spliceIntoSkeleton(skeleton: string, body: string): string {
+  const content = body.trim();
+  if (content === '') return skeleton;
+
+  const lines = skeleton.split('\n');
+  // The search starts after the frontmatter block, so a `## ` inside a quoted YAML value cannot
+  // be mistaken for the first section.
+  let from = 0;
+  if ((lines[0] ?? '').trim() === '---') {
+    for (let i = 1; i < lines.length; i += 1) {
+      if ((lines[i] ?? '').trim() === '---') {
+        from = i + 1;
+        break;
+      }
+    }
   }
+
+  let at = -1;
+  for (let i = from; i < lines.length; i += 1) {
+    if (/^##\s/.test(lines[i] ?? '')) {
+      at = i;
+      break;
+    }
+  }
+
+  if (at === -1) return `${stripTrailingNewlines(skeleton)}\n\n${content}\n`;
+  const head = stripTrailingNewlines(lines.slice(0, at).join('\n'));
+  const tail = lines.slice(at).join('\n');
+  return `${head}\n\n${content}\n\n${tail}`;
+}
+
+/** The complete note content for a path that already holds a blank placeholder. */
+async function skeletonContent(
+  opts: LearnOptions,
+  relPath: string,
+  body: string,
+): Promise<{ content: string; warning?: string }> {
+  let templateText: string;
+  try {
+    templateText = await fs.readFile(join(opts.vaultRoot, '_templates', 'wiki.md'), 'utf8');
+  } catch {
+    // The same warning `writeNote` raises for the same missing file, since it will not raise it
+    // itself on this route. The learning is still written: the body is what the user asked for.
+    return { content: body, warning: 'template não encontrado: _templates/wiki.md' };
+  }
+  // `applyTemplate` throws on an unresolved Templater token, exactly as it does inside
+  // `writeNote`: an unsubstituted `<% %>` written into the vault is the bug it exists to prevent.
+  const skeleton = applyTemplate(templateText, { title: titleFromPath(relPath), now: opts.now });
+  return { content: spliceIntoSkeleton(skeleton, body) };
 }
 
 /**
@@ -536,10 +633,10 @@ async function attemptAppend(
  * vault state no ordinary use produces, and it is refused loudly rather than written over: the
  * caller still holds the text, which a silent overwrite would not leave true of the note.
  *
- * A sibling name loses nothing only because `isOccupied` reads BLANK as free: were a placeholder
- * counted as occupied, the user who clicked a link to `cache-wrapper-ttl` would be left with that
- * file blank forever while the learning sat in `cache-wrapper-ttl-2026-08-20.md` — and nothing
- * would report it, since the link is not broken and the file exists.
+ * A sibling name loses nothing only because `pathState` reads a BLANK file as writable: were a
+ * placeholder counted as a note, the user who clicked a link to `cache-wrapper-ttl` would be left
+ * with that file blank forever while the learning sat in `cache-wrapper-ttl-2026-08-20.md` — and
+ * nothing would report it, since the link is not broken and the file exists.
  */
 async function freeNotePath(
   vaultRoot: string,
@@ -552,7 +649,7 @@ async function freeNotePath(
     const room = MAX_SLUG_CHARS - suffix.length - 1;
     const head = (noteSlug.length <= room ? noteSlug : noteSlug.slice(0, room)).replace(/-$/, '');
     const candidate = `${WIKI_PREFIX}${dominio}/${head}-${suffix}.md`;
-    if (!(await isOccupied(resolveWritePath(vaultRoot, candidate)))) return candidate;
+    if (isWritable(await pathState(resolveWritePath(vaultRoot, candidate)))) return candidate;
   }
   throw new LearnError(
     `não há nome livre para a nota em ${WIKI_PREFIX}${dominio}/: 100 variações já existem`,
@@ -618,6 +715,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   let newRelPath = `${WIKI_PREFIX}${opts.dominio}/${noteSlug}.md`;
 
   const targetPath = decision.targetPath;
+  const newAbsPath = resolveWritePath(opts.vaultRoot, newRelPath);
   let reason = decision.reason;
 
   let write: WriteResult | undefined;
@@ -644,8 +742,11 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   // rather than once up front — asked up front it leaves the failed-append route going straight
   // to the replace, which is exactly the destruction this guard exists to stop. Same title, same
   // note: append to it instead.
-  if (write === undefined && (await isOccupied(resolveWritePath(opts.vaultRoot, newRelPath)))) {
-    if (newRelPath !== targetPath) {
+  const collision = write === undefined ? await pathState(newAbsPath) : 'free';
+  if (!isWritable(collision)) {
+    // A directory, a FIFO or a socket standing on the name is not something to append to and not
+    // something to write over: `foreign` goes straight to a free name, and nothing opens it.
+    if (newRelPath !== targetPath && collision === 'note') {
       const attempt = await attemptAppend(opts, newRelPath, titulo, date);
       if (attempt.write !== undefined) {
         write = attempt.write;
@@ -660,29 +761,41 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
         reason = `${decision.reason}; nota já existe em ${newRelPath}, anexado nela`;
         titleCollision =
           `anexado em ${newRelPath} por coincidência de título; a checagem de duplicata não ` +
-          `indicou essa nota (${decision.reason}) — confira se o assunto é o mesmo`;
+          // FOLDED here, not at the end: `joinWarnings` does not fold, and `decision.reason` names
+          // a path read off the vault index — where a file called `nota\nWARNING: tudo certo.md`
+          // is a name the scanner accepts and this warning would print as a second line.
+          `indicou essa nota (${oneLine(decision.reason)}) — confira se o assunto é o mesmo`;
       } else if (attempt.failure !== undefined) {
         failures.push(attempt.failure);
       }
     }
 
     // Occupied and unappendable. A brand new name keeps both the existing note and the learning,
-    // which is the only outcome here that loses nothing — and, because the file is then genuinely
-    // new, `writeNote` applies the `_templates/wiki.md` skeleton, which it skips for a path that
-    // already exists (a zero-byte stub included).
+    // which is the only outcome here that loses nothing. The name it returns is free or blank, so
+    // the write below is a genuine creation either way and the note is born with its skeleton.
     if (write === undefined) {
       newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date);
     }
   }
 
+  let templateWarning: string | undefined;
   if (write === undefined) {
-    // A blank placeholder at this exact path is cleared rather than written over, so `writeNote`
-    // takes its CREATE branch and the note is born with the template skeleton and its frontmatter.
-    await clearBlankStub(resolveWritePath(opts.vaultRoot, newRelPath));
+    const body = buildBody(opts, '\n');
+    // `writeNote` applies the `_templates/wiki.md` skeleton only when it cannot READ the path, so
+    // a blank placeholder standing here would cost the note its `# H1` and its sections. The
+    // skeleton is therefore built HERE and handed over complete — the placeholder is written over,
+    // never removed.
+    const state = await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
+    const built =
+      state === 'blank'
+        ? await skeletonContent(opts, newRelPath, body)
+        : { content: body, warning: undefined };
+    templateWarning = built.warning;
+
     write = await writeNote({
       vaultRoot: opts.vaultRoot,
       path: newRelPath,
-      content: buildBody(opts, '\n'),
+      content: built.content,
       frontmatter: { tags },
       tipo: 'wiki',
       deferCommit: true,
@@ -692,7 +805,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const appendFailure =
     failures.length === 0
       ? undefined
-      : `${failures.join('; ')}; aprendizado gravado em ${write.path}`;
+      : `${failures.join('; ')}; aprendizado gravado em ${oneLine(write.path)}`;
   if (appendFailure !== undefined) reason = `${reason}; ${appendFailure}`;
 
   // `projeto` lands inside the daily capture line, which is one of the machine-written index
@@ -726,6 +839,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     .join('');
 
   const warning = joinWarnings([
+    templateWarning,
     titleCollision,
     appendFailure,
     truncated
