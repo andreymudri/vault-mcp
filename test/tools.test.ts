@@ -10,6 +10,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { TRUNCATION_MARKER } from '../src/retrieval/budget.js';
+import { parseFile } from '../src/vault/frontmatter.js';
+import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import {
@@ -594,8 +596,45 @@ describe('vault_search: escapes do que vem do vault e do chamador', () => {
     const header = headers(rendered)[0];
     expect(header?.heading).toContain('\\u202e');
     expect(header?.heading).not.toContain('‮');
-    // O TRECHO é conteúdo citado e sai literal — a linha estruturada é que é do servidor.
-    expect(rendered).toContain('## Sec‮ao invertida');
+    // O trecho citado também escapa o override bidi: ele reordena a linha e faria o `> ` deixar de
+    // ser lido como o começo dela. O resto do texto sai literal, acentos inclusive.
+    expect(rendered).toContain('## Sec\\u202eao invertida');
+    expect(rendered).not.toContain('‮');
+  });
+
+  it('escapa controles ANSI no trecho, que reescrevem a linha já impressa', async () => {
+    const vaultRoot = await makeVault();
+    // `ESC[F` sobe uma linha e `ESC[2K` apaga: num cliente que honra ANSI, isto REESCREVE a linha
+    // do servidor logo acima — a mesma forja do `\r`, por outro mecanismo, e sem gerar `\n`.
+    await write(
+      vaultRoot,
+      '01-raw/inbox/ansi.md',
+      `# ANSI\n\nzzansiunico aqui.\n\u001b[F\u001b[2K${FORJADO}\n`,
+    );
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_search', { query: 'zzansiunico', include_raw: true });
+
+    expect(headers(rendered).map((header) => header.path)).toContain('01-raw/inbox/ansi.md');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).toContain('\\x1b');
+    for (const linha of rendered.split('\n')) {
+      if (linha.includes('senhas.md')) expect(linha.startsWith('> ')).toBe(true);
+    }
+  });
+
+  it('preserva no trecho os invisíveis que formam palavra', async () => {
+    const vaultRoot = await makeVault();
+    // Hífen suave, ZWNJ e ZWJ são parte do texto: escapá-los quebraria a palavra que o trecho
+    // existe para mostrar.
+    await write(
+      vaultRoot,
+      '02-wiki/docker/juntores.md',
+      '---\ntipo: wiki\n---\n\n# Juntores\n\nzzjuntoresunico: Sil\u00adbi\u200cca\u200djunta.\n',
+    );
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_search', { query: 'zzjuntoresunico' });
+
+    expect(rendered).toContain('Sil\u00adbi\u200cca\u200djunta');
   });
 
   it('escapa a query devolvida na mensagem de "sem resultado"', async () => {
@@ -690,6 +729,28 @@ describe('vault_get_note', () => {
     expect(rendered).toContain('\\u202e');
   });
 
+  it('devolve o corpo VERBATIM, para vault_edit_note conseguir casar o trecho', async () => {
+    const vaultRoot = await makeVault(true);
+    // Uma nota com um controle no meio: é o caso em que "escapar tudo" e "devolver como está"
+    // divergem.
+    const corpo = '# Verbatim\n\nlinha com \u001b controle e acento: ação\n';
+    await write(vaultRoot, '02-wiki/docker/verbatim.md', `---\ntipo: wiki\n---\n\n${corpo}`);
+    const { call, text } = makeTools(vaultRoot);
+
+    const rendered = await text('vault_get_note', { path: '02-wiki/docker/verbatim.md' });
+    expect(rendered).toContain('linha com \u001b controle e acento: ação');
+
+    // A propriedade que essa escolha serve: o trecho lido aqui casa como `old_text` na edição.
+    const trecho = 'linha com \u001b controle';
+    const edicao = await call('vault_edit_note', {
+      path: '02-wiki/docker/verbatim.md',
+      old_text: trecho,
+      new_text: 'linha limpa',
+    });
+    expect(edicao.isError).not.toBe(true);
+    expect(await read(vaultRoot, '02-wiki/docker/verbatim.md')).toContain('linha limpa');
+  });
+
   it('lista o link quebrado de auth-guard.md', async () => {
     const vaultRoot = await makeVault();
     const { text } = makeTools(vaultRoot);
@@ -741,6 +802,43 @@ describe('vault_get_note', () => {
     expect(rendered).toContain('tipo: wiki');
   }, 30_000);
 
+  it('mostra um mapa aninhado pequeno em vez de resumi-lo', async () => {
+    const vaultRoot = await makeVault();
+    await write(
+      vaultRoot,
+      '02-wiki/docker/fonte.md',
+      '---\ntipo: wiki\nfonte:\n  url: https://exemplo.com/x\n  autor: fulano\n---\n\n# Fonte\n',
+    );
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_get_note', { path: '02-wiki/docker/fonte.md' });
+
+    // `vault_get_note` é a única tool que devolve conteúdo da nota: resumir 40 bytes que cabem
+    // deixa essa URL inalcançável por qualquer caminho.
+    expect(rendered).toContain('https://exemplo.com/x');
+    expect(rendered).toContain('fulano');
+    expect(rendered).not.toContain('objeto com 2 chave');
+  });
+
+  it('mostra uma lista de 40 tags inteira, como o vault_list mostra', async () => {
+    const vaultRoot = await makeVault();
+    const tags = Array.from({ length: 40 }, (_, i) => `tag${i}`);
+    await write(
+      vaultRoot,
+      '02-wiki/docker/muitas-tags.md',
+      `---\ntipo: wiki\ntags: [${tags.join(', ')}]\n---\n\n# Tags\n`,
+    );
+    const { text } = makeTools(vaultRoot);
+
+    const nota = await text('vault_get_note', { path: '02-wiki/docker/muitas-tags.md' });
+    const lista = await text('vault_list', { folder: '02-wiki/docker' });
+    // As duas tools falam da MESMA nota: uma resumir o que a outra imprime é as duas discordarem.
+    for (const tag of ['tag0', 'tag39']) {
+      expect(nota).toContain(tag);
+      expect(lista).toContain(tag);
+    }
+    expect(nota).not.toContain('item(ns)');
+  });
+
   it('avisa quando corta o frontmatter por número de chaves', async () => {
     const vaultRoot = await makeVault();
     const chaves = Array.from({ length: 80 }, (_, i) => `k${i}: v${i}`).join('\n');
@@ -775,6 +873,25 @@ describe('vault_get_note', () => {
     const rendered = await text('vault_list', { folder: '01-raw' });
     expect(rendered.length).toBeLessThan(60_000);
     expect(rendered).toContain('01-raw/inbox/bomba.md');
+  }, 30_000);
+
+  it('limita o tamanho de cada campo na linha da listagem', async () => {
+    const vaultRoot = await makeVault();
+    // O payload precisa chegar em `tipo`/`status`/`tags` — o único caminho que a listagem lê. Um
+    // alias aninhado NÃO chega lá, e foi por isso que os clamps desta linha ficaram sem rede.
+    const gigante = 'T'.repeat(50_000);
+    await write(
+      vaultRoot,
+      '01-raw/inbox/campos.md',
+      `---\ntipo: ${gigante}\nstatus: ${'S'.repeat(50_000)}\ntags: [${Array.from({ length: 60 }, (_, i) => `t${i}`.repeat(20)).join(', ')}]\n---\n\n# Campos\n`,
+    );
+    const { text } = makeTools(vaultRoot);
+
+    const rendered = await text('vault_list', { folder: '01-raw' });
+    // Sem os clamps a resposta passa de 100.000 caracteres para uma nota só.
+    expect(rendered.length).toBeLessThan(5_000);
+    expect(rendered).toContain('01-raw/inbox/campos.md');
+    expect(rendered).toContain('[…cortado]');
   }, 30_000);
 
   it('devolve a nota inteira quando ela cabe no limite', async () => {
@@ -1071,38 +1188,87 @@ describe('vault_write_note e vault_edit_note', () => {
     }
   });
 
+  // Cada forma é medida ANTES de ser julgada: a nota é escrita por `writeNote`, DESVIANDO do guard,
+  // e relida pelo parser do scanner. `refused === !roundTrips` é a propriedade — não "recusou", que
+  // é o que a versão anterior desta tabela afirmava e o que deixou passar um guard que recusava
+  // `type:adr`, `lang:pt` e `2026-1-5`, todas perfeitamente redondas.
   it.each([
-    { tag: '3.10', aceita: false },
-    { tag: '0x10', aceita: false },
-    { tag: '1e3', aceita: false },
-    { tag: '007', aceita: false },
-    { tag: '1:30', aceita: false },
-    { tag: '2026-1-5', aceita: false },
-    { tag: 'true', aceita: true },
-    { tag: 'null', aceita: true },
-    { tag: '2026', aceita: true },
-    { tag: '2026-01-10', aceita: true },
-    { tag: 'v3.10', aceita: true },
-  ])('a tag $tag ou é recusada ou volta igual da leitura', async ({ tag, aceita }) => {
-    const vaultRoot = await makeVault(true);
-    const { call, text } = makeTools(vaultRoot);
-    const rel = `02-wiki/nestjs/tag-round-trip.md`;
-    const resultado = await call('vault_write_note', {
+    'type:adr',
+    'lang:pt',
+    'c++:stl',
+    'a:b',
+    'v1:2',
+    '1:30',
+    '12:00',
+    '1:30:00',
+    '1:60',
+    '0:59',
+    '2026-1-5',
+    '2026-01-10',
+    '2026-02-30',
+    '2026-13-01',
+    '0000-00-00',
+    '2024-02-29',
+    '.Inf',
+    '.NaN',
+    '-.inf',
+    '-1:30',
+    '+1:30',
+    '1.',
+    '3.10',
+    '007',
+    '0x10',
+    '0b101',
+    '0o17',
+    '1e3',
+    '1_000',
+    '+7',
+    '2026',
+    '0',
+    '-5',
+    'true',
+    'null',
+    'yes',
+    'jwt',
+    'v3.10',
+    'c++',
+    'x86-64',
+  ])('a tag %s só é recusada se realmente não sobreviver ao YAML', async (tag) => {
+    const vaultRoot = await makeVault();
+
+    // 1. Verdade medida, sem passar pelo guard.
+    const medida = '02-wiki/docker/medida.md';
+    await writeNote({
+      vaultRoot,
+      path: medida,
+      content: '# Medida\n\ncorpo\n',
+      frontmatter: { tipo: 'wiki', tags: [tag] },
+      deferCommit: true,
+    });
+    const lido = parseFile(medida, await read(vaultRoot, medida)).frontmatter.tags;
+    const roundTrips = Array.isArray(lido) && lido.length === 1 && lido[0] === tag;
+
+    // 2. O que o guard decide.
+    const { call } = makeTools(vaultRoot);
+    const rel = '02-wiki/docker/pelo-guard.md';
+    const resposta = await call('vault_write_note', {
       path: rel,
-      content: '# Tag\n\ncorpo\n',
+      content: '# Guard\n\ncorpo\n',
       frontmatter: { tipo: 'wiki', tags: [tag] },
     });
+    const refused = resposta.isError === true;
 
-    if (!aceita) {
-      expect(resultado.isError).toBe(true);
-      expect(textOf(resultado)).toContain('tags');
+    expect(refused).toBe(!roundTrips);
+
+    if (refused) {
+      // A mensagem precisa nomear o valor que voltaria, senão não há o que corrigir na retentativa.
+      expect(textOf(resposta)).toContain(String(lido?.[0]));
       await expect(fs.stat(path.join(vaultRoot, rel))).rejects.toThrow();
-      return;
+    } else {
+      // Aceita: a nota escrita pela tool é achada pela mesma tag que a tool aceitou.
+      const { text } = makeTools(vaultRoot);
+      expect(await text('vault_list', { tags: [tag], folder: '02-wiki/docker' })).toContain(rel);
     }
-
-    expect(resultado.isError).not.toBe(true);
-    // A propriedade: a nota escrita pela tool é achada pela mesma tag que a tool aceitou.
-    expect(await text('vault_list', { tags: [tag], folder: '02-wiki/nestjs' })).toContain(rel);
   });
 
   it('vault_learn recusa a mesma tag que vault_write_note recusa', async () => {
@@ -1137,8 +1303,13 @@ describe('vault_write_note e vault_edit_note', () => {
     expect(textOf(resultado)).toContain('2');
   });
 
-  it('uma recusa de argumento não ganha ruído sobre links', async () => {
+  it('uma recusa de argumento não ganha ruído sobre links, nem em arquivo com hard link', async () => {
     const vaultRoot = await makeVault();
+    // O arquivo TEM hard link: é o que separa "não menciona porque não há" de "não menciona porque
+    // a recusa é sobre o argumento".
+    await fs.link(path.join(vaultRoot, AUTH_GUARD), path.join(vaultRoot, '02-wiki/nestjs/espelho.md'));
+    expect((await fs.lstat(path.join(vaultRoot, AUTH_GUARD))).nlink).toBe(2);
+
     const { call } = makeTools(vaultRoot);
     const resultado = await call('vault_edit_note', {
       path: AUTH_GUARD,
@@ -1146,6 +1317,25 @@ describe('vault_write_note e vault_edit_note', () => {
       new_text: 'x',
     });
 
+    expect(resultado.isError).toBe(true);
+    expect(textOf(resultado)).toMatch(/não encontrado/i);
+    expect(textOf(resultado)).not.toContain('hard link');
+  });
+
+  it('não conta links de um arquivo FORA do vault alcançado por symlink', async () => {
+    const vaultRoot = await makeVault();
+    const fora = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-fora-'));
+    trash.push(fora);
+    const alvo = path.join(fora, 'segredo.md');
+    await fs.writeFile(alvo, '# fora\n', 'utf8');
+    await fs.link(alvo, path.join(fora, 'segredo-2.md'));
+    await fs.symlink(fora, path.join(vaultRoot, '02-wiki', 'atalho'));
+
+    const { call } = makeTools(vaultRoot);
+    const resultado = await call('vault_write_note', { path: '02-wiki/atalho/segredo.md', content: '# X\n' });
+
+    // A escrita é recusada pelo guard de symlink; a contagem de links de um arquivo de fora do
+    // vault não é assunto desta resposta.
     expect(resultado.isError).toBe(true);
     expect(textOf(resultado)).not.toContain('hard link');
   });
@@ -1237,6 +1427,23 @@ describe('vault_write_note e vault_edit_note', () => {
       expect(linha.startsWith('+++ b/CLAUDE.md')).toBe(false);
       expect(linha.startsWith('@@ -1 +1 @@')).toBe(false);
     }
+  });
+
+  it('uma edição só de fim de linha aparece no diff', async () => {
+    const vaultRoot = await makeVault(true);
+    await write(vaultRoot, '02-wiki/docker/crlf.md', '---\ntipo: wiki\n---\n\n# CRLF\n\numa linha\n');
+    const { text } = makeTools(vaultRoot);
+
+    const rendered = await text('vault_edit_note', {
+      path: '02-wiki/docker/crlf.md',
+      old_text: 'uma linha\n',
+      new_text: 'uma linha\r\n',
+    });
+
+    // Sem o `\r` visível, o diff mostra `-uma linha` e `+uma linha`: duas linhas idênticas na tela
+    // para uma mudança que existe de verdade.
+    expect(rendered).toContain('+uma linha\\r');
+    expect(rendered).toContain('-uma linha');
   });
 
   it('recusa caminho protegido com erro de tool legível', async () => {

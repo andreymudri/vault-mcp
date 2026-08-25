@@ -409,8 +409,6 @@ function noteTags(note: Note): string[] {
 const MAX_FRONTMATTER_KEYS = 32;
 const MAX_FRONTMATTER_VALUE_CHARS = 512;
 const MAX_FRONTMATTER_CHARS = 4_000;
-/** How many elements of a list are rendered before the rest is summarised. */
-const MAX_FRONTMATTER_ITEMS = 32;
 
 /** `[…cortado]`, in the same shape as the body's own cut marker. */
 const CUT = '[…cortado]';
@@ -423,36 +421,66 @@ function clamp(text: string, max: number): string {
  * One frontmatter value as text, in work PROPORTIONAL TO WHAT IS EMITTED rather than to what the
  * value expands to.
  *
- * That is the whole design: a container is never handed to `String` or `JSON.stringify` — both walk
- * the entire expansion before anything can be truncated, so a check on the result is a check that
- * runs after the damage. Elements are visited one at a time, up to `MAX_FRONTMATTER_ITEMS`, and a
- * nested container is summarised by its SIZE instead of being descended into.
+ * That is the whole design, and it is why the budget is threaded THROUGH the walk instead of being
+ * applied to its result: a container is never handed to `String` or `JSON.stringify`, both of which
+ * expand everything before anything can be truncated, so a check on the output is a check that runs
+ * after the damage.
+ *
+ * `depth` is 1 at the top, which buys back the thing the first version of this bound took away. A
+ * `fonte:` mapping of a URL and an author is 40 bytes and rendered `{objeto com 2 chave(s)}` it was
+ * UNREACHABLE — `vault_get_note` is the only tool that returns note content, so summarising a value
+ * that fits is simply losing it. One level down, `{url: https://…, autor: fulano}` costs the same
+ * worst case, because the character budget is what bounds the work, not the depth.
+ *
+ * The cap is on TEXT, never on element count: `frontmatter.ts` lets a note carry 64 tags, and a
+ * 40-item list is about 190 characters — well inside the budget — so counting items made
+ * `vault_get_note` summarise a list `vault_list` printed in full, two tools disagreeing about the
+ * same note.
  */
-function renderFrontmatterValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    const parts: string[] = [];
-    let length = 0;
-    for (const item of value.slice(0, MAX_FRONTMATTER_ITEMS)) {
-      const part = renderFrontmatterScalar(item);
-      parts.push(part);
-      length += part.length + 2;
-      if (length > MAX_FRONTMATTER_VALUE_CHARS) break;
-    }
-    const rest = value.length - parts.length;
-    const tail = rest > 0 ? `, …+${rest} item(ns)` : '';
-    return clamp(`${parts.join(', ')}${tail}`, MAX_FRONTMATTER_VALUE_CHARS);
-  }
-  return renderFrontmatterScalar(value);
-}
-
-/** A single value, with containers named rather than expanded. */
-function renderFrontmatterScalar(value: unknown): string {
+function renderFrontmatterValue(value: unknown, depth = 1): string {
   if (value === null) return 'null';
   if (value === undefined) return '';
-  if (Array.isArray(value)) return `[lista com ${value.length} item(ns)]`;
   if (value instanceof Date) return value.toISOString();
-  if (typeof value === 'object') return `{objeto com ${Object.keys(value).length} chave(s)}`;
+
+  if (Array.isArray(value)) {
+    if (depth <= 0) return `[lista com ${value.length} item(ns)]`;
+    return clamp(joinBudgeted(value, (item) => renderFrontmatterValue(item, depth - 1), value.length), MAX_FRONTMATTER_VALUE_CHARS);
+  }
+
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (depth <= 0) return `{objeto com ${entries.length} chave(s)}`;
+    const inner = joinBudgeted(
+      entries,
+      ([key, item]) => `${clamp(key, MAX_FRONTMATTER_VALUE_CHARS)}: ${renderFrontmatterValue(item, depth - 1)}`,
+      entries.length,
+    );
+    return clamp(`{${inner}}`, MAX_FRONTMATTER_VALUE_CHARS);
+  }
+
   return clamp(String(value), MAX_FRONTMATTER_VALUE_CHARS);
+}
+
+/**
+ * `render` applied to as many items as fit in `MAX_FRONTMATTER_VALUE_CHARS`, with the rest counted
+ * rather than rendered.
+ *
+ * The loop STOPS at the budget instead of rendering everything and cutting afterwards, which is
+ * what keeps a billion-element alias list from costing a billion renders. Every item contributes at
+ * least the two characters of its separator, so the iteration count is bounded by the budget even
+ * when every item renders empty.
+ */
+function joinBudgeted<T>(items: readonly T[], render: (item: T) => string, total: number): string {
+  const parts: string[] = [];
+  let length = 0;
+  for (const item of items) {
+    const part = render(item);
+    parts.push(part);
+    length += part.length + 2;
+    if (length > MAX_FRONTMATTER_VALUE_CHARS) break;
+  }
+  const rest = total - parts.length;
+  return `${parts.join(', ')}${rest > 0 ? `, …+${rest} item(ns)` : ''}`;
 }
 
 /**
@@ -513,33 +541,66 @@ const QUOTE_PREFIX = '> ';
 const LINE_BREAKS_GLOBAL = /\r\n|[\n\v\f\r\u0085\u2028\u2029]/g;
 
 /**
- * Text whose ONLY line break is `\n`.
+ * Everything ELSE that quoted note text must not carry through raw.
  *
- * CRLF collapses (a note authored on Windows must not show a `\r` at the end of every line), and
- * every other terminator is escaped into visible text the way `forMessage` escapes it — so it can
- * still be READ, but it can no longer open a line. This is the one transformation applied to
- * quoted content, and it is deliberately the smallest one that makes "every rendered line is
- * prefixed" true.
+ * The line terminators above were only half the problem. ESC (U+001B) and CSI (U+009B) are not
+ * line terminators and produce no `\n`, so the `> ` on every line survives — and a body carrying
+ * `ESC[F` followed by `ESC[2K` still REWRITES the previous rendered line at column zero in any
+ * client that honours ANSI, which is the same forgery `\r` was escaped to stop, arriving by another
+ * mechanism. The bidi overrides do it visually instead: they reorder a line so the quote marker no
+ * longer reads as the start of it.
+ *
+ * This is `INVISIBLE_CHARS` MINUS THE JOINERS. The soft hyphen, the zero-width (non-)joiner, the
+ * word joiner and the BOM are word-forming or word-splitting characters that ordinary prose in a
+ * vault does legitimately contain — a German or Portuguese hyphenation point, an emoji sequence —
+ * and escaping those would mangle the very content the snippet exists to show. Nothing else in the
+ * class is word-forming, and no note legitimately carries a NUL, a backspace or a CSI.
+ *
+ * Escapes are ASCII by construction, so an escape can never re-form a terminator or a control.
  */
-function normalizeBreaks(text: string): string {
-  // One pass over the ONE set, so a terminator can never be handled by one half and missed by the
-  // other: LF (and the CRLF pair) become the single `\n` the renderer below splits on, everything
-  // else becomes visible text.
-  return text.replace(LINE_BREAKS_GLOBAL, (match) => {
-    if (match === '\n' || match === '\r\n') return '\n';
-    if (match === '\r') return '\\r';
-    if (match === '\v') return '\\x0b';
-    if (match === '\f') return '\\x0c';
-    const code = match.charCodeAt(0);
-    return code <= 0xff
-      ? `\\x${code.toString(16).padStart(2, '0')}`
-      : `\\u${code.toString(16).padStart(4, '0')}`;
+// eslint-disable-next-line no-control-regex
+const QUOTED_CONTROLS_GLOBAL =
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+function escapeControl(ch: string): string {
+  if (ch === '\r') return '\\r';
+  if (ch === '\t') return '\\t';
+  if (ch === '\v') return '\\x0b';
+  if (ch === '\f') return '\\x0c';
+  const code = ch.charCodeAt(0);
+  return code <= 0xff
+    ? `\\x${code.toString(16).padStart(2, '0')}`
+    : `\\u${code.toString(16).padStart(4, '0')}`;
+}
+
+/**
+ * Quoted text whose only line break is `\n` and which carries no control that can rewrite what is
+ * already on screen.
+ *
+ * `collapseCrlf` is the one difference between the two callers, and it is not cosmetic. In a
+ * SNIPPET a CRLF note must not show `\r` at the end of every line — that is noise on content the
+ * user wrote on Windows. In a DIFF the `\r` is the CHANGE: an edit that only rewrites line endings
+ * renders as `-linha` / `+linha`, two lines a reader cannot tell apart, so the diff shows a change
+ * with no visible difference. Escaping it there is what makes the diff honest.
+ */
+function sanitizeQuoted(text: string, collapseCrlf: boolean): string {
+  const collapsed = collapseCrlf ? text.replace(/\r\n/g, '\n') : text;
+  // Terminators first, as one pass over ONE set, so a terminator can never be handled by one half
+  // and missed by the other: LF stays the break the quoter splits on, the rest becomes text.
+  const broken = collapsed.replace(LINE_BREAKS_GLOBAL, (match) => {
+    if (match === '\n') return '\n';
+    // Only reachable when `collapseCrlf` is false — the replace above has already removed the pair
+    // otherwise. The `\r` becomes visible text and the `\n` stays the break, so the line structure
+    // is untouched and the carriage return is finally SHOWN instead of quietly disappearing.
+    if (match === '\r\n') return `${escapeControl('\r')}\n`;
+    return escapeControl(match);
   });
+  return broken.replace(QUOTED_CONTROLS_GLOBAL, escapeControl);
 }
 
 /** Note text as a block that cannot be read as anything but quoted text. */
 function quoteSnippet(text: string): string {
-  return normalizeBreaks(text)
+  return sanitizeQuoted(text, true)
     .split('\n')
     .map((line) => `${QUOTE_PREFIX}${line}`)
     .join('\n');
@@ -552,10 +613,11 @@ function quoteSnippet(text: string): string {
  * would cost that — so the guarantee has to come from the same place: `unifiedDiff` prefixes what
  * it splits on `\n`, so a body carrying U+2028 (or any other alternate terminator) rides inside one
  * diff line and renders as a second, unprefixed line. A fabricated `+++ b/CLAUDE.md` hunk in the
- * middle of a diff this server vouches for is the same forgery as item one, on the write path.
+ * middle of a diff this server vouches for is the same forgery as the snippet one, on the write
+ * path.
  */
 function relayDiff(diff: string): string {
-  return normalizeBreaks(diff);
+  return sanitizeQuoted(diff, false);
 }
 
 /** One rendered result: the citation line the vault's `CLAUDE.md` requires, then the text. */
@@ -632,34 +694,94 @@ const MAX_TAG_LENGTH = 128;
  * Tag shapes YAML reads back as something other than the text that was written.
  *
  * A tag is written by `serializeScalar` (src/write/template.ts) BARE unless its `NEEDS_QUOTES_RE`
- * matches — and that expression covers the reserved words (`true`, `null`, `yes`, `~`) and the
- * punctuation shapes, but not the numeric ones. Measured, writing then reading back through the
- * scanner: `3.10` returns as `3.1`, `007` as `7`, `1e3` as `1000`, `0x10` as `16`, and `1:30`
- * parses as a MAPPING and is dropped entirely — in every case `vault_list` stops finding the note
- * the caller just tagged, with the diff as the only clue. `true` and `null` DO round-trip, because
- * they get quoted, so they are deliberately not refused here.
+ * matches — that expression covers the reserved words and the punctuation shapes, but not the
+ * numeric ones. Every rule below was MEASURED by writing the tag through `writeNote` and reading it
+ * back through `parseFile`, never inferred from a pattern:
  *
- * The break is in the serializer, which is outside this task's file set, so the decision at this
- * boundary is to REFUSE the ambiguous shapes rather than write a tag that will not come back.
- * Refusing beats coercing because a tag is an identifier: `3.10` silently stored as `3.1` is not
- * the tag anyone asked for, and this module cannot add the quotes that would preserve it.
+ *   `3.10`→`3.1`  `007`→`7`  `0x10`→`16`  `0b101`→`5`  `1e3`→`1000`  `1_000`→`1000`  `1.`→`1`
+ *   `+7`→`7`  `.Inf`/`.INF`/`.inf`→`Infinity`  `.NaN`/`.nan`→`NaN`
+ *   `1:30`→`90`  `12:00`→`720`  `1:30:00`→`5400`   (YAML 1.1 sexagesimal)
+ *   `2026-02-30`→`2026-03-02`  `2026-13-01`→`2027-01-01`  `0000-00-00`→`1899-11-30`
+ *
+ * And, just as importantly, what MEASURED FINE and is therefore NOT refused: `type:adr`, `lang:pt`,
+ * `c++:stl`, `a:b`, `v1:2` — a colon is only special when both sides are digits — plus `1:60` and
+ * `0:59` (not sexagesimal), `2026-1-5` (js-yaml's short timestamp needs a two-digit month AND day),
+ * `-5`, `-.inf`, `true`/`null`/`yes`/`~` (all quoted by the serializer), `2026`, `0`, `c++`,
+ * `v3.10`. An earlier version of this guard refused every colon and every non-canonical date, which
+ * blocked ordinary namespaced tags that work — with advice ("use a tag with a letter") that a tag
+ * made only of letters cannot follow.
+ *
+ * The break is in the serializer, which is outside this task's file set, so the decision here is to
+ * REFUSE what will not survive rather than write a tag that never comes back. Refusing beats
+ * coercing because a tag is an identifier: `3.10` silently stored as `3.1` is not the tag anyone
+ * asked for. Each refusal NAMES THE VALUE THAT WOULD COME BACK, so a retry has something to act on.
  */
 const NUMERIC_LIKE_RE =
-  /^[-+]?(?:0[bB][01_]+|0[oO]?[0-7_]+|0[xX][0-9a-fA-F_]+|(?:\d[\d_]*)?\.?[\d_]+(?:[eE][-+]?\d+)?|\.(?:inf|nan))$/;
-const DATE_LIKE_RE = /^\d{4}-\d{1,2}-\d{1,2}$/;
-const CANONICAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  /^[+]?(?:0[bB][01_]+|0[xX][0-9a-fA-F_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?|\.[0-9_]+(?:[eE][-+]?[0-9]+)?|\.(?:inf|nan))$/i;
+
+/** js-yaml's YAML 1.1 sexagesimal integer: the leading group may not start with a zero. */
+const SEXAGESIMAL_RE = /^[+]?[1-9][0-9_]*(?::[0-5]?[0-9])+$/;
+
+/** js-yaml's short timestamp form, the only date shape that resolves to a `Date`. */
+const YAML_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** What `1:30` becomes: base-60 digits, most significant first. */
+function sexagesimalValue(tag: string): string {
+  const negative = tag.startsWith('-');
+  const digits = tag.replace(/^[-+]/, '').replace(/_/g, '').split(':');
+  const value = digits.reduce((acc, part) => acc * 60 + Number(part), 0);
+  return String(negative ? -value : value);
+}
+
+/**
+ * The day a YAML timestamp comes back as, built the way js-yaml builds it (UTC) and rendered the
+ * way `frontmatter.ts` renders it. `2026-02-30` is a perfectly good argument to `Date.UTC` — it
+ * just is not the thirtieth of February.
+ */
+function yamlDateDay(year: number, month: number, day: number): string {
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10);
+}
 
 /** `undefined` when the tag survives the write/read round trip, or why it would not. */
 function tagRoundTripProblem(tag: string): string | undefined {
-  // A colon makes the flow item a mapping (`[1:30]` is `{1: 30}`), which `toTags` drops as a
-  // container, and `NEEDS_QUOTES_RE` only quotes `:` when followed by space or end of line.
-  if (tag.includes(':')) return 'dois-pontos vira um mapa no YAML';
-  if (DATE_LIKE_RE.test(tag)) {
-    return CANONICAL_DATE_RE.test(tag) ? undefined : 'seria lida como data e voltaria normalizada';
+  // FIRST, because it makes every other question moot: a leading `-` is in `NEEDS_QUOTES_RE`'s
+  // leading-character class (src/write/template.ts), so the serializer quotes the whole tag and YAML
+  // hands back the text unchanged — measured on `-5`, `-.inf` and `-1:30`, all of which survive.
+  // `+` is not in that class, which is why `+7` still comes back as `7`.
+  if (tag.startsWith('-')) return undefined;
+
+  const date = YAML_DATE_RE.exec(tag);
+  if (date !== null) {
+    const day = yamlDateDay(Number(date[1]), Number(date[2]), Number(date[3]));
+    return day === tag
+      ? undefined
+      : `seria lida como a data ${day}, porque o YAML normaliza a data e essa não existe no calendário`;
   }
+
+  if (SEXAGESIMAL_RE.test(tag)) {
+    return (
+      `seria lida como o número ${sexagesimalValue(tag)}, porque o YAML lê dígitos separados por ` +
+      `':' como sexagesimal; troque o separador, ex.: '${tag.replace(/:/g, '-')}'`
+    );
+  }
+
+  // `0o17` is deliberately absent from the pattern: js-yaml's default schema is YAML 1.1, which has
+  // no `0o` octal, so it stays a string. Measured.
   if (!NUMERIC_LIKE_RE.test(tag)) return undefined;
-  // A plain integer whose text IS its numeric form survives: `2026` comes back as `2026`.
-  return String(Number(tag)) === tag ? undefined : 'seria lida como número e voltaria diferente';
+
+  // A number whose text IS its canonical form survives: `2026` comes back as `2026`, `0` as `0`.
+  // Underscores are stripped first because YAML ignores them inside a numeric — `1_000` is the
+  // number 1000 — while `Number` reads the same string as `NaN`, which would name the wrong value
+  // in the message the caller is meant to act on.
+  const asNumber = Number(tag.replace(/_/g, ''));
+  if (String(asNumber) === tag) return undefined;
+  // `.inf`/`.nan` are YAML spellings that `Number` does not know; name what YAML gives back.
+  const readBack = /^[-+]?\.inf$/i.test(tag)
+    ? `${tag.startsWith('-') ? '-' : ''}Infinity`
+    : /^\.nan$/i.test(tag)
+      ? 'NaN'
+      : String(asNumber);
+  return `seria lida como o número ${readBack}; acrescente uma letra, ex.: 'v${tag}'`;
 }
 
 function coerceTags(value: unknown): string[] {
@@ -686,8 +808,8 @@ function coerceTags(value: unknown): string[] {
     const problem = tagRoundTripProblem(tag);
     if (problem !== undefined) {
       throw new ToolError(
-        `frontmatter.tags: a tag '${forMessage(tag)}' ${problem}, e a nota deixaria de casar com ` +
-          'a busca por ela; use uma tag com pelo menos uma letra (ex.: `v3.10`)',
+        `frontmatter.tags: a tag '${forMessage(tag)}' ${forMessage(problem)}, e a nota deixaria ` +
+          'de casar com a busca por essa tag',
       );
     }
     out.push(tag);
@@ -744,10 +866,16 @@ function toFrontmatter(input: Record<string, unknown> | undefined): Frontmatter 
  * must not report on files outside it, not even a link count.
  */
 async function hardLinkHint(vaultRoot: string, relPath: string): Promise<string | undefined> {
-  const root = resolve(vaultRoot);
-  const target = resolve(root, relPath);
-  if (target !== root && !target.startsWith(`${root}${sep}`)) return undefined;
   try {
+    // REAL paths on both sides, never the lexical ones. `resolve(root, relPath)` keeps the string
+    // inside the vault while `lstat` follows every symlink on the way: with `02-wiki/fora` linked
+    // outside, a lexically-inside path answered "o arquivo tem 3 hard links" about a file the vault
+    // does not contain. Containment is a question about the filesystem, so it is asked of the
+    // filesystem.
+    const root = realpathSync(resolve(vaultRoot));
+    const target = realpathSync(resolve(root, relPath));
+    if (target !== root && !target.startsWith(`${root}${sep}`)) return undefined;
+
     const stat = await fs.lstat(target);
     if (stat.nlink > 1) {
       return (
@@ -887,6 +1015,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       }
 
       const frontmatter = renderFrontmatterBlock(note.frontmatter);
+      // The body is relayed RAW — no `sanitizeQuoted`, no `> ` — and that is a decision, not an
+      // omission. `vault_edit_note` locates `old_text` as an EXACT substring of the file, so an
+      // agent that reads a note here and then edits a piece of it must be handed the bytes that are
+      // on disk; escaping a control would make every such edit fail to match, silently, on exactly
+      // the notes that carry one. This tool also makes no structural claim to undermine: it returns
+      // one note, with no per-line prefix contract and no citation lines a body could forge. The
+      // surfaces that DO make such a claim — the search snippet and the relayed diff — are
+      // sanitised, and this one is bounded instead (`MAX_NOTE_CHARS`).
       const body =
         note.body.length <= MAX_NOTE_CHARS
           ? note.body
