@@ -7,7 +7,7 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { ScoredChunk } from '../types.js';
 import { commitFiles } from './git.js';
-import { INVISIBLE_CHARS, resolveWritePath } from './paths.js';
+import { classifyStat, INVISIBLE_CHARS, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
 import { editNote, writeNote, type WriteResult } from './writer.js';
@@ -361,17 +361,12 @@ async function pathState(absPath: string): Promise<PathState> {
     return 'free';
   }
 
-  if (!stat.isFile()) return 'foreign';
-  // `lstat` cannot tell a HARD link from an ordinary file — there is no "original" to point
-  // at — but the link count can: a second name means the bytes are shared with a file this
-  // module never inspected. `fs.link(<segredo fora do vault>, <vault>/.../<slug>.md)` then
-  // classifies as `note`, the append reads it, and the secret travels into the note, into the
-  // commit and into the `result.diff` handed back to the caller. It is a COPY, not a leak of
-  // the original: `atomicWrite`'s rename breaks the link, so the file outside the vault
-  // survives untouched. It needs write access to the vault and `fs.protected_hardlinks` blunts
-  // it, which is why it is refused rather than treated as an emergency — a name shared with
-  // something outside is not a note this module may stand on either way.
-  if (stat.nlink > 1) return 'foreign';
+  // The SHARED rule, over the `Stats` this function already has: not a regular file, or a
+  // regular file wearing a second name. A hard link classifies here for the reason `paths.ts`
+  // spells out — `fs.link(<segredo fora do vault>, <vault>/.../<slug>.md)` otherwise reads as
+  // an ordinary note, the append reads it, and the secret travels into the note, into the
+  // commit and into the `result.diff` handed back to the caller.
+  if (classifyStat(stat) === 'foreign') return 'foreign';
   if (stat.size === 0) return 'blank';
   if (stat.size > MAX_BLANK_BYTES) return 'note';
 

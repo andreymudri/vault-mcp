@@ -1,5 +1,5 @@
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Stats } from 'node:fs';
 
 export const DENIED_PREFIXES = ['99-archive', '_templates'] as const;
 
@@ -249,11 +249,11 @@ async function pathSegments(vaultRoot: string, absPath: string): Promise<string[
 }
 
 /**
- * What stands on `absPath`, answered WITHOUT opening it.
+ * What stands on a path, answered WITHOUT opening it.
  *
  * - `missing`: nothing is there. The ordinary "create it" case.
- * - `file`: a regular file, safe to read and to rename over.
- * - `foreign`: a SYMLINK, a directory, a FIFO, a socket, a device. Not a note.
+ * - `file`: a regular file with ONE name, safe to read and to rename over.
+ * - `foreign`: a SYMLINK, a HARD LINK, a directory, a FIFO, a socket, a device. Not a note.
  *
  * `guardedPath` answers a question about the PATH — containment, suffix, denied segments,
  * symlink escape — and none of that says what the NODE is. A FIFO inside the vault passes
@@ -269,17 +269,42 @@ async function pathSegments(vaultRoot: string, absPath: string): Promise<string[
  * rename lands ON the link, so the user's alias becomes a regular file holding a divergent copy
  * while the note it named never receives the write.
  *
- * This is the one mechanism for that question in this directory: `writer.ts` uses it before both
- * of its reads and before the template read, and `propagate.ts` before each of its three
- * targets. `learn.ts`'s `pathState` asks a strictly finer version of it — it also separates a
- * blank placeholder from a note and refuses a hard link — and answers `foreign` for exactly the
- * same nodes.
+ * A HARD link is the case neither `lstat` nor `realpath` can see on its own: there is no
+ * "original" to resolve to, because the second name IS the file. `fs.link(<segredo fora do
+ * vault>, <vault>/02-wiki/nota.md)` therefore satisfies every check above, and the read that
+ * follows hands the out-of-vault bytes to `unifiedDiff`, which returns them in
+ * `WriteResult.diff` — reproduced end to end, with the secret's lines in the diff and the
+ * replacement committed. The LINK COUNT is what gives it away: a note has exactly one name, and
+ * a second one means the bytes are shared with a file this server never inspected. It is a copy
+ * and a leak rather than corruption — the atomic rename breaks the link, so the file outside
+ * survives — and it is refused for the same reason a symlink is: a name shared with something
+ * outside the vault is not a note.
+ *
+ * This is the ONE mechanism for that question in this directory. `writer.ts` asks it before both
+ * of its reads and before the template read, `propagate.ts` before each of its three targets,
+ * and `learn.ts`'s `pathState` asks the same question of the same `Stats` through
+ * `classifyStat` before going on to separate a blank placeholder from a note. One rule, one
+ * place: a boundary that refuses a shape on one route and accepts it on another is the drift
+ * this whole task exists to remove.
  */
 export type NodeKind = 'missing' | 'file' | 'foreign';
 
+/**
+ * The `file`/`foreign` half, over `Stats` a caller already has.
+ *
+ * Split out so that `learn.ts`, which needs the same `Stats` for the file's SIZE, applies the
+ * identical rule without a second `lstat` — and therefore without a window in which the answer
+ * to "is this a note" and the answer to "how big is it" describe different nodes.
+ */
+export function classifyStat(stat: Stats): 'file' | 'foreign' {
+  if (!stat.isFile()) return 'foreign';
+  if (stat.nlink > 1) return 'foreign';
+  return 'file';
+}
+
 export async function classifyNode(absPath: string): Promise<NodeKind> {
   try {
-    return (await fs.lstat(absPath)).isFile() ? 'file' : 'foreign';
+    return classifyStat(await fs.lstat(absPath));
   } catch {
     // Anything that cannot be lstat'd is not a file this module can read. ENOENT is the common
     // case by far, and a path whose parent is unreadable fails the write that follows anyway,

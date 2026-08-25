@@ -119,10 +119,16 @@ async function withFifoWatch<T>(
   }
 }
 
-/** Runs `work`, returning whatever it rejects with instead of letting the rejection escape. */
+/**
+ * Runs `work` and returns its OUTCOME — the rejection reason, or the resolved value.
+ *
+ * The resolved value rather than a marker string, so an assertion about what a successful call
+ * would have handed back still has the object to look at: a guard that stops refusing turns a
+ * `PathGuardError` into a `WriteResult` whose `diff` is exactly the thing under test.
+ */
 async function refusal(work: () => Promise<unknown>): Promise<unknown> {
   return work().then(
-    () => 'a chamada foi bem-sucedida',
+    (value: unknown) => value,
     (err: unknown) => err
   );
 }
@@ -1502,6 +1508,76 @@ describe('write guard', () => {
     expect(result).toBeInstanceOf(PathGuardError);
     expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
   }, 30_000);
+
+  it('recusa um HARD link para fora do vault em vez de vazar os bytes no diff', async () => {
+    // `guardedPath` cannot see this one and neither can `realpath`: a hard link has no
+    // "original" to resolve to, it IS the file under a second name, and that name happens to be
+    // inside the vault and to end in `.md`. Containment, suffix, denied segments and the symlink
+    // walk all pass, and the read that follows hands the out-of-vault bytes to `unifiedDiff` —
+    // which returns them in `WriteResult.diff`, straight into the caller's context.
+    // `vault_write_note` takes the path from the caller, so this is a live route.
+    const segredo = path.join(tmp, 'segredo.txt');
+    const conteudoSegredo = 'chave-secreta-nao-deve-vazar\nlinha dois do segredo\n';
+    await fs.writeFile(segredo, conteudoSegredo, 'utf8');
+    const link = path.join(vaultRoot, '02-wiki', 'vazamento.md');
+    await fs.link(segredo, link);
+    const antes = await countCommits(vaultRoot);
+
+    const resultado = await refusal(() =>
+      writeNote({ vaultRoot, path: '02-wiki/vazamento.md', content: 'texto novo' })
+    );
+
+    // The payload assertion goes FIRST so the failure names the leak rather than the type:
+    // without the guard this is a `WriteResult` whose `diff` carries the linked file's lines,
+    // while a `PathGuardError` serialises to `{}`.
+    expect(JSON.stringify(resultado)).not.toContain('chave-secreta');
+    expect(resultado).toBeInstanceOf(PathGuardError);
+    // Nothing was written through the link, and the file outside is byte-identical.
+    expect(await fs.readFile(segredo, 'utf8')).toBe(conteudoSegredo);
+    expect(await fs.readFile(link, 'utf8')).toBe(conteudoSegredo);
+    expect((await fs.lstat(link)).nlink).toBe(2);
+    expect(await countCommits(vaultRoot)).toBe(antes);
+  });
+
+  it('recusa um HARD link também na edição', async () => {
+    const segredo = path.join(tmp, 'segredo-edit.txt');
+    const conteudoSegredo = 'chave-secreta-da-edicao\n';
+    await fs.writeFile(segredo, conteudoSegredo, 'utf8');
+    await fs.link(segredo, path.join(vaultRoot, '02-wiki', 'vazamento-edit.md'));
+
+    const resultado = await refusal(() =>
+      editNote({
+        vaultRoot,
+        path: '02-wiki/vazamento-edit.md',
+        oldText: 'chave-secreta-da-edicao',
+        newText: 'trocado',
+      })
+    );
+
+    expect(JSON.stringify(resultado)).not.toContain('chave-secreta');
+    expect(resultado).toBeInstanceOf(PathGuardError);
+    expect(await fs.readFile(segredo, 'utf8')).toBe(conteudoSegredo);
+  });
+
+  it('não confunde uma nota comum com um hard link', async () => {
+    // The check is on the LINK COUNT, and an ordinary note has exactly one name. A guard that
+    // refused every regular file would pass the two tests above and break the vault.
+    const criada = await writeNote({
+      vaultRoot,
+      path: '02-wiki/nota-sem-link.md',
+      content: 'conteudo comum',
+    });
+    expect(criada.created).toBe(true);
+    expect((await fs.lstat(criada.absPath)).nlink).toBe(1);
+
+    const substituida = await writeNote({
+      vaultRoot,
+      path: '02-wiki/nota-sem-link.md',
+      content: 'conteudo trocado',
+    });
+    expect(substituida.created).toBe(false);
+    expect(await fs.readFile(substituida.absPath, 'utf8')).toContain('conteudo trocado');
+  });
 
   it('recusa um diretório e um symlink no caminho da nota', async () => {
     // `foreign` is not only a FIFO: a directory makes the read fail with EISDIR deep inside the
