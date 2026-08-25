@@ -53,7 +53,7 @@ Substitua `/home/user/Knowledge/Vault` pelo caminho **absoluto** da raiz do seu 
 `vault_learn` busca o assunto combinando título e insight. Apenas notas **já em `02-wiki/` e atingidas por BM25 direto** (não pela expansão de grafo) são candidatas a receber o aprendizado. Se encontrar tal candidata:
 
 1. **Razão de 1,8×**: o topo deve se destacar sobre o segundo colocado por fator de pelo menos 1,8. Sem isso, há dúvida e cria nota nova.
-2. **Overlap conjuntivo**: o top deve compartilhar uma tag COM A ENTRADA, OU estar no mesmo domínio (`02-wiki/<dominio>/`). Sem overlap, cria nota nova mesmo que o score seja alto.
+2. **Overlap conjuntivo**: o topo deve compartilhar uma tag COM A ENTRADA, OU estar no mesmo domínio (`02-wiki/<dominio>/`). Sem overlap, cria nota nova mesmo que o score seja alto.
 
 Quando ambas as condições são atendidas, **anexa** à nota existente numa seção `## YYYY-MM-DD — Título`. Caso contrário, **cria** nota nova em `02-wiki/<dominio>/`.
 
@@ -61,13 +61,15 @@ O viés é deliberado: quando há dúvida, cria nota nova em vez de enterrar apr
 
 ### Escape hatches
 
-Duas exceções podem mudar o destino final:
+Três exceções podem mudar o destino final:
 
 1. **Colisão de título**: a regra de duplicata recusa, mas um arquivo com aquele nome já existe (nota antiga com o mesmo slug). O servidor **anexa nela mesmo assim** e avisa `anexado em <path> por coincidência de título; a checagem de duplicata não indicou essa nota`. Isso traz uma nota perdida de volta para o fluxo de acúmulo.
 
-2. **Criação com nome livre**: o servidor decide anexar, mas o alvo não pode receber o texto (arquivo desapareceu, está vazio, é um symlink ou FIFO). O servidor **cria nota nova com um nome diferente** (`titulo-2026-08-25.md` em vez de `titulo.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
+2. **Alvo da duplicata não recebe o texto**: o servidor decide anexar à nota candidata, mas ela não pode ser editada. O servidor **cria nota nova com um nome baseado no slug** (ex.: `multi-stage-cache-de-camadas.md` em vez de `multi-stage.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
 
-Em ambos os casos, nenhuma insight é perdida — a resposta diz exatamente onde o aprendizado foi a parar.
+3. **Caminho da nota bloqueado por não-nota**: o caminho onde a nota seria criada (ex.: `02-wiki/docker/titulo.md`) está ocupado por um FIFO, symlink, diretório ou hard link (algo que não pode ser sobrescrito). O servidor **cria nota nova com sufixo de data** (ex.: `titulo-2026-08-25.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
+
+Em todos os casos, nenhum insight é perdido — a resposta diz exatamente onde o aprendizado foi a parar.
 
 ## O Que `vault_learn` Escreve
 
