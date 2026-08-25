@@ -323,8 +323,16 @@ const MAX_BLANK_BYTES = 1024 * 1024;
  * - `blank`: a regular file with NO content. Obsidian leaves one whenever a user clicks an
  *   unresolved link or presses Enter in a new note; it is a placeholder, not a note.
  * - `note`: a regular file with content.
- * - `foreign`: a SYMLINK, a directory, a FIFO, a socket, a device. Not a note, and nothing this
- *   module may read, write, or rename onto.
+ * - `foreign`: a SYMLINK, a HARD LINK, a directory, a FIFO, a socket, a device. Not a note,
+ *   and nothing this module may read, write, or rename onto.
+ *
+ * `foreign` exists so that no path in `learn()` OPENS one, and that is a claim about every
+ * read this call makes, not only the ones on the note itself. It was false when it was first
+ * written: the note path was classified, while `_templates/wiki.md` and `propagate`'s three
+ * targets were read with no classification at all, and a `mkfifo` on any of them left the
+ * promise pending for as long as the process lived. `skeletonContent` below asks this same
+ * question before the template read, `writer.ts` asks it before its own, and `propagate.ts`
+ * lstats each target before opening it.
  *
  * A symlink is `foreign` and that is the whole of its handling here. It cannot be read through:
  * `readFile` follows it, so a link to a FIFO is a read that never returns, on the single thread
@@ -354,6 +362,16 @@ async function pathState(absPath: string): Promise<PathState> {
   }
 
   if (!stat.isFile()) return 'foreign';
+  // `lstat` cannot tell a HARD link from an ordinary file — there is no "original" to point
+  // at — but the link count can: a second name means the bytes are shared with a file this
+  // module never inspected. `fs.link(<segredo fora do vault>, <vault>/.../<slug>.md)` then
+  // classifies as `note`, the append reads it, and the secret travels into the note, into the
+  // commit and into the `result.diff` handed back to the caller. It is a COPY, not a leak of
+  // the original: `atomicWrite`'s rename breaks the link, so the file outside the vault
+  // survives untouched. It needs write access to the vault and `fs.protected_hardlinks` blunts
+  // it, which is why it is refused rather than treated as an emergency — a name shared with
+  // something outside is not a note this module may stand on either way.
+  if (stat.nlink > 1) return 'foreign';
   if (stat.size === 0) return 'blank';
   if (stat.size > MAX_BLANK_BYTES) return 'note';
 
@@ -382,7 +400,15 @@ async function pathState(absPath: string): Promise<PathState> {
   } catch {
     return 'note';
   } finally {
-    await handle.close();
+    // A rejecting `close` must not escape: the answer is already decided, the descriptor is
+    // gone either way, and neither call site of `pathState` guards against a throw. A raw EIO
+    // from here left `learn` with nothing written and the user's insight lost — for a file
+    // this function had already finished reading.
+    try {
+      await handle.close();
+    } catch {
+      // Nothing to do about it, and nothing that depends on it.
+    }
   }
 }
 
@@ -467,9 +493,22 @@ async function skeletonContent(
   relPath: string,
   body: string,
 ): Promise<{ content: string; warning?: string }> {
+  const templatePath = join(opts.vaultRoot, '_templates', 'wiki.md');
+  // Classified BEFORE it is opened, by the same `pathState` the note path goes through.
+  // `readFile` on a FIFO never returns, and this path is not caller-supplied but it is inside
+  // a directory the user syncs: `mkfifo <vault>/_templates/wiki.md` left this promise pending
+  // for ~6000 ms and then for as long as the process lived, wedging every later tool call on
+  // the single-threaded stdio server. Reproduced; SIGKILL was the only way out.
+  if ((await pathState(templatePath)) === 'foreign') {
+    return {
+      content: body,
+      warning: 'template ignorado: _templates/wiki.md não é um arquivo comum',
+    };
+  }
+
   let templateText: string;
   try {
-    templateText = await fs.readFile(join(opts.vaultRoot, '_templates', 'wiki.md'), 'utf8');
+    templateText = await fs.readFile(templatePath, 'utf8');
   } catch {
     // The same warning `writeNote` raises for the same missing file, since it will not raise it
     // itself on this route. The learning is still written: the body is what the user asked for.

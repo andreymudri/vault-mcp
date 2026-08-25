@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
@@ -144,6 +144,58 @@ async function notaBlindada(vaultRoot: string, rel: string): Promise<string> {
   await fs.writeFile(fora, CONTEUDO_FORA, 'utf8');
   await fs.symlink(fora, path.join(vaultRoot, rel));
   return fora;
+}
+
+/**
+ * Runs `work` while WATCHING `fifo` for a reader, and unblocks any reader that appears.
+ *
+ * A read of a FIFO nobody writes to never returns, and a test that hits one does not fail —
+ * it HANGS: vitest prints the failure and then never exits ("close timed out", "Failed to
+ * terminate worker"), which costs a whole run and reports nothing. So the write end is opened
+ * NON-BLOCKING, which answers ENXIO while nobody is reading and succeeds the instant somebody
+ * is; closing it immediately hands the reader EOF. The call under test therefore always
+ * finishes, and `opened` says whether it opened the FIFO at all — which is what gets asserted,
+ * instead of leaving the answer to a timeout.
+ */
+async function withFifoWatch<T>(
+  fifo: string,
+  work: () => Promise<T>,
+): Promise<{ result: T; opened: boolean }> {
+  let finished = false;
+  let opened = false;
+  const watch = (async (): Promise<void> => {
+    const deadline = Date.now() + 20_000;
+    while (!finished && Date.now() < deadline) {
+      try {
+        const handle = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+        await handle.close();
+        opened = true;
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+  })();
+
+  try {
+    const result = await work();
+    return { result, opened };
+  } finally {
+    finished = true;
+    await watch;
+  }
+}
+
+/** A retriever that finds nothing, so the route under test is the only thing deciding. */
+function semResultados(): Retriever {
+  return { search: () => ({ results: [] }) } as unknown as Retriever;
+}
+
+/** The local calendar day of `at`, in the vault's `YYYY-MM-DD` convention. */
+function dataLocal(at: Date): string {
+  const mes = String(at.getMonth() + 1).padStart(2, '0');
+  const dia = String(at.getDate()).padStart(2, '0');
+  return `${at.getFullYear()}-${mes}-${dia}`;
 }
 
 /** A synthetic scored chunk, for the pure duplicate rule. */
@@ -1329,6 +1381,8 @@ describe('learn - o insight nunca se perde', () => {
     const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
     await fs.writeFile(path.join(vaultRoot, stub), '   ', 'utf8');
     const outroVault = await makeVault();
+    // Sampled BEFORE the calls, so a run that crosses local midnight has both days in hand.
+    const antes = new Date();
 
     try {
       const opts = {
@@ -1363,14 +1417,14 @@ describe('learn - o insight nunca se perde', () => {
       const b = await read(outroVault, emCaminhoLivre.path);
       expect(semCriado(a)).toBe(semCriado(b));
       expect(a).toContain(`criado: ${TODAY}`);
-      // Wall clock, computed here rather than asserted as "not TODAY": the day the suite happens
-      // to run on 2026-08-20 the two coincide, and a test that fails on one calendar day is worse
-      // than one that states exactly what the other route stamps.
-      const agora = new Date();
-      const hoje = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, '0')}-${String(
-        agora.getDate(),
-      ).padStart(2, '0')}`;
-      expect(b).toContain(`criado: ${hoje}`);
+      // Wall clock, sampled on BOTH sides of the two calls rather than only after them:
+      // `writeNote` stamps `criado` from its own `new Date()`, and a sample taken afterwards
+      // names a different day whenever the run crosses local midnight — a correct note failing
+      // the test once a day. Either day is right, and naming both is what makes the assertion
+      // honest rather than merely quiet.
+      const criado = b.match(/^criado: (.+)$/m)?.[1]?.trim();
+      expect(criado).toBeDefined();
+      expect([dataLocal(antes), dataLocal(new Date())]).toContain(criado);
     } finally {
       await removeTree(path.dirname(outroVault));
     }
@@ -1801,6 +1855,185 @@ describe('learn - nada e removido do disco', () => {
     expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
     expect((await fs.lstat(a)).isSymbolicLink()).toBe(true);
   });
+
+  it('não abre um FIFO no lugar do template quando um placeholder ocupa o caminho', async () => {
+    // `_templates/wiki.md` is read with no classification at all on this route, and a FIFO
+    // there left the promise pending for as long as the process lived — on the single thread
+    // that serves every tool call, so every LATER call hung too and only SIGKILL recovered it.
+    // The vault is a directory the user syncs; a named pipe in it is not exotic.
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '   ', 'utf8');
+    const template = path.join(vaultRoot, '_templates', 'wiki.md');
+    await fs.rm(template);
+    await execFileAsync('mkfifo', [template]);
+
+    const { result, opened } = await withFifoWatch(template, () =>
+      learn({
+        vaultRoot,
+        retriever: semResultados(),
+        titulo: 'Cache Wrapper TTL',
+        insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+        contexto: 'Revisando o wrapper de cache',
+        dominio: 'patterns',
+        tags: ['redis', 'cache'],
+        now: NOW,
+      }),
+    );
+
+    expect(opened).toBe(false);
+    expect(result.path).toBe(stub);
+    expect(result.warning).toContain('template ignorado: _templates/wiki.md');
+    // The learning is never lost to a template problem: the body is what the user asked for.
+    expect(await read(vaultRoot, stub)).toContain('TTL configuravel');
+    expect((await fs.lstat(template)).isFIFO()).toBe(true);
+  }, 30_000);
+
+  it('não abre um FIFO no lugar do template quando o caminho da nota está livre', async () => {
+    // The OTHER route to the same file: with the note's path free, `writeNote` is the one that
+    // reads the skeleton. Both routes have to answer the same way, or the hang simply moves.
+    const template = path.join(vaultRoot, '_templates', 'wiki.md');
+    await fs.rm(template);
+    await execFileAsync('mkfifo', [template]);
+
+    const { result, opened } = await withFifoWatch(template, () =>
+      learn({
+        vaultRoot,
+        retriever: semResultados(),
+        titulo: 'Retry de worker BullMQ',
+        insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+        contexto: 'Investigando a fila',
+        dominio: 'nestjs',
+        tags: ['bullmq'],
+        now: NOW,
+      }),
+    );
+
+    expect(opened).toBe(false);
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/nestjs/retry-de-worker-bullmq.md');
+    expect(result.warning).toContain('template ignorado: _templates/wiki.md');
+    expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
+    expect((await fs.lstat(template)).isFIFO()).toBe(true);
+  }, 30_000);
+
+  it('trata como placeholder um arquivo de espaços no limite do teto de leitura', async () => {
+    // The blank direction of `MAX_BLANK_BYTES`. The `note` direction — a file ABOVE the ceiling
+    // is never a placeholder — has a test; this is the other side of the same comparison, and
+    // without it the ceiling can be moved down onto ordinary placeholders with the suite green.
+    // A file EXACTLY at the ceiling is still probed, and a probe that finds only whitespace
+    // says `blank`: the note is created with its skeleton, over the placeholder.
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), ' '.repeat(1024 * 1024), 'utf8');
+    expect((await fs.stat(path.join(vaultRoot, stub))).size).toBe(1024 * 1024);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: semResultados(),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe(stub);
+
+    const nota = await read(vaultRoot, stub);
+    // Born with its skeleton, not appended to: an append runs neither `ensureFrontmatter` nor
+    // `applyTemplate`, so the note would carry `{}` for frontmatter and no `# H1` at all.
+    expect(nota).toContain('# Cache Wrapper Ttl');
+    expect(nota).toContain('## Contexto');
+    expect(nota).toContain('TTL configuravel');
+    expect(nota).not.toContain(' '.repeat(64));
+  }, 30_000);
+
+  it('não perde o aprendizado quando o close do probe rejeita', async () => {
+    // `pathState` closes its descriptor in a `finally` that shares the `try` with the `catch`
+    // answering `note`, so a `close` that rejects escapes the classifier entirely. Neither call
+    // site guards against a throw, and a raw EIO from a descriptor the probe had ALREADY
+    // finished reading left `learn` with nothing written and the insight lost. Injected,
+    // because no test can produce an EIO on demand.
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '   ', 'utf8');
+
+    const realOpen = fs.open.bind(fs);
+    let rejeitados = 0;
+    const spy = vi.spyOn(fs, 'open').mockImplementation((async (
+      alvo: Parameters<typeof fs.open>[0],
+      flags: Parameters<typeof fs.open>[1],
+      mode: Parameters<typeof fs.open>[2],
+    ) => {
+      const handle = await realOpen(alvo, flags, mode);
+      // Only the read-only probe: `atomicWrite` opens with numeric flags and its own `close`
+      // is the one that publishes the bytes.
+      if (flags !== 'r') return handle;
+      return {
+        read: handle.read.bind(handle),
+        close: async (): Promise<void> => {
+          await handle.close();
+          rejeitados += 1;
+          throw Object.assign(new Error('EIO: erro de I/O no close'), { code: 'EIO' });
+        },
+      };
+    }) as never);
+
+    try {
+      const result = await learn({
+        vaultRoot,
+        retriever: semResultados(),
+        titulo: 'Cache Wrapper TTL',
+        insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+        contexto: 'Revisando o wrapper de cache',
+        dominio: 'patterns',
+        tags: ['redis', 'cache'],
+        now: NOW,
+      });
+
+      expect(result.path).toBe(stub);
+      expect(await read(vaultRoot, stub)).toContain('TTL configuravel');
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The fault was actually injected: without this the test passes on a probe that never ran.
+    expect(rejeitados).toBeGreaterThan(0);
+  }, 30_000);
+
+  it('não anexa numa nota que é um HARD link para um arquivo fora do vault', async () => {
+    // `lstat` cannot see a hard link — there is no "original" — so the target classified as an
+    // ordinary note, the append READ it, and the secret went into the note, into the commit and
+    // into the `diff` handed back to the caller. The file outside survives (`atomicWrite`'s
+    // rename breaks the link), so it is a copy and a leak rather than corruption.
+    const segredo = path.join(path.dirname(vaultRoot), 'segredo.txt');
+    const conteudoSegredo = 'chave-secreta-nao-deve-vazar\n';
+    await fs.writeFile(segredo, conteudoSegredo, 'utf8');
+    const alvo = path.join(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl.md');
+    await fs.link(segredo, alvo);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: semResultados(),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
+    expect(result.diff).not.toContain('chave-secreta');
+    expect(result.warning).toContain('não é uma nota');
+    // Neither name was touched, and the note went somewhere else.
+    expect(await fs.readFile(segredo, 'utf8')).toBe(conteudoSegredo);
+    expect(await fs.readFile(alvo, 'utf8')).toBe(conteudoSegredo);
+    expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
+    const commit = await git(vaultRoot, ['show', '--format=%B', '-s']);
+    expect(commit).not.toContain('chave-secreta');
+  }, 30_000);
 
   it('não abre um FIFO no caminho da nota', async () => {
     // Reading a FIFO never returns. On a single-threaded stdio server that is the whole process,

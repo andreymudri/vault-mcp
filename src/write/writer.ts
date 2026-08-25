@@ -272,6 +272,23 @@ async function writeAndCommit(
 }
 
 /**
+ * What stands on a path that is supposed to hold a template.
+ *
+ * `learn()` reaches `_templates/wiki.md` through TWO routes — this one when the note's path
+ * is free, and `learn.ts`'s own `skeletonContent` when a blank placeholder stands on it — and
+ * a FIFO there blocked `readFile` forever on the single thread that serves every tool call.
+ * `lstat` answers for the name itself, so nothing is opened to find out. The two routes give
+ * the same two answers so that the warning does not depend on which one was taken.
+ */
+async function templateState(absPath: string): Promise<'missing' | 'foreign' | 'file'> {
+  try {
+    return (await fs.lstat(absPath)).isFile() ? 'file' : 'foreign';
+  } catch {
+    return 'missing';
+  }
+}
+
+/**
  * Creates or replaces a note.
  *
  * Flow: resolve and guard the path → apply the `_templates/` skeleton when the note is
@@ -303,10 +320,15 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
     // caller-controlled segment ever enters this join.
     const templatePath = join(opts.vaultRoot, '_templates', `${opts.tipo}.md`);
     let templateText: string | undefined;
-    try {
-      templateText = await fs.readFile(templatePath, 'utf8');
-    } catch {
-      templateWarning = `template não encontrado: _templates/${opts.tipo}.md`;
+    const state = await templateState(templatePath);
+    if (state === 'foreign') {
+      templateWarning = `template ignorado: _templates/${opts.tipo}.md não é um arquivo comum`;
+    } else {
+      try {
+        templateText = await fs.readFile(templatePath, 'utf8');
+      } catch {
+        templateWarning = `template não encontrado: _templates/${opts.tipo}.md`;
+      }
     }
     if (templateText !== undefined) {
       // `applyTemplate` runs over the SKELETON, and the caller's content is spliced in
