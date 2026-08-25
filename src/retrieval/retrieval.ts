@@ -37,17 +37,6 @@ export interface SearchOptions {
 const RAW_PREFIX = '01-raw/';
 
 /**
- * The 1-based line of the original file where `Note.body` starts, i.e. the line after the
- * frontmatter block. `Note` (src/types.ts) does not carry it and `VaultScanner` does not expose
- * the raw file, so it cannot be recovered here without re-reading the file — which would put a
- * second filesystem reader beside the scanner and break `FsOps` injection. Chunks are therefore
- * numbered from the start of the body, and `chunk.lineStart` is short of the file's real line by
- * the height of the frontmatter block. Chunk ids stay unique and stable either way; making the
- * numbers absolute means adding the offset to `Note`, in the scanner's own task.
- */
-const BODY_START_LINE = 1;
-
-/**
  * Ceiling on how many query terms reach the index, applied here because `search` in
  * `src/index/bm25.ts` iterates the token LIST rather than the distinct set and walks a full
  * posting list per occurrence. The query is a tool-call argument, so its length is attacker
@@ -75,18 +64,30 @@ const MAX_QUERY_TERMS = 64;
  * terms exactly) sits entirely inside the cap at 11.929ms.
  *
  * 1024 characters is roughly a dense paragraph — about 150 words — so no query a person or an
- * agent writes comes near it; the longest golden query here is 32 characters. 4096 would also be
- * beyond human queries but leaves a ~48ms worst case that the passes below pay more than once,
- * and there is no legitimate query in the gap between the two.
+ * agent writes comes near it; the longest golden query here is 32 characters. There is no
+ * legitimate query in the gap between 1024 and, say, 4096, so the tighter bound costs nothing.
  *
  * The clamp is UNCONDITIONAL and its result is what gets returned, not merely what gets
  * tokenized here: `search` runs the returned string through `bm25Search`, `matchesVocabulary`
  * and `suggestTerms`, each of which tokenizes again — and the last two run precisely when the
  * payload matches nothing, which is the pathological case.
  *
- * This closes the query path only. The same quadratic trim is reachable from note CONTENT, which
- * `InvertedIndex.addChunk` tokenizes on every scan, so a clipping carrying a long hyphen run
- * still slows indexing. That fix belongs in `tokenizer.ts`, outside this task's files.
+ * WHAT THIS BOUNDS, AND WHAT IT DOES NOT. It bounds the quadratic hyphen trim, whose cost is a
+ * function of the query's own length: at 1024 characters that is sub-millisecond. It does NOT
+ * bound the whole query path, and an earlier version of this comment claiming a "~48ms worst
+ * case" was wrong by three orders of magnitude. The SUGGESTION path — `suggestTerms` in
+ * `src/index/bm25.ts` — pairs query terms against the VOCABULARY, and its `MAX_CANDIDATE_PAIRS`
+ * budgets the NUMBER of pairs while assuming each pair costs O(1). A Levenshtein pair is
+ * O(len × len), so against a vocabulary of long, equal-length, prefix-sharing terms — which an
+ * indexed note can create, since note content is what fills the vocabulary — a 1 KB query that
+ * matches nothing was measured at up to 31 SECONDS. The clamp below cannot see that dimension at
+ * all: the cost is in the vocabulary, not in the query. Do not read this constant as closing the
+ * query path.
+ *
+ * The real fix is a per-pair cost budget in `bm25.ts` plus a linear trim and a token-length cap
+ * in `tokenizer.ts` — both owned by Task 20, along with the same quadratic trim reached from note
+ * CONTENT, which `InvertedIndex.addChunk` tokenizes on every scan (a clipping carrying a long
+ * hyphen run slows every indexing pass, with no query sent at all).
  */
 const MAX_QUERY_CHARS = 1024;
 
@@ -101,6 +102,33 @@ function boundedQuery(query: string): string {
   const terms = tokenize(clamped);
   if (terms.length <= MAX_QUERY_TERMS) return clamped;
   return terms.slice(0, MAX_QUERY_TERMS).join(' ');
+}
+
+/**
+ * Flags every result whose text the budget cut, by comparing it against the PRE-budget entry with
+ * the same chunk id — the one this search had in hand a line earlier.
+ *
+ * The comparison is deliberately structural rather than textual. `applyBudget` marks its cut with
+ * `TRUNCATION_MARKER`, which is ordinary prose: a note that quotes that sentence verbatim would
+ * read as truncated to a consumer matching on the text, and a genuine cut of a note ending in
+ * something similar would read as intact — wrong in both directions, on a signal a client uses to
+ * decide whether to go and read the file. Identity of `text` answers the question exactly:
+ * `applyBudget` passes an untouched item through unchanged and rebuilds the one it cuts.
+ *
+ * Only truncated results are copied, and `truncated` is left absent otherwise, per its contract in
+ * `src/types.ts`.
+ */
+function markTruncated(
+  budgeted: ScoredChunk[],
+  before: ReadonlyMap<string, ScoredChunk>,
+): ScoredChunk[] {
+  return budgeted.map((item) => {
+    const original = before.get(item.chunk.id);
+    // An id absent from `before` cannot have come from the budget, which only ever returns items
+    // it was given; nothing to compare against, so nothing is claimed.
+    if (original === undefined || original.chunk.text === item.chunk.text) return item;
+    return { ...item, truncated: true };
+  });
 }
 
 /** Frontmatter is parsed from untrusted files, so `tipo` may be any YAML scalar, not a string. */
@@ -164,7 +192,16 @@ export class Retriever {
         continue;
       }
 
-      const chunks = chunkNote(path, note.body, noteTipo(note), noteTags(note), BODY_START_LINE);
+      // `note.bodyStartLine`, never a constant: `chunkNote` numbers chunks from the line it is
+      // given, so passing `1` here would make every citation of a note WITH frontmatter short by
+      // the height of that block — the number the search tool prints as `caminho:lineStart`.
+      const chunks = chunkNote(
+        path,
+        note.body,
+        noteTipo(note),
+        noteTags(note),
+        note.bodyStartLine,
+      );
       const rewritten = new Set(chunks.map((chunk) => chunk.id));
       const previous = this.chunksByPath.get(path) ?? [];
 
@@ -236,7 +273,10 @@ export class Retriever {
         b.score - a.score || (a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0),
     );
 
-    const results = applyBudget(scored, options.limit ?? DEFAULT_LIMIT, DEFAULT_CHAR_BUDGET);
+    const results = markTruncated(
+      applyBudget(scored, options.limit ?? DEFAULT_LIMIT, DEFAULT_CHAR_BUDGET),
+      merged,
+    );
 
     // Suggestions are spelling repair, so they are gated on the QUERY having found nothing in the
     // vocabulary — not on the final list being empty, which is what the plan's wording says

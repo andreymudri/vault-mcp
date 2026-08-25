@@ -18,6 +18,19 @@ export interface Note {
   links: string[];
   /** Raw link targets that resolved to nothing. */
   brokenLinks: string[];
+  /**
+   * The 1-based line of the ORIGINAL FILE where `body` starts — i.e. the line right after the
+   * closing `---` of the frontmatter block, and `1` for a note without frontmatter.
+   *
+   * It exists so that `chunkNote` (src/index/chunker.ts) can number chunks against the file the
+   * user will open, not against the body it was handed: a citation `caminho:lineStart` that is
+   * short by the height of the frontmatter points at the wrong text. CRLF counts the same as LF,
+   * a line being what a newline terminates.
+   *
+   * Required rather than optional on purpose: an optional field would be silently absent at the
+   * one call site that matters and the defect it fixes would come back as `?? 1`.
+   */
+  bodyStartLine: number;
   mtimeMs: number;
 }
 
@@ -43,6 +56,17 @@ export interface ScoredChunk {
   score: number;
   /** True when the chunk entered the result set through graph expansion. */
   viaGraph: boolean;
+  /**
+   * True when `chunk.text` was cut to fit the character budget, so what is carried here is a
+   * prefix of the chunk and not the chunk.
+   *
+   * Absent means "not cut" — nothing sets it to `false`. It is the structured half of the signal
+   * whose visible half is `TRUNCATION_MARKER` (src/retrieval/budget.ts): that marker is ordinary
+   * text, so a note whose body contains it verbatim reads as truncated to any consumer matching
+   * on it, and a genuine cut is indistinguishable from that. This flag is set by comparing the
+   * budgeted chunk against the chunk the index holds, never by looking at the text.
+   */
+  truncated?: boolean;
 }
 
 export interface SearchResult {
