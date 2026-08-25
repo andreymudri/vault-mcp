@@ -325,6 +325,22 @@ describe('Retriever.search — filtros', () => {
     expect(paths(included.results)).toContain(RASCUNHO);
   });
 
+  it('a exclusão de `01-raw/` é por segmento de caminho, não por prefixo de texto', () => {
+    const { retriever, fs } = memoryRetriever();
+    fs.write(
+      '01-raw-publico/nota.md',
+      ['---', 'tipo: wiki', '---', '', '# Publico', '', 'Termo: rawpublicoexclusivo.', ''].join('\n'),
+    );
+
+    // Mesma classe de bug do filtro `folder`: `startsWith('01-raw')` engoliria uma pasta cujo
+    // nome apenas começa igual.
+    expect(paths(retriever.search({ query: 'rawpublicoexclusivo' }).results)).toContain(
+      '01-raw-publico/nota.md',
+    );
+    // E a pasta de verdade continua de fora.
+    expect(retriever.search({ query: 'rascunhoexclusivo' }).results).toEqual([]);
+  });
+
   it('`tipo: projeto` devolve só o README do projeto, inclusive contra a expansão', () => {
     const retriever = diskRetriever();
     const { results } = retriever.search({ query: 'potentia', tipo: 'projeto', limit: 20 });
@@ -457,6 +473,32 @@ describe('Retriever.search — sem resultado', () => {
       expect(result.results).toEqual([]);
       expect(result.suggestions).toBeUndefined();
     }
+  });
+
+  it('omite a chave `suggestions` quando não há o que sugerir', () => {
+    const retriever = diskRetriever();
+    // `SearchResult.suggestions` é documentado como "populated only when results is empty", o
+    // que se lê como `if (result.suggestions)`. Um array vazio é truthy e mandaria o consumidor
+    // para o ramo de "você quis dizer" sem nada para mostrar.
+    for (const query of ['', '   ', 'de a o para', 'proc']) {
+      const result = retriever.search({ query });
+      expect(result.results).toEqual([]);
+      expect(result.suggestions).toBeUndefined();
+      expect('suggestions' in result).toBe(false);
+    }
+  });
+
+  it('devolve no máximo cinco sugestões, por distância e depois alfabeticamente', () => {
+    const retriever = diskRetriever();
+    expect(retriever.search({ query: 'cach' }).suggestions).toEqual(['cache', 'cada']);
+    // Esta query tem mais candidatos do que cabe: prende o teto em cinco pelos dois lados.
+    expect(retriever.search({ query: 'corea' }).suggestions).toEqual([
+      'carga',
+      'cerca',
+      'certa',
+      'copia',
+      'corpo',
+    ]);
   });
 
   it('não devolve sugestões quando há resultado', () => {
@@ -644,7 +686,7 @@ describe('Retriever.sync — reindexação incremental', () => {
   });
 });
 
-function stubChunk(id: string, length: number): ScoredChunk {
+function stubChunk(id: string, length: number, overrides: Partial<Chunk> = {}): ScoredChunk {
   const chunk: Chunk = {
     id,
     path: `${id}.md`,
@@ -653,8 +695,23 @@ function stubChunk(id: string, length: number): ScoredChunk {
     lineEnd: 1,
     text: 'x'.repeat(length),
     tags: [],
+    ...overrides,
   };
   return { chunk, score: 1, viaGraph: false };
+}
+
+/** True when every surrogate in `text` is half of a complete pair. */
+function isWellFormed(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xdc00 && code <= 0xdfff) return false;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i++;
+    }
+  }
+  return true;
 }
 
 describe('Retriever.search — teto de termos da query', () => {
@@ -686,6 +743,31 @@ describe('Retriever.search — teto de termos da query', () => {
     // diferença de trabalho apareça em milissegundos, e o teste passaria sem o teto.
     expect(retriever.search({ query: repeated(200_000), limit: 12 })).toEqual(
       retriever.search({ query: repeated(64), limit: 12 }),
+    );
+  });
+
+  it('corta a query bruta em 1024 caracteres, antes de qualquer tokenização', () => {
+    const retriever = diskRetriever();
+
+    // Um teto por CONTAGEM de termos não fecha isto: `a` seguido de milhares de hifens e `b` é
+    // um termo só, e é o comprimento do termo que faz o trim de hifens do tokenizador
+    // backtrackear quadraticamente. O que precisa ser cortado é a string crua.
+    const atClamp = `jwt ${'a'.repeat(1020)}`;
+    expect(atClamp).toHaveLength(1024);
+
+    // `autenticacao` começa exatamente no caractere 1025 e casa chunks de verdade: se
+    // sobreviver ao corte, muda o resultado.
+    const beyond = `${atClamp} autenticacao ${'b'.repeat(50_000)}`;
+    expect(retriever.search({ query: beyond, limit: 12 })).toEqual(
+      retriever.search({ query: atClamp, limit: 12 }),
+    );
+
+    // E o corte é em 1024, não num número qualquer maior: o mesmo termo, movido para dentro do
+    // limite, muda o resultado.
+    const within = `jwt ${'a'.repeat(1020 - ' autenticacao'.length)} autenticacao`;
+    expect(within).toHaveLength(1024);
+    expect(retriever.search({ query: within, limit: 12 })).not.toEqual(
+      retriever.search({ query: atClamp, limit: 12 }),
     );
   });
 
@@ -730,6 +812,41 @@ describe('applyBudget', () => {
     // O chunk original é o que o índice guarda: alterá-lo corromperia toda busca posterior.
     expect(scored[0]!.chunk.text).toHaveLength(500);
     expect(scored[0]!.chunk.text).not.toContain(TRUNCATION_MARKER);
+  });
+
+  it('nunca corta no meio de um par surrogate', () => {
+    // Uma das duas paridades cai obrigatoriamente no meio do par, seja qual for o tamanho do
+    // marcador, então o teste não depende de contar caracteres do marcador.
+    for (const charBudget of [100, 101]) {
+      const out = applyBudget([stubChunk('emoji', 0, { text: '😀'.repeat(200) })], 10, charBudget);
+      const text = out[0]!.chunk.text;
+      expect(isWellFormed(text)).toBe(true);
+      expect(text.endsWith(TRUNCATION_MARKER)).toBe(true);
+      expect(text.length).toBeLessThanOrEqual(charBudget);
+    }
+  });
+
+  it('orçamento menor que o próprio marcador devolve só o marcador, não a nota quase inteira', () => {
+    const out = applyBudget([stubChunk('gigante', 500)], 10, 10);
+    // Sem a trava em zero o corte vira negativo, que em `slice` conta do FIM da string.
+    expect(out[0]!.chunk.text).toBe(TRUNCATION_MARKER);
+  });
+
+  it('o intervalo de linhas anunciado encolhe junto com o texto truncado', () => {
+    const original = stubChunk('longo', 0, {
+      text: 'linha de dez\n'.repeat(100),
+      lineStart: 10,
+      lineEnd: 109,
+    });
+    const chunk = applyBudget([original], 10, 100)[0]!.chunk;
+    const carried = chunk.text.slice(0, chunk.text.length - TRUNCATION_MARKER.length);
+
+    expect(chunk.lineStart).toBe(10);
+    // O intervalo anunciado tem de descrever o texto que veio junto: quem reler
+    // `path:lineStart-lineEnd` no disco não pode receber de volta o chunk inteiro.
+    expect(chunk.lineEnd).toBe(10 + (carried.match(/\n/g) ?? []).length);
+    expect(chunk.lineEnd).toBeLessThan(109);
+    expect(original.chunk.lineEnd).toBe(109);
   });
 
   it('devolve vazio para entrada vazia', () => {

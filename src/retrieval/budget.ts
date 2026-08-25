@@ -47,13 +47,53 @@ export function applyBudget(
 }
 
 /**
+ * `text` cut to at most `max` UTF-16 code units, never between the halves of a surrogate pair.
+ *
+ * A plain `slice` can leave a lone high surrogate at the end. That string is not well-formed
+ * Unicode: a client re-encoding it to UTF-8 without WTF-8 tolerance either substitutes U+FFFD or
+ * throws, and the vault is full of text where this matters — one emoji in a note, one accented
+ * character past the cut. Backing off one unit costs nothing and the result is always valid.
+ */
+export function sliceAtCodePointBoundary(text: string, max: number): string {
+  // Non-positive means nothing fits. Falling through would hand `String.slice` a negative count,
+  // which it reads as an offset from the end.
+  if (max <= 0) return '';
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  // A HIGH surrogate in the last kept position has its pair outside the cut. A low surrogate
+  // there is already closing a pair that started inside it, so it stays.
+  const isSplitPair = last >= 0xd800 && last <= 0xdbff;
+  return text.slice(0, isSplitPair ? max - 1 : max);
+}
+
+/**
  * Copies the chunk rather than editing it: the original is the one the index owns, and mutating
  * it would corrupt every later search for the lifetime of the process.
+ *
+ * `lineEnd` is pulled back to the last line that survived the cut. Without that, the chunk keeps
+ * advertising the range of text it no longer carries, and a consumer that re-reads
+ * `path:lineStart-lineEnd` from disk — which is exactly what the note-reading tools do — gets
+ * the whole untruncated chunk back and the budget buys nothing. `lineStart` is untouched: the
+ * chunk still begins where it began.
+ *
+ * What this still cannot express is "this text was cut" in a form a program can trust:
+ * `TRUNCATION_MARKER` is ordinary text and a note could contain it verbatim. Saying it properly
+ * means a `truncated?: boolean` on `ScoredChunk`, which lives in `src/types.ts` — outside this
+ * task's files — so it is left for whoever owns that type.
  */
 function truncate(item: ScoredChunk, charBudget: number): ScoredChunk {
-  const keep = Math.max(0, charBudget - TRUNCATION_MARKER.length);
+  // May go negative when the budget is smaller than the marker itself; the slice below floors
+  // it at zero. Left to `String.slice`, a negative count reads from the END of the string and
+  // hands back nearly the whole chunk — the opposite of a budget.
+  const keep = charBudget - TRUNCATION_MARKER.length;
+  const kept = sliceAtCodePointBoundary(item.chunk.text, keep);
+  const lines = kept.split('\n').length - 1;
   return {
     ...item,
-    chunk: { ...item.chunk, text: `${item.chunk.text.slice(0, keep)}${TRUNCATION_MARKER}` },
+    chunk: {
+      ...item.chunk,
+      text: `${kept}${TRUNCATION_MARKER}`,
+      lineEnd: item.chunk.lineStart + lines,
+    },
   };
 }

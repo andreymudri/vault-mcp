@@ -11,6 +11,7 @@ import {
   DEFAULT_CHAR_BUDGET,
   DEFAULT_LIMIT,
   GRAPH_DAMPING,
+  sliceAtCodePointBoundary,
 } from './budget.js';
 
 export interface RetrieverOptions {
@@ -63,14 +64,42 @@ const BODY_START_LINE = 1;
 const MAX_QUERY_TERMS = 64;
 
 /**
- * The query as the index should see it: unchanged when it is within the cap, otherwise its first
- * `MAX_QUERY_TERMS` terms rejoined. Rejoining is lossless — `tokenize` output is already folded,
- * hyphen-trimmed, stopword-free and free of separators, so tokenizing it again yields the same
- * list.
+ * Ceiling on the raw LENGTH of the query, and the one that actually bounds the work.
+ *
+ * A term cap alone is the wrong dimension: `tokenize` (src/index/tokenizer.ts) trims edge hyphens
+ * with `raw.replace(/-+$/, '')`, whose backtracking is quadratic in the length of a single token,
+ * and `a` + 5.000 hyphens + `b` is exactly ONE term. Measured end to end through `search`: 5.000
+ * hyphens 78,9ms; 10.000 301,3ms; 20.000 1.162,6ms; 40.000 4.694,3ms; 80.000 18.322,0ms — a 78 KB
+ * argument freezing a single-threaded stdio server for eighteen seconds, versus 3,0ms for 64
+ * ordinary words. A term cap cannot see any of it, and a variant of 64 such tokens (500 KB, 64
+ * terms exactly) sits entirely inside the cap at 11.929ms.
+ *
+ * 1024 characters is roughly a dense paragraph — about 150 words — so no query a person or an
+ * agent writes comes near it; the longest golden query here is 32 characters. 4096 would also be
+ * beyond human queries but leaves a ~48ms worst case that the passes below pay more than once,
+ * and there is no legitimate query in the gap between the two.
+ *
+ * The clamp is UNCONDITIONAL and its result is what gets returned, not merely what gets
+ * tokenized here: `search` runs the returned string through `bm25Search`, `matchesVocabulary`
+ * and `suggestTerms`, each of which tokenizes again — and the last two run precisely when the
+ * payload matches nothing, which is the pathological case.
+ *
+ * This closes the query path only. The same quadratic trim is reachable from note CONTENT, which
+ * `InvertedIndex.addChunk` tokenizes on every scan, so a clipping carrying a long hyphen run
+ * still slows indexing. That fix belongs in `tokenizer.ts`, outside this task's files.
+ */
+const MAX_QUERY_CHARS = 1024;
+
+/**
+ * The query as the index should see it: clamped to `MAX_QUERY_CHARS` first, then to
+ * `MAX_QUERY_TERMS` terms if it still has more. Rejoining the terms is lossless — `tokenize`
+ * output is already folded, hyphen-trimmed, stopword-free and free of separators, so tokenizing
+ * it again yields the same list.
  */
 function boundedQuery(query: string): string {
-  const terms = tokenize(query);
-  if (terms.length <= MAX_QUERY_TERMS) return query;
+  const clamped = sliceAtCodePointBoundary(query, MAX_QUERY_CHARS);
+  const terms = tokenize(clamped);
+  if (terms.length <= MAX_QUERY_TERMS) return clamped;
   return terms.slice(0, MAX_QUERY_TERMS).join(' ');
 }
 
@@ -216,7 +245,13 @@ export class Retriever {
     // query that is already the word `jwt`, spelled correctly and genuinely matching, is noise
     // that reads as a bug.
     if (results.length > 0 || this.matchesVocabulary(query)) return { results };
-    return { results, suggestions: suggestTerms(this.index, query, 5) };
+
+    // The key is omitted rather than set to `[]`: `SearchResult.suggestions` is documented as
+    // "populated only when results is empty" (src/types.ts), which a consumer reads as
+    // `if (result.suggestions)`. An empty array is truthy, so an empty or stopword-only query
+    // would send it down the "here are some corrections" branch with nothing to show.
+    const suggestions = suggestTerms(this.index, query, 5);
+    return suggestions.length > 0 ? { results, suggestions } : { results };
   }
 
   /** True when at least one query term is in the index — i.e. the query itself matched something. */
