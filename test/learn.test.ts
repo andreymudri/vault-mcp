@@ -1174,11 +1174,69 @@ describe('learn - o insight nunca se perde', () => {
     expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
   });
 
-  it('deixa vazar uma falha de anexação que não é "este alvo não aceita o texto"', async () => {
-    // The fallback must not swallow real faults: only the write guard refusing the path, an edit
-    // with nothing to anchor to, and a file that vanished are recoverable. A directory where the
-    // note should be is none of those - `readFile` fails with EISDIR - and silently writing a new
-    // note there would hide a broken vault.
+  it('não abre o alvo da regra de duplicata antes de classificá-lo', async () => {
+    // The classification runs BEFORE anything is opened. Without it the first thing to touch the
+    // target is `readFile`, which follows the link onto a FIFO and never returns — the collision
+    // guard further down cannot help here, because this target comes from the duplicate rule.
+    const cano = path.join(path.dirname(vaultRoot), 'cano-alvo');
+    await execFileAsync('mkfifo', [cano]);
+    const alias = '02-wiki/nestjs/alias-cano.md';
+    await fs.symlink(cano, path.join(vaultRoot, alias));
+    const retriever = {
+      search: () => ({ results: [scored(alias, 10, ['bullmq'])] }),
+    } as unknown as Retriever;
+
+    const result = await learn({
+      vaultRoot,
+      retriever,
+      titulo: 'Retry de worker BullMQ',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+      contexto: 'Investigando a fila',
+      dominio: 'nestjs',
+      tags: ['bullmq'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/nestjs/retry-de-worker-bullmq.md');
+    expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
+    expect(result.warning).toContain(alias);
+  }, 15_000);
+
+  it('grava o aprendizado quando a guarda de escrita recusa o alvo da regra', async () => {
+    // A target that classifies as an ordinary note and is then refused by `writeNote`'s own guards
+    // — `DENIED_SEGMENTS` here — is still "this target cannot take the text", not a fault to throw.
+    // The insight goes to the note's own name instead of being lost with the exception.
+    const alvo = '02-wiki/node_modules/nota.md';
+    await fs.mkdir(path.join(vaultRoot, '02-wiki/node_modules'));
+    await fs.writeFile(path.join(vaultRoot, alvo), '# Nota\n\nconteudo real\n', 'utf8');
+    const retriever = {
+      search: () => ({ results: [scored(alvo, 10, ['bullmq'])] }),
+    } as unknown as Retriever;
+
+    const result = await learn({
+      vaultRoot,
+      retriever,
+      titulo: 'Retry de worker BullMQ',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+      contexto: 'Investigando a fila',
+      dominio: 'nestjs',
+      tags: ['bullmq'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/nestjs/retry-de-worker-bullmq.md');
+    expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
+    expect(result.warning).toContain(alvo);
+    expect(await read(vaultRoot, alvo)).toBe('# Nota\n\nconteudo real\n');
+  });
+
+  it('grava o aprendizado quando o alvo da regra de duplicata não é uma nota', async () => {
+    // A directory standing where a note should be cannot take the text, so the append is refused
+    // and the learning takes the note's own free name. Nothing opens the directory: the classifier
+    // answers from `lstat` alone, which is what keeps a FIFO in the same position from wedging the
+    // whole server.
     //
     // The retriever is a stub because the real one CANNOT produce this state: the scanner never
     // indexes a directory as a note, so nothing else can route an append onto one.
@@ -1188,24 +1246,134 @@ describe('learn - o insight nunca se perde', () => {
       search: () => ({ results: [scored(pasta, 10, ['bullmq'])] }),
     } as unknown as Retriever;
 
-    await expect(
-      learn({
-        vaultRoot,
-        retriever,
-        titulo: 'Retry de worker BullMQ',
-        insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
-        contexto: 'Investigando a fila',
-        dominio: 'nestjs',
-        tags: ['bullmq'],
-        now: NOW,
-      }),
-    ).rejects.toThrow(/EISDIR/);
+    const result = await learn({
+      vaultRoot,
+      retriever,
+      titulo: 'Retry de worker BullMQ',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+      contexto: 'Investigando a fila',
+      dominio: 'nestjs',
+      tags: ['bullmq'],
+      now: NOW,
+    });
 
-    // Nothing was written and nothing was committed.
-    expect(await exists(path.join(vaultRoot, '02-wiki/nestjs/retry-de-worker-bullmq.md'))).toBe(
-      false,
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/nestjs/retry-de-worker-bullmq.md');
+    expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
+    expect(result.warning).toContain(pasta);
+    expect((await fs.lstat(path.join(vaultRoot, pasta))).isDirectory()).toBe(true);
+  });
+
+  it('avisa e grava só o corpo quando o template do vault não existe', async () => {
+    // `_templates/wiki.md` is the USER's file and can simply not be there. `writeNote` raises this
+    // warning itself when it creates a note; on this route it never looks, so the warning has to
+    // come from here — otherwise a note without its skeleton is reported as an ordinary success.
+    await fs.rm(path.join(vaultRoot, '_templates/wiki.md'));
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '', 'utf8');
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.path).toBe(stub);
+    expect(result.warning).toContain('_templates/wiki.md');
+    const nota = await read(vaultRoot, stub);
+    expect(nota).toContain('TTL configuravel');
+    expect(matter(nota, {}).data.tipo).toBe('wiki');
+  });
+
+  it('usa um template sem seção sem perder o insight', async () => {
+    // A template of frontmatter and a title and nothing else is a perfectly ordinary user
+    // template, and it is the one shape with no `## ` to splice above. The body goes after the
+    // skeleton instead of being dropped.
+    await fs.writeFile(
+      path.join(vaultRoot, '_templates/wiki.md'),
+      '---\ntipo: wiki\ntags: \ncriado: <% tp.date.now("YYYY-MM-DD") %>\n---\n\n# <% tp.file.title %>\n',
+      'utf8',
     );
-    expect(await logLines(vaultRoot)).toBe(1);
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '\n', 'utf8');
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.path).toBe(stub);
+    const nota = await read(vaultRoot, stub);
+    expect(nota.split('\n')).toContain('# Cache Wrapper Ttl');
+    expect(nota).toContain('TTL configuravel');
+    expect(nota.indexOf('# Cache Wrapper Ttl')).toBeLessThan(nota.indexOf('TTL configuravel'));
+  });
+
+  it('difere do caminho livre apenas em criado, que segue o now da chamada', async () => {
+    // The two routes have to produce the same note, and they do — except for `criado`, which
+    // `writeNote` stamps with wall-clock time on the free path while this route passes `opts.now`.
+    // `opts.now` is the value the MOC entry, the daily capture and the append heading of the SAME
+    // call already use; `writeNote` is the outlier and is outside this task's file set. The
+    // divergence is asserted rather than described, so nobody has to trust a comment.
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '   ', 'utf8');
+    const outroVault = await makeVault();
+
+    try {
+      const opts = {
+        titulo: 'Cache Wrapper TTL',
+        insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+        contexto: 'Revisando o wrapper de cache',
+        dominio: 'patterns',
+        tags: ['redis', 'cache'],
+        now: NOW,
+      } as const;
+
+      const sobreStub = await learn({
+        vaultRoot,
+        retriever: makeRetriever(vaultRoot),
+        ...opts,
+      });
+      const emCaminhoLivre = await learn({
+        vaultRoot: outroVault,
+        retriever: makeRetriever(outroVault),
+        ...opts,
+      });
+
+      expect(sobreStub.path).toBe(stub);
+      expect(emCaminhoLivre.path).toBe(stub);
+
+      const semCriado = (texto: string): string =>
+        texto
+          .split('\n')
+          .filter((linha) => !linha.startsWith('criado:'))
+          .join('\n');
+      const a = await read(vaultRoot, sobreStub.path);
+      const b = await read(outroVault, emCaminhoLivre.path);
+      expect(semCriado(a)).toBe(semCriado(b));
+      expect(a).toContain(`criado: ${TODAY}`);
+      // Wall clock, computed here rather than asserted as "not TODAY": the day the suite happens
+      // to run on 2026-08-20 the two coincide, and a test that fails on one calendar day is worse
+      // than one that states exactly what the other route stamps.
+      const agora = new Date();
+      const hoje = `${agora.getFullYear()}-${String(agora.getMonth() + 1).padStart(2, '0')}-${String(
+        agora.getDate(),
+      ).padStart(2, '0')}`;
+      expect(b).toContain(`criado: ${hoje}`);
+    } finally {
+      await removeTree(path.dirname(outroVault));
+    }
   });
 
   it('usa um nome livre quando a nota do título existe e não aceita anexação', async () => {
@@ -1475,6 +1643,56 @@ describe('learn - nada e removido do disco', () => {
     expect(result.reason).not.toContain('\n');
   });
 
+  it('preserva uma nota acima do teto de leitura no caminho do título', async () => {
+    // Past the total ceiling the classifier answers `note` WITHOUT reading, so the answer must be
+    // the safe one: a 1.2 MiB note is never a placeholder, and writing over it would be a
+    // create-or-replace onto real content the probe deliberately did not look at.
+    const alvo = '02-wiki/patterns/cache-wrapper-ttl.md';
+    const original = `---\ntipo: wiki\ntags: [cache]\n---\n\n# Cache Wrapper TTL\n\n${'palavra '.repeat(160_000)}\n`;
+    expect(original.length).toBeGreaterThan(1024 * 1024);
+    await fs.writeFile(path.join(vaultRoot, alvo), original, 'utf8');
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.path).toBe(alvo);
+    expect((await read(vaultRoot, alvo)).startsWith(original.trimEnd())).toBe(true);
+  });
+
+  it('trata como placeholder um arquivo em branco com caractere multibyte na fronteira', async () => {
+    // U+2028 is three bytes and whitespace, and here it straddles the 4096-byte chunk boundary.
+    // Decoding each chunk on its own splits it into replacement characters, which are not
+    // whitespace, and the file flips from placeholder to note on byte alignment alone.
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    await fs.writeFile(path.join(vaultRoot, stub), `${' '.repeat(4095)}\u2028${' '.repeat(10)}`, 'utf8');
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe(stub);
+    const nota = await read(vaultRoot, stub);
+    expect(nota.split('\n')).toContain('# Cache Wrapper Ttl');
+    expect(nota).toContain('## Contexto');
+    expect(nota).toContain('TTL configuravel');
+  });
+
   it('preserva uma nota maior que o limite de sondagem no caminho do título', async () => {
     // The probe reads a bounded prefix and answers `note` on the first non-blank byte. This pins
     // the DIRECTION that bound exists for: err towards occupied. Answering `blank` here would hand
@@ -1525,6 +1743,63 @@ describe('learn - nada e removido do disco', () => {
     expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
     expect((await fs.lstat(dir)).isDirectory()).toBe(true);
     expect(await fs.readFile(path.join(dir, 'dentro.txt'), 'utf8')).toBe('conteudo do diretorio\n');
+  });
+
+  // A symlink to a FIFO at THIS path is deliberately not a separate test: the classification it
+  // would pin is the one the test below already pins, and it would pin it by HANGING the runner
+  // instead of failing. The two FIFO cases that remain - a FIFO at the note's name, and a symlink
+  // to a FIFO as the duplicate rule's target - each cover a route nothing else reaches.
+  it('não renomeia por cima de um symlink para uma nota do vault', async () => {
+    // `editNote`'s atomic rename lands ON the link, not through it: the alias becomes a regular
+    // file holding a divergent copy, and the note it pointed at never receives the learning. A
+    // link is not a note this module may edit - it names one that lives elsewhere.
+    const real = '02-wiki/patterns/nota-real.md';
+    const conteudoReal =
+      '---\ntipo: wiki\ntags: [cache]\n---\n\n# Nota Real\n\nwrapper de cache redis com ttl\n';
+    await fs.writeFile(path.join(vaultRoot, real), conteudoReal, 'utf8');
+    const alias = path.join(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl.md');
+    await fs.symlink(path.join(vaultRoot, real), alias);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect((await fs.lstat(alias)).isSymbolicLink()).toBe(true);
+    expect(await read(vaultRoot, real)).toBe(conteudoReal);
+    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
+    expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
+  });
+
+  it('grava o aprendizado quando o caminho da nota é um laço de symlink', async () => {
+    // Unreadable is not a reason to lose the insight. A loop, a link to a directory, a file the
+    // process cannot open: none of them can take the text, and the free name below can.
+    const a = path.join(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl.md');
+    const b = path.join(vaultRoot, '02-wiki/patterns/laco.md');
+    await fs.symlink(b, a);
+    await fs.symlink(a, b);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
+    expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
+    expect((await fs.lstat(a)).isSymbolicLink()).toBe(true);
   });
 
   it('não abre um FIFO no caminho da nota', async () => {

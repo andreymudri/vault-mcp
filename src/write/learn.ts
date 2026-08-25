@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { basename, join, relative, sep } from 'node:path';
 
 import { tokenize } from '../index/tokenizer.js';
@@ -6,10 +7,10 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { ScoredChunk } from '../types.js';
 import { commitFiles } from './git.js';
-import { PathGuardError, resolveWritePath } from './paths.js';
+import { resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
-import { EditError, editNote, writeNote, type WriteResult } from './writer.js';
+import { editNote, writeNote, type WriteResult } from './writer.js';
 
 /**
  * `vault_learn`: one call that decides between appending to a note that already covers the
@@ -307,11 +308,17 @@ async function existingDomains(vaultRoot: string): Promise<string[]> {
 }
 
 /**
- * How much of a file is read before deciding it is not blank. A note's first bytes are its
- * frontmatter, so the answer is settled long before this; the bound is here so that "is anything
- * standing on this path?" never reads a whole note off disk.
+ * How much of a file is read at a time while deciding whether it is blank, and the ceiling on how
+ * much is read in total.
+ *
+ * A note's first bytes are its frontmatter, so the answer is settled in the first chunk and the
+ * loop below stops there. The total ceiling is for the other shape: a file that really is nothing
+ * but whitespace for megabytes. Reading it whole to say so cost +1063 MB of RSS on a 209 MB file,
+ * three times over, because this path is asked more than once per call. Past the ceiling the
+ * answer is `note` — the safe direction, since a `note` is never written over.
  */
 const BLANK_PROBE_BYTES = 4096;
+const MAX_BLANK_BYTES = 1024 * 1024;
 
 /**
  * What stands on a path, from the point of view of a module that may write a note there.
@@ -319,11 +326,17 @@ const BLANK_PROBE_BYTES = 4096;
  * - `free`: nothing at all.
  * - `blank`: a regular file with NO content. Obsidian leaves one whenever a user clicks an
  *   unresolved link or presses Enter in a new note; it is a placeholder, not a note.
- * - `note`: a regular file with content — or a SYMLINK, which is never a placeholder because it
- *   names something living somewhere else, whose bytes are not this path's to judge.
- * - `foreign`: a directory, a FIFO, a socket, a device. Not a note, and nothing this module may
- *   read or write. `foreign` exists so that no code path opens one: reading a FIFO never returns,
- *   which hangs the whole single-threaded server on a path that merely LOOKS like a note.
+ * - `note`: a regular file with content.
+ * - `foreign`: a SYMLINK, a directory, a FIFO, a socket, a device. Not a note, and nothing this
+ *   module may read, write, or rename onto.
+ *
+ * A symlink is `foreign` and that is the whole of its handling here. It cannot be read through:
+ * `readFile` follows it, so a link to a FIFO is a read that never returns, on the single thread
+ * that serves every tool call. It cannot be written through either: an atomic rename lands ON the
+ * link, so the user's alias becomes a regular file holding a divergent copy while the note it
+ * pointed at never receives the learning — reproduced in a git repo, mode 120000 committed as
+ * 100644. And its blankness is not its own: judging the target's bytes and then acting on the link
+ * is how a placeholder check ends up standing on an alias.
  *
  * The blank/note line is the one `propagate` already draws with `before.trim() !== ''`, and the
  * two modules in this directory must not disagree about what blank means: treated as a note, a
@@ -337,36 +350,43 @@ type PathState = 'free' | 'blank' | 'note' | 'foreign';
 async function pathState(absPath: string): Promise<PathState> {
   let stat;
   try {
-    // `lstat`, never `stat`: a symlink has to be seen as itself. Following it answers a question
-    // about the TARGET's bytes and then acts on the LINK, which is how a user's alias into a
-    // shared store ends up treated as an empty placeholder.
+    // `lstat`, never `stat`: a symlink has to be seen as itself, and a `stat` here would answer
+    // for the target — including by hanging on a FIFO behind it.
     stat = await fs.lstat(absPath);
   } catch {
     return 'free';
   }
 
-  if (stat.isSymbolicLink()) return 'note';
   if (!stat.isFile()) return 'foreign';
   if (stat.size === 0) return 'blank';
+  if (stat.size > MAX_BLANK_BYTES) return 'note';
 
+  let handle;
   try {
-    if (stat.size > BLANK_PROBE_BYTES) {
-      const handle = await fs.open(absPath, 'r');
-      try {
-        const buffer = Buffer.alloc(BLANK_PROBE_BYTES);
-        const { bytesRead } = await handle.read(buffer, 0, BLANK_PROBE_BYTES, 0);
-        if (buffer.subarray(0, bytesRead).toString('utf8').trim() !== '') return 'note';
-      } finally {
-        await handle.close();
-      }
-      // Four kilobytes of nothing but whitespace. No size threshold decides this one — that would
-      // leave an arbitrary byte count deciding between a note born with its skeleton and one
-      // silently appended to — so the rest is read, which only a pathological file ever reaches.
-    }
-    return (await fs.readFile(absPath, 'utf8')).trim() === '' ? 'blank' : 'note';
+    handle = await fs.open(absPath, 'r');
   } catch {
     // Unreadable is not writable: treat it as content rather than risk standing on it.
     return 'note';
+  }
+
+  try {
+    // `StringDecoder` holds back an incomplete UTF-8 sequence at the end of a chunk and prepends
+    // it to the next, so a multi-byte character straddling the chunk boundary cannot decode to a
+    // replacement character and flip the answer on alignment alone.
+    const decoder = new StringDecoder('utf8');
+    const buffer = Buffer.alloc(BLANK_PROBE_BYTES);
+    let read = 0;
+    while (read < stat.size) {
+      const { bytesRead } = await handle.read(buffer, 0, BLANK_PROBE_BYTES, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+      if (decoder.write(buffer.subarray(0, bytesRead)).trim() !== '') return 'note';
+    }
+    return decoder.end().trim() === '' ? 'blank' : 'note';
+  } catch {
+    return 'note';
+  } finally {
+    await handle.close();
   }
 }
 
@@ -392,8 +412,12 @@ function isWritable(state: PathState): boolean {
  * on a path checked for nothing but its suffix and its containment. This module removes nothing,
  * ever.
  *
- * The two rules staying in step is what the tests pin: a note written onto a placeholder and a
- * note written on a free path must come out the same shape.
+ * The two routes are pinned against each other by test, and they agree byte for byte except in
+ * ONE field: `criado`. `writeNote` stamps it from wall-clock time on the free path, while this one
+ * passes `opts.now` — the same instant the MOC entry, the daily capture and the append heading of
+ * this very call already use. `opts.now` is the right value and `writeNote` is the outlier, but
+ * `writer.ts` is outside this task's file set, so the divergence stands and is asserted rather
+ * than described.
  */
 function titleFromPath(relPath: string): string {
   return basename(relPath, '.md')
@@ -459,16 +483,6 @@ async function skeletonContent(
   // `writeNote`: an unsubstituted `<% %>` written into the vault is the bug it exists to prevent.
   const skeleton = applyTemplate(templateText, { title: titleFromPath(relPath), now: opts.now });
   return { content: spliceIntoSkeleton(skeleton, body) };
-}
-
-/**
- * True for the three failures that mean "this target cannot take the text", as opposed to a real
- * fault: the write guard refusing the path, the edit finding nothing to anchor to (an empty stub
- * note), and the file having vanished between the index read and now.
- */
-function isRecoverableAppendFailure(err: unknown): boolean {
-  if (err instanceof EditError || err instanceof PathGuardError) return true;
-  return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 
 /** Tags of a note as the index knows them, read off the result set rather than re-reading disk. */
@@ -614,12 +628,42 @@ async function attemptAppend(
   titulo: string,
   date: string,
 ): Promise<AppendAttempt> {
+  const refusal = (detail: string): AppendAttempt => ({
+    failure: `não foi possível anexar em ${oneLine(relPath)} (${detail})`,
+  });
+
+  let absPath: string;
+  try {
+    absPath = resolveWritePath(opts.vaultRoot, relPath);
+  } catch (err) {
+    return refusal(oneLine(err instanceof Error ? err.message : String(err)));
+  }
+
+  // Asked BEFORE anything is opened. `appendSection` reads with `readFile`, which follows a
+  // symlink — onto a FIFO that never returns, or onto a note whose alias the rename would then
+  // replace — and `editNote` renames onto whatever the name holds. The classifier answers from
+  // `lstat`, so a target that is not a plain note with content is refused without being touched.
+  const state = await pathState(absPath);
+  if (state !== 'note') {
+    return refusal(
+      state === 'free'
+        ? 'a nota não está mais no disco'
+        : state === 'blank'
+          ? 'a nota está em branco'
+          : 'o caminho não é uma nota (link, diretório ou dispositivo)',
+    );
+  }
+
   try {
     return { write: await appendSection(opts, relPath, titulo, date) };
   } catch (err) {
-    if (!isRecoverableAppendFailure(err)) throw err;
-    const detail = oneLine(err instanceof Error ? err.message : String(err));
-    return { failure: `não foi possível anexar em ${oneLine(relPath)} (${detail})` };
+    // Every failure from here is about THIS target and none of them may cost the user the
+    // insight: `freeNotePath` below is the loss-free answer, and a fault that is not about the
+    // path — no space, a broken template — surfaces from the write that follows instead. An
+    // errno list stood here before, and the states it did not name (a symlink loop, a link to a
+    // directory, a file the process cannot open) threw a raw errno out of `learn` with nothing
+    // written.
+    return refusal(oneLine(err instanceof Error ? err.message : String(err)));
   }
 }
 
@@ -715,6 +759,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   let newRelPath = `${WIKI_PREFIX}${opts.dominio}/${noteSlug}.md`;
 
   const targetPath = decision.targetPath;
+  const firstRelPath = newRelPath;
   const newAbsPath = resolveWritePath(opts.vaultRoot, newRelPath);
   let reason = decision.reason;
 
@@ -768,6 +813,12 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
       } else if (attempt.failure !== undefined) {
         failures.push(attempt.failure);
       }
+    } else if (collision === 'foreign') {
+      // No append is attempted on a link, a directory or a device, so nothing else would tell the
+      // user why their note is not at the name they expect.
+      failures.push(
+        `${oneLine(newRelPath)} não é uma nota (link, diretório ou dispositivo)`,
+      );
     }
 
     // Occupied and unappendable. A brand new name keeps both the existing note and the learning,
@@ -785,7 +836,8 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     // a blank placeholder standing here would cost the note its `# H1` and its sections. The
     // skeleton is therefore built HERE and handed over complete — the placeholder is written over,
     // never removed.
-    const state = await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
+    const state =
+      newRelPath === firstRelPath ? collision : await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
     const built =
       state === 'blank'
         ? await skeletonContent(opts, newRelPath, body)
