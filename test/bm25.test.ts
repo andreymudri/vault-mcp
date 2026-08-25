@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { chunkNote } from '../src/index/chunker.js';
 import { FIELD_WEIGHTS, InvertedIndex, NOTE_TYPE_WEIGHTS } from '../src/index/inverted-index.js';
 import { B, idf, K1, search, suggestTerms } from '../src/index/bm25.js';
+import { MAX_TOKEN_LENGTH, tokenize } from '../src/index/tokenizer.js';
 import type { Chunk } from '../src/types.js';
 
 const FIXTURE_ROOT = join(__dirname, 'fixtures/vault');
@@ -426,22 +427,20 @@ describe('suggestTerms', () => {
     expect(suggestTerms(index, 'a de', 5)).toEqual([]);
   });
 
-  it('termos de vocabulário absurdamente longos (base64/hex sem separadores) não travam o event loop', () => {
-    // Reproduz a cena de risco: 200 termos de vocabulário de 5.000 caracteres cada, todos do
-    // MESMO comprimento que a query (o early-exit por diferença de comprimento não ajuda) e
-    // quase idênticos entre si (o early-exit por mínimo de linha também não ajuda, porque o
-    // mínimo permanece baixo por quase toda a matriz). Um clipping cheio de data-URIs base64 ou
-    // hex digests produz exatamente esse vocabulário — `tokenizer.ts` não tem cap de tamanho de
-    // token. Sem o cap de comprimento em `levenshtein`, isso mede ~37s de event loop bloqueado;
-    // com o cap, cada comparação é O(1) (só checagem de tamanho) e o suggestTerms inteiro deve
-    // terminar em milissegundos.
-    // Todo par (term_i, queryTerm) só difere nos 3 últimos caracteres (dígitos vs. "xxx"), então
-    // a distância de edição verdadeira é sempre exatamente 3 (> maxDistance) — o prefixo de 4997
-    // "x"s idênticos alinha em diagonal a custo zero, e nenhuma combinação de inserção/deleção
-    // supera o custo de 3 substituições. Isso garante que `suggestions` fica vazio independente
-    // do cap, e mantém o mínimo de cada linha da matriz baixo (0 ou 1) por quase toda a extensão
-    // do cálculo — exatamente a condição em que o early-exit por mínimo de linha NÃO ajuda,
-    // forçando a matriz O(len²) inteira a rodar sem o cap de comprimento.
+  it('termos de vocabulário absurdamente longos (base64/hex sem separadores) nem chegam ao vocabulário', () => {
+    // Cena de risco original: 200 termos de vocabulário de 5.000 caracteres cada, todos do MESMO
+    // comprimento da query (o early-exit por diferença de comprimento não ajuda) e quase idênticos
+    // entre si (o early-exit por mínimo de linha também não ajuda). Um clipping cheio de data-URIs
+    // base64 ou hex digests produz exatamente esse vocabulário. A defesa era só o cap de
+    // comprimento DENTRO de `levenshtein`, e este teste a media com relógio (`elapsedMs < 2000`).
+    //
+    // Com `MAX_TOKEN_LENGTH` em `tokenizer.ts`, a defesa passou a agir uma camada antes: um termo
+    // de 5.000 caracteres é descartado na tokenização e nunca vira chave de posting list, então
+    // `levenshtein` sequer é chamado com ele. Isso tornaria a asserção de relógio VÁCUA — com o
+    // vocabulário vazio não sobra trabalho nenhum a cronometrar, e o teste passaria mesmo que o
+    // cap do `levenshtein` fosse removido. Ela foi trocada pela asserção determinística do
+    // invariante mais forte, que é o que agora protege o `suggestTerms`: esses termos não existem
+    // no índice. Remover o cap do tokenizador falha aqui.
     const index = new InvertedIndex();
     const LONG = 5000;
     const prefix = 'x'.repeat(LONG - 3);
@@ -452,17 +451,23 @@ describe('suggestTerms', () => {
     }
     const queryTerm = 'x'.repeat(LONG);
 
-    const start = Date.now();
-    const suggestions = suggestTerms(index, queryTerm, 10);
-    const elapsedMs = Date.now() - start;
+    // Os 200 chunks entraram no índice; nenhum termo deles entrou no vocabulário.
+    expect(index.size()).toBe(200);
+    expect(index.postings.size).toBe(0);
+    expect(suggestTerms(index, queryTerm, 10)).toEqual([]);
+  });
 
-    // Nenhum termo de 5.000 caracteres deve ser sugerido — o cap trata termos além dele como
-    // fora de alcance, então nada no vocabulário sintético qualifica.
-    expect(suggestions).toEqual([]);
-    // Bound folgado o bastante para não ser flaky em CI, mas várias ordens de grandeza abaixo dos
-    // ~37s medidos sem o cap — qualquer regressão que reintroduza o scan completo estoura isso.
-    expect(elapsedMs).toBeLessThan(2000);
-  }, 10000);
+  it('um termo de exatamente MAX_TOKEN_LENGTH continua no vocabulário e continua sugerível', () => {
+    // Bracket superior do cap por token visto pela via do índice: o corte é em 64, não abaixo
+    // dele, e um termo no limite continua sendo um termo de busca normal.
+    const index = new InvertedIndex();
+    const atCap = `${'x'.repeat(MAX_TOKEN_LENGTH - 2)}ab`;
+    expect(atCap).toHaveLength(64);
+    index.addChunk(makeChunk({ id: 'cap#1', headingPath: [atCap] }));
+
+    expect([...index.vocabulary()]).toEqual([atCap]);
+    expect(suggestTerms(index, `${'x'.repeat(MAX_TOKEN_LENGTH - 2)}ax`, 5)).toEqual([atCap]);
+  });
 
   it('cap de comprimento não é baixo demais: um termo real de 13 caracteres ainda é sugerido', () => {
     // Bracket inferior de MAX_TERM_LENGTH. O teste acima só prova que o cap não é ALTO demais
@@ -479,7 +484,7 @@ describe('suggestTerms', () => {
   });
 });
 
-describe('suggestTerms — orçamento total de pares (vocabulário × termos da query)', () => {
+describe('suggestTerms — corte de termos da query e orçamento de células', () => {
   /** Chunk sintético mínimo, um termo de vocabulário por chunk. */
   function vocabChunk(id: string, term: string): Chunk {
     return {
@@ -494,7 +499,7 @@ describe('suggestTerms — orçamento total de pares (vocabulário × termos da 
     };
   }
 
-  it('query com milhares de termos contra vocabulário de 20.000 termos não trava o event loop', () => {
+  it('query com milhares de termos devolve exatamente o que devolvem os primeiros termos escaneados', () => {
     // MAX_TERM_LENGTH torna cada PAR O(1), mas nada limitava quantos pares rodam: o laço externo
     // de suggestTerms percorre TODO o vocabulário e, para cada termo, TODA a query. Query é um
     // argumento de tool call (atacante controla o número de "termos" que tokenize produz) e
@@ -502,22 +507,134 @@ describe('suggestTerms — orçamento total de pares (vocabulário × termos da 
     // pode crescer sem limite mesmo com cada par barato. Medido antes deste fix: vocabulário de
     // 20.000 termos com query de 5.000 termos custava dezenas de segundos de event loop bloqueado
     // num servidor single-threaded.
+    //
+    // A prova é determinística, não cronometrada (um relógio nesta fixture mede sobretudo o custo
+    // de MONTAR o índice, e passaria mesmo sem corte nenhum): uma query de 5.000 termos devolve
+    // exatamente o que devolve o prefixo de MAX_SCANNED_QUERY_TERMS termos, o que só acontece se o
+    // resto da query nunca tiver sido escaneado.
+    //
+    // O que este teste NÃO faz é isolar MAX_SCANNED_QUERY_TERMS: nesta fixture as duas defesas
+    // suprimem o mesmo resultado. Com o corte elevado a 64, os 20.001 termos de vocabulário vezes
+    // 64 termos de query passam de 5e7 células, o orçamento de MAX_LEVENSHTEIN_CELLS estoura, o
+    // scan do vocabulário para antes de chegar a "workers" (inserido por último) e o resultado
+    // volta a ser `[]` — igual, por outro motivo. Ou seja: aqui só se prova que a cauda da query
+    // não muda o resultado, por uma das duas defesas. Quem fixa a CONSTANTE, com o orçamento de
+    // células comprovadamente fora do caminho, é o teste seguinte.
     const index = new InvertedIndex();
     for (let i = 0; i < 20000; i++) {
       index.addChunk(vocabChunk(`v#${i}`, `voc${String(i).padStart(6, '0')}xy`));
     }
+    index.addChunk(vocabChunk('v#workers', 'workers'));
+
     const queryTerms: string[] = [];
-    for (let i = 0; i < 5000; i++) queryTerms.push(`qry${String(i).padStart(6, '0')}xy`);
-    const query = queryTerms.join(' ');
+    for (let i = 0; i < 8; i++) queryTerms.push(`qry${String(i).padStart(6, '0')}xy`);
+    queryTerms.push('workorx');
+    for (let i = 8; i < 5000; i++) queryTerms.push(`qry${String(i).padStart(6, '0')}xy`);
+    const scannedPrefix = queryTerms.slice(0, 8).join(' ');
 
-    const start = Date.now();
-    suggestTerms(index, query, 10);
-    const elapsedMs = Date.now() - start;
+    // Sanidade da fixture: o termo tardio realmente casaria se fosse escaneado, e o prefixo
+    // sozinho não casa nada. Sem isto a igualdade abaixo poderia ser vácuo (`[] === []`).
+    expect(suggestTerms(index, 'workorx', 10)).toEqual(['workers']);
 
-    // Bound folgado o bastante para não ser flaky em CI, mas ordens de grandeza abaixo do tempo
-    // sem orçamento — qualquer regressão que remova o corte de pares (ou o eleve o bastante para
-    // deixar o produto vocabulário×query explodir de novo) estoura isso.
-    expect(elapsedMs).toBeLessThan(8000);
+    expect(suggestTerms(index, queryTerms.join(' '), 10)).toEqual(suggestTerms(index, scannedPrefix, 10));
+    expect(suggestTerms(index, queryTerms.join(' '), 10)).toEqual([]);
+  }, 15000);
+
+  it('MAX_SCANNED_QUERY_TERMS fixa em 8 os termos escaneados, com o orçamento de células fora do caminho', () => {
+    // Fixa a CONSTANTE, e é o único teste que consegue: o de cima não distingue os dois
+    // mecanismos, porque naquele vocabulário elevar o corte estoura o orçamento de células e
+    // suprime o mesmo resultado por outro motivo. Aqui o vocabulário tem QUATRO termos curtos, e
+    // uma query de 12 termos gasta 623 células (medido por instrumentação do contador; 919 com o
+    // corte elevado a 64, isto é, escaneando a query inteira), quatro ordens de grandeza abaixo de
+    // MAX_LEVENSHTEIN_CELLS (2e7). O orçamento não é atingido em nenhuma das variantes, então o
+    // que decide o resultado aqui só pode ser a posição do termo na query.
+    //
+    // A query tem dois termos que casam, em posições escolhidas para prender o corte dos dois
+    // lados: "workorx" (distância 2 de "workers") é o 5º termo, DENTRO do corte, e "consultaxy"
+    // (distância 2 de "consulta") é o 9º, logo FORA dele. A única resposta compatível com um corte
+    // em exatamente 8 é ['workers']:
+    //   - corte >= 9, ou removido: "consultaxy" também é escaneado -> ['consulta', 'workers'];
+    //   - corte <= 4: nem "workorx" é escaneado -> [].
+    const index = new InvertedIndex();
+    for (const term of ['nestjs', 'bullmq', 'workers', 'consulta']) {
+      index.addChunk(vocabChunk(`c#${term}`, term));
+    }
+    expect(index.postings.size).toBe(4);
+
+    const queryTerms = [
+      'zzz001',
+      'zzz002',
+      'zzz003',
+      'zzz004',
+      'workorx',
+      'zzz006',
+      'zzz007',
+      'zzz008',
+      'consultaxy',
+      'zzz010',
+      'zzz011',
+      'zzz012',
+    ];
+    expect(queryTerms[4]).toBe('workorx');
+    expect(queryTerms[8]).toBe('consultaxy');
+    // A query chega inteira ao corte: nenhum destes termos é stopword nem cai por comprimento.
+    expect(tokenize(queryTerms.join(' '))).toEqual(queryTerms);
+
+    expect(suggestTerms(index, queryTerms.join(' '), 10)).toEqual(['workers']);
+
+    // Controle do MECANISMO, não do resultado: os mesmos 12 termos, com "consultaxy" movido para a
+    // primeira posição, devolvem as duas sugestões. Se fosse o orçamento de células (ou qualquer
+    // custo do vocabulário) a esconder "consulta", mover o termo não mudaria nada — o vocabulário
+    // é o mesmo, a query é a mesma, só a ordem muda. Isto é o que prova que o corte por POSIÇÃO é
+    // o mecanismo em jogo nas asserções acima.
+    const moved = ['consultaxy', ...queryTerms.filter((term) => term !== 'consultaxy')];
+    expect(suggestTerms(index, moved.join(' '), 10)).toEqual(['consulta', 'workers']);
+  });
+
+  it('vocabulário de termos longos com prefixo comum não roda a matriz inteira do vocabulário todo', () => {
+    // O orçamento por CONTAGEM de pares supunha que cada par custa O(1) por causa de
+    // MAX_TERM_LENGTH = 64. A suposição é falsa: termos de 64 caracteres, todos do mesmo
+    // comprimento e compartilhando prefixo, derrotam os dois early-exits do levenshtein (o de
+    // diferença de comprimento não dispara, e o mínimo de linha só passa de 2 perto do fim), então
+    // cada par roda quase a matriz 64x64 inteira e o teto de 750.000 pares permitia da ordem de
+    // 3e9 células. Medido: 500 termos envenenados 277ms, 2.000 939ms, 8.000 4.948ms, vocabulário
+    // inteiro envenenado 31.357ms, contra 94-124ms num vocabulário natural. A precondição é
+    // conteúdo de vault, e `01-raw/` é captura da web indexada.
+    //
+    // Prova determinística, sem relógio: o orçamento é de CÉLULAS, então o scan do vocabulário
+    // para antes do fim quando os pares são caros. "consulta" é o ÚLTIMO termo inserido (e
+    // `vocabulary()` itera em ordem de inserção), a distância <= 2 de "consultaxy": ele só é
+    // devolvido se o scan tiver chegado lá. Com o orçamento, não chega. Sem o orçamento — ou com
+    // um orçamento por pares, que este vocabulário não estoura (12.000 x 2 = 24.000 pares, bem
+    // abaixo de 750.000) — o scan chega, devolve ['consulta'] e falha esta asserção.
+    const index = new InvertedIndex();
+    const prefix = 'x'.repeat(MAX_TOKEN_LENGTH - 6);
+    for (let i = 0; i < 12000; i++) {
+      index.addChunk(vocabChunk(`p#${i}`, `${prefix}${String(i).padStart(6, '0')}`));
+    }
+    index.addChunk(vocabChunk('p#consulta', 'consulta'));
+    expect(index.postings.size).toBe(12001);
+
+    const poisonedQueryTerm = `${prefix}zzzzzz`;
+    expect(poisonedQueryTerm).toHaveLength(64);
+
+    expect(suggestTerms(index, `${poisonedQueryTerm} consultaxy`, 10)).toEqual([]);
+  }, 15000);
+
+  it('o orçamento de células não corta um vocabulário natural do mesmo tamanho', () => {
+    // Bracket inferior do orçamento de células, e a prova de que o teste acima mede o CUSTO dos
+    // pares e não apenas o tamanho do vocabulário: mesmo número de termos (12.001), mesma query
+    // de dois termos, mas termos de vocabulário curtos e variados — o feitio de um vault de
+    // verdade. Aqui os pares são baratos (o early-exit por diferença de comprimento mata quase
+    // todos), o orçamento não é atingido, o scan chega ao fim e "consulta" é sugerido.
+    const index = new InvertedIndex();
+    for (let i = 0; i < 12000; i++) {
+      index.addChunk(vocabChunk(`n#${i}`, `noise${String(i).padStart(6, '0')}`));
+    }
+    index.addChunk(vocabChunk('n#consulta', 'consulta'));
+    expect(index.postings.size).toBe(12001);
+
+    expect(suggestTerms(index, 'termonatural consultaxy', 10)).toEqual(['consulta']);
   }, 15000);
 
   it('orçamento não é baixo demais: vocabulário de 100.000 termos com query de 6 palavras continua achando a sugestão que só bate na última palavra', () => {
@@ -543,4 +660,53 @@ describe('suggestTerms — orçamento total de pares (vocabulário × termos da 
 
     expect(suggestions).toEqual(['consulta']);
   }, 15000);
+});
+
+/**
+ * A via de INGESTÃO do trim quadrático de hífens, que é a que nenhum teto de query fecha:
+ * `InvertedIndex.addChunk` tokeniza o CORPO das notas a cada varredura, então um clipping em
+ * `01-raw/` com uma corrida longa de hífens — uma linha de separador colada, um blob hifenizado —
+ * atrasava toda busca sem ninguém mandar query nenhuma (medido: uma busca por 'jwt' custando
+ * 1.137ms por causa de uma corrida de 40.000 hífens numa nota). As asserções são determinísticas:
+ * o que se afirma é que a nota envenenada produz exatamente o mesmo vocabulário que a nota limpa
+ * e continua pesquisável pelos seus termos de verdade.
+ */
+describe('ingestão — corpo de nota com corrida longa de hífens', () => {
+  const CLIPPING_PATH = '01-raw/clipping.md';
+  const PROSE = 'guard de autenticacao jwt no nestjs com worker de filas';
+  const BLOB = `a${'-'.repeat(200_000)}b`;
+
+  function indexOf(body: string): InvertedIndex {
+    const index = new InvertedIndex();
+    for (const chunk of chunkNote(CLIPPING_PATH, body, 'wiki', ['jwt'], 1)) {
+      index.addChunk(chunk);
+    }
+    return index;
+  }
+
+  const clean = ['## Clipping', '', PROSE, ''].join('\n');
+  const poisoned = ['## Clipping', '', PROSE, '', BLOB, ''].join('\n');
+
+  it('produz exatamente o mesmo vocabulário que a mesma nota sem a corrida de hífens', () => {
+    const poisonedIndex = indexOf(poisoned);
+    const cleanIndex = indexOf(clean);
+
+    expect([...poisonedIndex.vocabulary()].sort()).toEqual([...cleanIndex.vocabulary()].sort());
+    expect([...cleanIndex.vocabulary()].length).toBeGreaterThan(0);
+    // Ninguém escreve uma chave de posting list de 200.002 caracteres.
+    for (const term of poisonedIndex.vocabulary()) {
+      expect(term.length).toBeLessThanOrEqual(MAX_TOKEN_LENGTH);
+    }
+  });
+
+  it('mantém a nota pesquisável pelos seus termos reais', () => {
+    const poisonedIndex = indexOf(poisoned);
+
+    const hits = search(poisonedIndex, 'jwt worker', 5);
+
+    expect(hits).not.toHaveLength(0);
+    expect(hits[0]!.chunk.path).toBe(CLIPPING_PATH);
+    // E o blob não vira termo de busca: procurá-lo não acha nada.
+    expect(search(poisonedIndex, BLOB, 5)).toEqual([]);
+  });
 });
