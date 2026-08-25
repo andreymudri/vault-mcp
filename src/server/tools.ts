@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { promises as fs } from 'node:fs';
+import { resolve, sep } from 'node:path';
 
 import { z } from 'zod';
 
@@ -8,8 +9,8 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
-import { learn } from '../write/learn.js';
-import { editNote, writeNote, type WriteResult } from '../write/writer.js';
+import { LearnError, learn } from '../write/learn.js';
+import { EditError, editNote, writeNote, type WriteResult } from '../write/writer.js';
 
 /**
  * The seven tools the MCP server exposes, as plain objects: a name, a description written for an
@@ -76,7 +77,7 @@ const INVISIBLE_CHARS_GLOBAL =
  * `src/write/propagate.ts`: `\n`, `\r`, `\t` by name, everything else in a numeric form that can
  * only mean what it names.
  */
-function forMessage(text: string): string {
+export function forMessage(text: string): string {
   return text.replace(INVISIBLE_CHARS_GLOBAL, (ch) => {
     if (ch === '\n') return '\\n';
     if (ch === '\r') return '\\r';
@@ -104,7 +105,7 @@ function forMessage(text: string): string {
  * composing its message, so a vault reached through a symlinked home directory names a root string
  * the caller never configured.
  */
-function makeRedactor(vaultRoot: string): (text: string) => string {
+export function makeRedactor(vaultRoot: string): (text: string) => string {
   const configured = resolve(vaultRoot);
   let real = configured;
   try {
@@ -190,25 +191,63 @@ export class WriteQueue {
   constructor(private readonly slotTimeoutMs: number = WRITE_SLOT_TIMEOUT_MS) {}
 
   run<T>(task: () => Promise<T>): Promise<T> {
-    // Both arms are `task`: a rejected predecessor must not stall the queue, and a write tool that
-    // failed says nothing about whether the next one may run. `slot` already resolves rather than
-    // rejects, and the second arm is what keeps the queue's liveness from depending on that.
-    const result = this.tail.then(task, task);
-    this.tail = this.slot(result);
-    return result;
+    // The slot has to EXIST synchronously — it becomes the new tail before this returns — but its
+    // timer must not start until the task does. Armed at enqueue instead, a task that waits behind
+    // others burns its slot WAITING: five 200 ms writes behind a 300 ms slot ran four at a time,
+    // which is the serialization guarantee failing under exactly the backlog it exists for, and
+    // failing silently. So the tail is a promise this queue resolves by hand, and the timer starts
+    // inside `begin`.
+    let release: () => void = () => undefined;
+    const slotClosed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const begin = (): Promise<T> => {
+      let result: Promise<T>;
+      try {
+        result = task();
+      } catch (err) {
+        // A task that throws SYNCHRONOUSLY never produces a promise to hang the slot on, and an
+        // unreleased slot is the wedge this class exists to prevent.
+        release();
+        return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+      this.arm(result, release);
+      return result;
+    };
+
+    // Both arms are `begin`: a rejected predecessor must not stall the queue, and a write tool that
+    // failed says nothing about whether the next one may run.
+    const started = this.tail.then(begin, begin);
+    this.tail = slotClosed;
+    return started;
   }
 
   /**
    * `run`, plus whether the call actually had the queue to itself.
    *
-   * The question is asked across the call's whole lifetime, not at one instant: a slot that expired
-   * while this call was WAITING is what let it start early, and one still outstanding when it
-   * finished may have been writing the whole time.
+   * Sampled when the task STARTS rather than when it was queued, which is what makes the answer
+   * exact. Three windows put another task alongside this one, and each shows up in one of the
+   * three terms: a slot abandoned BEFORE this task started and still outstanding (first term), a
+   * slot — this task's own — expiring WHILE it runs, which lets the next one in (second), and one
+   * abandoned earlier that is still running when this one finishes (third). Nothing else can
+   * execute concurrently, because every other path holds the tail.
+   *
+   * The previous version sampled `expired` at ENQUEUE and left a real overlap silent: a caller that
+   * started after the expiry and finished after the abandoned task settled saw an unchanged counter
+   * at both ends and reported success with no warning. That window is closed, not narrowed.
    */
   async runExclusive<T>(task: () => Promise<T>): Promise<{ value: T; warning?: string }> {
-    const expiredOnEntry = this.expired;
-    const value = await this.run(task);
-    const overlapped = this.expired > expiredOnEntry || this.outstanding > 0;
+    let outstandingAtStart = 0;
+    let expiredAtStart = 0;
+    const value = await this.run(async () => {
+      outstandingAtStart = this.outstanding;
+      expiredAtStart = this.expired;
+      return task();
+    });
+
+    const overlapped =
+      outstandingAtStart > 0 || this.expired > expiredAtStart || this.outstanding > 0;
     return overlapped ? { value, warning: EXCLUSIVITY_WARNING } : { value };
   }
 
@@ -217,33 +256,33 @@ export class WriteQueue {
     return this.outstanding > 0;
   }
 
-  /** Settles when `result` settles or when the slot expires, whichever comes first. */
-  private slot(result: Promise<unknown>): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let closed = false;
-      const close = (): void => {
-        if (closed) return;
-        closed = true;
-        clearTimeout(timer);
-        resolve();
+  /**
+   * Starts this task's slot: `release` is called when the task settles or when the slot expires,
+   * whichever comes first, and an expired slot leaves the task TRACKED so the loss of exclusion can
+   * still be reported for as long as it may be writing.
+   */
+  private arm(result: Promise<unknown>, release: () => void): void {
+    let closed = false;
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(timer);
+      release();
+    };
+    const timer = setTimeout(() => {
+      if (closed) return;
+      this.outstanding += 1;
+      this.expired += 1;
+      const settled = (): void => {
+        this.outstanding -= 1;
       };
-      const timer = setTimeout(() => {
-        if (closed) return;
-        this.outstanding += 1;
-        this.expired += 1;
-        // Still tracked after being abandoned: `runExclusive` reports the lost exclusion for
-        // exactly as long as the task can still be writing, and stops once it cannot.
-        const settled = (): void => {
-          this.outstanding -= 1;
-        };
-        result.then(settled, settled);
-        close();
-      }, this.slotTimeoutMs);
-      // A pending write must not be the reason the process stays alive — the transport decides
-      // that. `unref` also keeps this timer from holding a test runner open.
-      timer.unref();
-      result.then(close, close);
-    });
+      result.then(settled, settled);
+      close();
+    }, this.slotTimeoutMs);
+    // A pending write must not be the reason the process stays alive — the transport decides that.
+    // `unref` also keeps this timer from holding a test runner open.
+    timer.unref();
+    result.then(close, close);
   }
 }
 
@@ -351,11 +390,96 @@ function noteTags(note: Note): string[] {
   return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string') : [];
 }
 
-/** Frontmatter values are whatever YAML parsed: a scalar, a list, or a nested mapping. */
+/**
+ * Bounds on the frontmatter block `vault_get_note` renders. All three exist because the SOURCE
+ * bytes say nothing about the rendered size.
+ *
+ * YAML aliases share nodes, so a mapping of 300 bytes can describe a structure whose TEXT is
+ * megabytes: nine levels of nine references each is 9^5 leaves. `frontmatter.ts` bounds `tags` for
+ * exactly this reason and carries every other key through by reference, with an explicit note that
+ * "a consumer that serializes arbitrary frontmatter keys must impose its own bound". This is that
+ * consumer, and it did not: `JSON.stringify` over such a value produced a 1,2 MB answer from a
+ * 330-byte note in this project's own test, and larger shapes reach tens of megabytes and then a
+ * `RangeError` — on a single-threaded stdio server, a wedge followed by a crash, from a note a
+ * poisoned `01-raw/` clipping delivers with no caller cooperation at all.
+ *
+ * The per-VALUE bound matters as much as the total: without it one enormous value spends the whole
+ * budget and hides every other key, which is the same note losing its `tipo` and its links.
+ */
+const MAX_FRONTMATTER_KEYS = 32;
+const MAX_FRONTMATTER_VALUE_CHARS = 512;
+const MAX_FRONTMATTER_CHARS = 4_000;
+/** How many elements of a list are rendered before the rest is summarised. */
+const MAX_FRONTMATTER_ITEMS = 32;
+
+/** `[…cortado]`, in the same shape as the body's own cut marker. */
+const CUT = '[…cortado]';
+
+function clamp(text: string, max: number): string {
+  return text.length <= max ? text : `${sliceAtCodePointBoundary(text, max)}${CUT}`;
+}
+
+/**
+ * One frontmatter value as text, in work PROPORTIONAL TO WHAT IS EMITTED rather than to what the
+ * value expands to.
+ *
+ * That is the whole design: a container is never handed to `String` or `JSON.stringify` — both walk
+ * the entire expansion before anything can be truncated, so a check on the result is a check that
+ * runs after the damage. Elements are visited one at a time, up to `MAX_FRONTMATTER_ITEMS`, and a
+ * nested container is summarised by its SIZE instead of being descended into.
+ */
 function renderFrontmatterValue(value: unknown): string {
-  if (Array.isArray(value)) return value.map((item) => String(item)).join(', ');
-  if (value !== null && typeof value === 'object') return JSON.stringify(value);
-  return String(value);
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    let length = 0;
+    for (const item of value.slice(0, MAX_FRONTMATTER_ITEMS)) {
+      const part = renderFrontmatterScalar(item);
+      parts.push(part);
+      length += part.length + 2;
+      if (length > MAX_FRONTMATTER_VALUE_CHARS) break;
+    }
+    const rest = value.length - parts.length;
+    const tail = rest > 0 ? `, …+${rest} item(ns)` : '';
+    return clamp(`${parts.join(', ')}${tail}`, MAX_FRONTMATTER_VALUE_CHARS);
+  }
+  return renderFrontmatterScalar(value);
+}
+
+/** A single value, with containers named rather than expanded. */
+function renderFrontmatterScalar(value: unknown): string {
+  if (value === null) return 'null';
+  if (value === undefined) return '';
+  if (Array.isArray(value)) return `[lista com ${value.length} item(ns)]`;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'object') return `{objeto com ${Object.keys(value).length} chave(s)}`;
+  return clamp(String(value), MAX_FRONTMATTER_VALUE_CHARS);
+}
+
+/**
+ * The whole frontmatter block, one line per key, escaped per key and per value, and bounded in key
+ * count and in total size. Returns the marker line itself so the caller is told what was left out —
+ * a silently shortened block is a note whose metadata the caller believes it has seen.
+ */
+function renderFrontmatterBlock(frontmatter: Frontmatter): string {
+  const entries = Object.entries(frontmatter);
+  const lines: string[] = [];
+  let length = 0;
+  let cut = entries.length > MAX_FRONTMATTER_KEYS;
+
+  for (const [key, value] of entries.slice(0, MAX_FRONTMATTER_KEYS)) {
+    // Escaped PER KEY AND PER VALUE, then joined. Escaping the assembled block instead turns the
+    // separators into the two literal characters `\` and `n`, which is every note with two keys.
+    const line = `  ${forMessage(clamp(key, MAX_FRONTMATTER_VALUE_CHARS))}: ${forMessage(renderFrontmatterValue(value))}`;
+    if (length + line.length > MAX_FRONTMATTER_CHARS) {
+      cut = true;
+      break;
+    }
+    lines.push(line);
+    length += line.length + 1;
+  }
+
+  if (cut) lines.push(`  […frontmatter cortado em ${MAX_FRONTMATTER_KEYS} chaves / ${MAX_FRONTMATTER_CHARS} caracteres]`);
+  return lines.join('\n');
 }
 
 /**
@@ -371,12 +495,67 @@ function renderFrontmatterValue(value: unknown): string {
  */
 const QUOTE_PREFIX = '> ';
 
+/**
+ * Every character that STARTS A NEW RENDERED LINE — Unicode's mandatory break set (UAX #14): LF,
+ * VT, FF, CR, NEL, LS and PS, with CRLF matched as the single break it is.
+ *
+ * It is a subset of the invisible class above, and it has to be its own thing: escaping the whole
+ * invisible class inside note text would break words at soft hyphens and zero-width joiners, which
+ * is mangling the content, while splitting on `\n` alone — what this module did first — leaves six
+ * other characters that a renderer turns into a line and this module does not. The original
+ * forgery simply moved to the next terminator: a planted note put
+ * `03-projects/segredos/senhas.md:1 — Credenciais (score 99.99)` at column zero of a search answer,
+ * under the very header that tells the agent an unprefixed line came from the server.
+ *
+ * WHEN `paths.ts` EXPORTS ITS `INVISIBLE_CHARS`, this stays: the two answer different questions
+ * ("what is invisible" vs "what begins a line"), and only the first one is imported.
+ */
+const LINE_BREAKS_GLOBAL = /\r\n|[\n\v\f\r\u0085\u2028\u2029]/g;
+
+/**
+ * Text whose ONLY line break is `\n`.
+ *
+ * CRLF collapses (a note authored on Windows must not show a `\r` at the end of every line), and
+ * every other terminator is escaped into visible text the way `forMessage` escapes it — so it can
+ * still be READ, but it can no longer open a line. This is the one transformation applied to
+ * quoted content, and it is deliberately the smallest one that makes "every rendered line is
+ * prefixed" true.
+ */
+function normalizeBreaks(text: string): string {
+  // One pass over the ONE set, so a terminator can never be handled by one half and missed by the
+  // other: LF (and the CRLF pair) become the single `\n` the renderer below splits on, everything
+  // else becomes visible text.
+  return text.replace(LINE_BREAKS_GLOBAL, (match) => {
+    if (match === '\n' || match === '\r\n') return '\n';
+    if (match === '\r') return '\\r';
+    if (match === '\v') return '\\x0b';
+    if (match === '\f') return '\\x0c';
+    const code = match.charCodeAt(0);
+    return code <= 0xff
+      ? `\\x${code.toString(16).padStart(2, '0')}`
+      : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
+}
+
 /** Note text as a block that cannot be read as anything but quoted text. */
 function quoteSnippet(text: string): string {
-  return text
+  return normalizeBreaks(text)
     .split('\n')
     .map((line) => `${QUOTE_PREFIX}${line}`)
     .join('\n');
+}
+
+/**
+ * A diff as text whose every rendered line still carries the diff's own `+`/`-`/` `/`@@` prefix.
+ *
+ * The diff is relayed rather than quoted — a caller reads it as a diff, and prefixing it with `> `
+ * would cost that — so the guarantee has to come from the same place: `unifiedDiff` prefixes what
+ * it splits on `\n`, so a body carrying U+2028 (or any other alternate terminator) rides inside one
+ * diff line and renders as a second, unprefixed line. A fabricated `+++ b/CLAUDE.md` hunk in the
+ * middle of a diff this server vouches for is the same forgery as item one, on the write path.
+ */
+function relayDiff(diff: string): string {
+  return normalizeBreaks(diff);
 }
 
 /** One rendered result: the citation line the vault's `CLAUDE.md` requires, then the text. */
@@ -397,10 +576,13 @@ function renderResult(item: ScoredChunk): string {
 }
 
 function renderNoteLine(note: Note): string {
+  // Clamped even though `tipo`/`status` are string-typed and `tags` arrives bounded from
+  // `frontmatter.ts`: this line is emitted once per note in the vault, so an unbounded field here
+  // multiplies by the size of the vault rather than by one note.
   const details = [
-    `tipo: ${stringField(note, 'tipo') ?? '—'}`,
-    `status: ${stringField(note, 'status') ?? '—'}`,
-    `tags: ${noteTags(note).join(', ') || '—'}`,
+    `tipo: ${clamp(stringField(note, 'tipo') ?? '—', MAX_FRONTMATTER_VALUE_CHARS)}`,
+    `status: ${clamp(stringField(note, 'status') ?? '—', MAX_FRONTMATTER_VALUE_CHARS)}`,
+    `tags: ${clamp(noteTags(note).join(', '), MAX_FRONTMATTER_VALUE_CHARS) || '—'}`,
   ].join(', ');
   return forMessage(`- ${note.path} — ${note.title} (${details})`);
 }
@@ -419,7 +601,7 @@ function renderWrite(
   for (const warning of [result.warning, queueWarning]) {
     if (warning !== undefined) lines.push(`Aviso: ${forMessage(redact(warning))}`);
   }
-  lines.push('', 'Diff:', result.diff === '' ? '(sem alteração de conteúdo)' : result.diff);
+  lines.push('', 'Diff:', result.diff === '' ? '(sem alteração de conteúdo)' : relayDiff(result.diff));
   return lines.join('\n');
 }
 
@@ -446,6 +628,40 @@ const MAX_TAG_LENGTH = 128;
  * container deliberately (that drop is its defence against an aliased YAML structure); reporting
  * success over a tag nobody will ever see is the outcome this refusal exists to prevent.
  */
+/**
+ * Tag shapes YAML reads back as something other than the text that was written.
+ *
+ * A tag is written by `serializeScalar` (src/write/template.ts) BARE unless its `NEEDS_QUOTES_RE`
+ * matches — and that expression covers the reserved words (`true`, `null`, `yes`, `~`) and the
+ * punctuation shapes, but not the numeric ones. Measured, writing then reading back through the
+ * scanner: `3.10` returns as `3.1`, `007` as `7`, `1e3` as `1000`, `0x10` as `16`, and `1:30`
+ * parses as a MAPPING and is dropped entirely — in every case `vault_list` stops finding the note
+ * the caller just tagged, with the diff as the only clue. `true` and `null` DO round-trip, because
+ * they get quoted, so they are deliberately not refused here.
+ *
+ * The break is in the serializer, which is outside this task's file set, so the decision at this
+ * boundary is to REFUSE the ambiguous shapes rather than write a tag that will not come back.
+ * Refusing beats coercing because a tag is an identifier: `3.10` silently stored as `3.1` is not
+ * the tag anyone asked for, and this module cannot add the quotes that would preserve it.
+ */
+const NUMERIC_LIKE_RE =
+  /^[-+]?(?:0[bB][01_]+|0[oO]?[0-7_]+|0[xX][0-9a-fA-F_]+|(?:\d[\d_]*)?\.?[\d_]+(?:[eE][-+]?\d+)?|\.(?:inf|nan))$/;
+const DATE_LIKE_RE = /^\d{4}-\d{1,2}-\d{1,2}$/;
+const CANONICAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** `undefined` when the tag survives the write/read round trip, or why it would not. */
+function tagRoundTripProblem(tag: string): string | undefined {
+  // A colon makes the flow item a mapping (`[1:30]` is `{1: 30}`), which `toTags` drops as a
+  // container, and `NEEDS_QUOTES_RE` only quotes `:` when followed by space or end of line.
+  if (tag.includes(':')) return 'dois-pontos vira um mapa no YAML';
+  if (DATE_LIKE_RE.test(tag)) {
+    return CANONICAL_DATE_RE.test(tag) ? undefined : 'seria lida como data e voltaria normalizada';
+  }
+  if (!NUMERIC_LIKE_RE.test(tag)) return undefined;
+  // A plain integer whose text IS its numeric form survives: `2026` comes back as `2026`.
+  return String(Number(tag)) === tag ? undefined : 'seria lida como número e voltaria diferente';
+}
+
 function coerceTags(value: unknown): string[] {
   const items =
     typeof value === 'string'
@@ -466,7 +682,15 @@ function coerceTags(value: unknown): string[] {
       throw new ToolError('frontmatter.tags só aceita textos ou números; remova listas e objetos');
     }
     const tag = String(item).slice(0, MAX_TAG_LENGTH).trim();
-    if (tag !== '') out.push(tag);
+    if (tag === '') continue;
+    const problem = tagRoundTripProblem(tag);
+    if (problem !== undefined) {
+      throw new ToolError(
+        `frontmatter.tags: a tag '${forMessage(tag)}' ${problem}, e a nota deixaria de casar com ` +
+          'a busca por ela; use uma tag com pelo menos uma letra (ex.: `v3.10`)',
+      );
+    }
+    out.push(tag);
   }
   return out;
 }
@@ -505,6 +729,59 @@ function toFrontmatter(input: Record<string, unknown> | undefined): Frontmatter 
     out[key] = value;
   }
   return out;
+}
+
+/**
+ * Why a REFUSED write may have been refused, when the target turns out to be hardlinked.
+ *
+ * The write layer refuses a hardlinked target — a note whose inode a second name shares, which
+ * `cp -al` snapshots and some backup tools create legitimately — and its message names the path
+ * without naming the link count, so the user cannot tell a hostile link from their own backup.
+ * The refusal is not this module's to change; the ANSWER is, and this is the number that explains
+ * it. It is added only to a write that already failed, so an ordinary refusal gains no noise.
+ *
+ * `stat` is confined to a path that stays inside the vault: this runs on caller-supplied input and
+ * must not report on files outside it, not even a link count.
+ */
+async function hardLinkHint(vaultRoot: string, relPath: string): Promise<string | undefined> {
+  const root = resolve(vaultRoot);
+  const target = resolve(root, relPath);
+  if (target !== root && !target.startsWith(`${root}${sep}`)) return undefined;
+  try {
+    const stat = await fs.lstat(target);
+    if (stat.nlink > 1) {
+      return (
+        `o arquivo tem ${stat.nlink} hard links apontando para o mesmo inode ` +
+        '(uma cópia `cp -al` ou um snapshot de backup faz isso), então escrever nele mudaria ' +
+        'todas as cópias de uma vez'
+      );
+    }
+  } catch {
+    // Sem alvo legível não há o que explicar; o erro original já é a resposta.
+  }
+  return undefined;
+}
+
+/**
+ * Runs a write and, if it is refused for a reason that is about the FILE rather than about the
+ * caller's text, adds the link count that explains the refusal.
+ *
+ * `EditError` and `LearnError` are refusals of the ARGUMENTS — an anchor that matches nothing, a
+ * domain that does not exist — and adding a link count to those would be noise.
+ */
+async function withWriteDetail<T>(
+  vaultRoot: string,
+  relPath: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof EditError || err instanceof LearnError || err instanceof ToolError) throw err;
+    const hint = await hardLinkHint(vaultRoot, relPath);
+    if (hint === undefined) throw err;
+    throw new ToolError(`${messageOf(err)}; ${hint}`);
+  }
 }
 
 const SEARCH_DESCRIPTION =
@@ -609,14 +886,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         throw new ToolError(`nota não encontrada: ${forMessage(input.path)}`);
       }
 
-      // Escaped PER KEY AND PER VALUE, then joined. Escaping the assembled block instead turns
-      // the separators this line just inserted into the two literal characters `\` and `n`, which
-      // is every note carrying two frontmatter keys — i.e. essentially every note in a vault.
-      // The escape still has to happen: a key or a value read out of a hostile note can carry a
-      // newline or a bidi control of its own, and those must not become lines here.
-      const frontmatter = Object.entries(note.frontmatter)
-        .map(([key, value]) => `  ${forMessage(key)}: ${forMessage(renderFrontmatterValue(value))}`)
-        .join('\n');
+      const frontmatter = renderFrontmatterBlock(note.frontmatter);
       const body =
         note.body.length <= MAX_NOTE_CHARS
           ? note.body
@@ -727,12 +997,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       // `# H1`s and a set of empty sections nobody asked for. The skeleton belongs to `vault_learn`,
       // which composes the body itself; here the content is the note.
       const { value: result, warning } = await writes.runExclusive(() =>
-        writeNote({
-          vaultRoot: deps.vaultRoot,
-          path: input.path,
-          content: input.content,
-          ...(frontmatter === undefined ? {} : { frontmatter }),
-        }),
+        withWriteDetail(deps.vaultRoot, input.path, () =>
+          writeNote({
+            vaultRoot: deps.vaultRoot,
+            path: input.path,
+            content: input.content,
+            ...(frontmatter === undefined ? {} : { frontmatter }),
+          }),
+        ),
       );
       return renderWrite(result, result.created ? 'Nota criada' : 'Nota substituída', redact, warning);
     },
@@ -749,12 +1021,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
     async (input) => {
       const { value: result, warning } = await writes.runExclusive(() =>
-        editNote({
-          vaultRoot: deps.vaultRoot,
-          path: input.path,
-          oldText: input.old_text,
-          newText: input.new_text,
-        }),
+        withWriteDetail(deps.vaultRoot, input.path, () =>
+          editNote({
+            vaultRoot: deps.vaultRoot,
+            path: input.path,
+            oldText: input.old_text,
+            newText: input.new_text,
+          }),
+        ),
       );
       return renderWrite(result, 'Nota editada', redact, warning);
     },
@@ -793,7 +1067,9 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           contexto: input.contexto,
           dominio: input.dominio,
           ...(input.projeto === undefined ? {} : { projeto: input.projeto }),
-          ...(input.tags === undefined ? {} : { tags: input.tags }),
+          // The same round-trip guard as `vault_write_note`: `learn` writes these into the very
+          // same YAML block, so a tag that would not come back must be refused here too.
+          ...(input.tags === undefined ? {} : { tags: coerceTags(input.tags) }),
           ...(input.links === undefined ? {} : { links: input.links }),
           ...(input.confirm_novo_dominio === undefined
             ? {}
@@ -817,7 +1093,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       for (const aviso of [result.warning, queueWarning]) {
         if (aviso !== undefined) lines.push(`Aviso: ${forMessage(redact(aviso))}`);
       }
-      lines.push('', 'Diff (mostre ao usuário):', result.diff === '' ? '(vazio)' : result.diff);
+      lines.push('', 'Diff (mostre ao usuário):', result.diff === '' ? '(vazio)' : relayDiff(result.diff));
       return lines.join('\n');
     },
   );

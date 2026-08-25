@@ -9,7 +9,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
-import { createTools, type ToolResult } from './tools.js';
+import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
 
 /**
  * The process a user starts: `npx vault-mcp`, or the `bin` entry pointing at the compiled
@@ -70,6 +70,33 @@ function toCallToolResult(result: ToolResult): CallToolResult {
 }
 
 /**
+ * The SDK-facing callback for one tool: a second belt on top of the one inside `define`.
+ *
+ * Every handler already converts its own failures into `isError` content, so this catch is for what
+ * the SDK layer itself can throw — a schema surprise, an argument shape nobody predicted. It must
+ * answer the way every other answer is built: REDACTED, so the vault's absolute root does not leak
+ * out through the one path that skipped it, and ESCAPED, so a message carrying a newline cannot
+ * forge a line. Getting that wrong here is not cosmetic — this is the branch that runs when nothing
+ * else worked, which is exactly when the message is least predictable.
+ */
+export function toolCallback(
+  tool: ToolDefinition,
+  redact: (text: string) => string,
+): (args: unknown) => Promise<CallToolResult> {
+  return async (args: unknown): Promise<CallToolResult> => {
+    try {
+      return toCallToolResult(await tool.handler(args));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return toCallToolResult({
+        content: [{ type: 'text', text: `${tool.name} falhou: ${forMessage(redact(message))}` }],
+        isError: true,
+      });
+    }
+  };
+}
+
+/**
  * The server with the seven tools registered, ready for any transport.
  *
  * `McpServer` is the SDK's registration front end over its own `Server` (it is reachable as
@@ -94,29 +121,12 @@ export function createVaultServer(vaultRoot: string): McpServer {
     },
   );
 
+  const redact = makeRedactor(vaultRoot);
   for (const tool of createTools({ retriever, scanner, vaultRoot })) {
     server.registerTool(
       tool.name,
       { description: tool.description, inputSchema: tool.inputSchema },
-      // Second belt on top of the one inside `define`: a handler is wrapped there too, and this
-      // catch exists so that anything the SDK layer itself can throw — a schema surprise, an
-      // argument shape nobody predicted — still leaves the process alive and answering. A vault
-      // full of files nobody validated must never be able to kill the server.
-      async (args: unknown): Promise<CallToolResult> => {
-        try {
-          return toCallToolResult(await tool.handler(args));
-        } catch (err) {
-          return toCallToolResult({
-            content: [
-              {
-                type: 'text',
-                text: `${tool.name} falhou: ${err instanceof Error ? err.message : String(err)}`,
-              },
-            ],
-            isError: true,
-          });
-        }
-      },
+      toolCallback(tool, redact),
     );
   }
 
