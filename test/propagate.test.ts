@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import matter from 'gray-matter';
 
 import {
   classifyTipo,
@@ -13,6 +17,8 @@ import {
   propagate,
 } from '../src/write/propagate.js';
 import { formatLocal } from '../src/write/template.js';
+
+const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'vault');
 
@@ -50,6 +56,75 @@ const NOW_TIME = formatLocal(NOW, 'HH:mm');
 
 const DAILY_REL = `04-daily/${NOW_DATE}.md`;
 const INDEX_REL = '00-index/index-knowledge.md';
+
+/**
+ * Runs `work` while WATCHING `fifo` for a reader, and unblocks any reader that appears.
+ *
+ * A read of a FIFO nobody writes to never returns, and a test that hits one does not fail —
+ * it HANGS: vitest prints the failure and then never exits ("close timed out", "Failed to
+ * terminate worker"), which costs a whole run and reports nothing. So the write end is
+ * opened NON-BLOCKING, which answers ENXIO while nobody is reading and succeeds the instant
+ * somebody is; closing it immediately hands the reader EOF. The call under test therefore
+ * always finishes, and `opened` says whether it opened the FIFO at all — which is the thing
+ * being asserted.
+ */
+async function withFifoWatch<T>(
+  fifo: string,
+  work: () => Promise<T>,
+): Promise<{ result: T; opened: boolean }> {
+  let finished = false;
+  let opened = false;
+  const watch = (async (): Promise<void> => {
+    const deadline = Date.now() + 20_000;
+    while (!finished && Date.now() < deadline) {
+      try {
+        const handle = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+        await handle.close();
+        opened = true;
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+  })();
+
+  try {
+    const result = await work();
+    return { result, opened };
+  } finally {
+    finished = true;
+    await watch;
+  }
+}
+
+/**
+ * One code point from every range of the shared invisible-character class.
+ *
+ * Each row is a range that could be deleted from `paths.ts`'s `INVISIBLE_CHARS` on its own,
+ * and this module is the second half of the coverage: `dominioProblem` refuses a domain that
+ * carries one, and `oneLine` folds one out of the prose it splices into a MOC entry. Written
+ * as escapes, never as the literal characters.
+ */
+const INVISIVEIS: ReadonlyArray<readonly [string, string]> = [
+  ['U+0000 NUL', '\u0000'],
+  ['U+001F UNIT SEPARATOR', '\u001f'],
+  ['U+007F DELETE', '\u007f'],
+  ['U+0085 NEXT LINE', '\u0085'],
+  ['U+009F APC', '\u009f'],
+  ['U+00AD SOFT HYPHEN', '\u00ad'],
+  ['U+061C ARABIC LETTER MARK', '\u061c'],
+  ['U+200B ZERO WIDTH SPACE', '\u200b'],
+  ['U+200F RIGHT-TO-LEFT MARK', '\u200f'],
+  ['U+2028 LINE SEPARATOR', '\u2028'],
+  ['U+2029 PARAGRAPH SEPARATOR', '\u2029'],
+  ['U+202A LEFT-TO-RIGHT EMBEDDING', '\u202a'],
+  ['U+202E RIGHT-TO-LEFT OVERRIDE', '\u202e'],
+  ['U+2060 WORD JOINER', '\u2060'],
+  ['U+2064 INVISIBLE PLUS', '\u2064'],
+  ['U+2066 LEFT-TO-RIGHT ISOLATE', '\u2066'],
+  ['U+2069 POP DIRECTIONAL ISOLATE', '\u2069'],
+  ['U+FEFF ZERO WIDTH NO-BREAK SPACE', '\ufeff'],
+];
 
 describe('classifyTipo', () => {
   it('maps each tag family to its daily-capture kind', () => {
@@ -275,6 +350,152 @@ describe('buildDaily', () => {
   });
 });
 
+describe('insertUnderSection e cercas de código', () => {
+  it('não sai da cerca externa quando uma cerca MENOR aparece dentro dela', () => {
+    // A ```` md ```` block that quotes a ``` block is how a MOC documents its own entry
+    // format, and the vault's own notes about Obsidian conventions do exactly that.
+    // Toggling on any fence marker makes the inner ``` CLOSE the outer block, so the
+    // `## Notas` quoted inside it becomes the target heading: the entry is written into the
+    // code block, the real section is left untouched, and the call reports success with a
+    // diff and no warning.
+    const before = [
+      '# Moc',
+      '',
+      '## Exemplo',
+      '',
+      '````md',
+      '```',
+      '## Notas',
+      '',
+      '- [[falso]] — exemplo do formato',
+      '````',
+      '',
+      '## Notas',
+      '',
+      '- [[real]] — nota real',
+      '',
+    ].join('\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[nova]] — nota nova');
+    const lines = after.split('\n');
+
+    expect(lines.indexOf('- [[nova]] — nota nova')).toBe(
+      lines.indexOf('- [[real]] — nota real') + 1,
+    );
+    // And nothing was added inside the block.
+    expect(lines.indexOf('- [[nova]] — nota nova')).toBeGreaterThan(lines.indexOf('````'));
+    expect(lines.filter((l) => l === '- [[falso]] — exemplo do formato')).toHaveLength(1);
+  });
+
+  it('não deixa uma cerca ~~~ fechar uma cerca ```', () => {
+    // The marker TYPE matters as much as its length: a `~~~` inside a ``` block is content.
+    const before = [
+      '# Moc',
+      '',
+      '## Exemplo',
+      '',
+      '```',
+      '~~~',
+      '## Notas',
+      '',
+      '- [[falso]] — exemplo do formato',
+      '```',
+      '',
+      '## Notas',
+      '',
+      '- [[real]] — nota real',
+      '',
+    ].join('\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[nova]] — nota nova');
+    const lines = after.split('\n');
+
+    expect(lines.indexOf('- [[nova]] — nota nova')).toBe(
+      lines.indexOf('- [[real]] — nota real') + 1,
+    );
+    expect(lines.filter((l) => l === '- [[falso]] — exemplo do formato')).toHaveLength(1);
+  });
+
+  it('fecha a cerca com um marcador do mesmo tipo e comprimento igual ou maior', () => {
+    // The ordinary case still has to work: ```md ... ``` is closed by the ```.
+    const before = ['## Notas', '', '```md', '## Notas', '```', '', '- [[a]] — um', '', '## Fim', ''].join(
+      '\n',
+    );
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+    const lines = after.split('\n');
+    expect(lines.indexOf('- [[b]] — dois')).toBe(lines.indexOf('- [[a]] — um') + 1);
+  });
+
+  it('mantém o \\r da linha inserida num arquivo CRLF', () => {
+    // `insertUnderSection` and `bumpAtualizado` both run over every propagation target, and
+    // the module docstring says they have to agree about line endings. Only the second was
+    // covered: an entry inserted with a bare LF into a file synced from Windows leaves the
+    // MOC with mixed endings, which git renders as a whole-file change.
+    const comItem = '## Notas\r\n\r\n- [[a]] — um\r\n\r\n## Fim\r\n';
+    const depois = insertUnderSection(comItem, '## Notas', '- [[b]] — dois');
+    expect(depois).toContain('- [[b]] — dois\r\n');
+    expect(depois.split('\n').filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
+
+    // The empty-section branch and the missing-section branch build their own lines too.
+    const vazia = '## Notas\r\n\r\n## Fim\r\n';
+    const depoisVazia = insertUnderSection(vazia, '## Notas', '- [[b]] — dois');
+    expect(depoisVazia).toContain('- [[b]] — dois\r\n');
+    expect(depoisVazia.split('\n').filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
+
+    const semSecao = '# Moc\r\n\r\n## Outra\r\n\r\n- [[x]] — x\r\n';
+    const depoisSem = insertUnderSection(semSecao, '## Notas', '- [[b]] — dois');
+    expect(depoisSem).toContain('## Notas\r\n');
+    expect(depoisSem).toContain('- [[b]] — dois\r\n');
+    expect(depoisSem.split('\n').filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
+  });
+});
+
+describe('bumpAtualizado em frontmatter vazio', () => {
+  it('mantém CRLF num bloco de frontmatter sem nenhuma propriedade', () => {
+    // `---\r\n---\r\n` is what Obsidian leaves when every property is removed. `head` is
+    // then just `---\r`, the `includes('\r\n')` test is false, and the new field goes in
+    // with a bare LF: one file, two line endings, and a YAML block a Windows editor shows
+    // with a stray character.
+    const antes = '---\r\n---\r\n\r\n# Nota\r\n';
+    const depois = bumpAtualizado(antes, '2026-08-20');
+
+    expect(depois).toContain('atualizado: 2026-08-20\r\n');
+    expect(depois.split('\n').filter((l) => l !== '' && !l.endsWith('\r'))).toEqual([]);
+    // Still one single frontmatter block, and the body is untouched.
+    expect(depois.startsWith('---\r\n')).toBe(true);
+    expect(depois).toContain('# Nota');
+    expect(matter(depois.replace(/\r\n/g, '\n'), {}).data['atualizado']).toBeDefined();
+  });
+
+  it('mantém LF num bloco de frontmatter vazio', () => {
+    const depois = bumpAtualizado('---\n---\n\n# Nota\n', '2026-08-20');
+    expect(depois).toContain('atualizado: 2026-08-20\n');
+    expect(depois).not.toContain('\r');
+  });
+});
+
+describe('buildMoc e frontmatter', () => {
+  it.each([
+    ['uma cerquilha', '#dev'],
+    ['uma vírgula', 'a,b'],
+    ['uma exclamação', '!dev'],
+    ['uma crase', '`dev'],
+    ['aspas duplas', 'a"b'],
+    ['um asterisco de alias', '&dev'],
+  ])('serializa o domínio no frontmatter quando ele tem %s', (_rotulo, dominio) => {
+    // `tags: [${dominio}]` interpolated by hand is not YAML, it is string concatenation:
+    // `#` opens a comment, `!` opens a tag, `` ` `` is a reserved indicator and a quote
+    // opens a scalar that never closes. js-yaml then refuses the WHOLE block, so the new
+    // MOC is born with no `tipo: moc` at all and the scanner indexes it as an ordinary
+    // note — invisible to `vault_list({tipo:'moc'})` and to the MOC weighting.
+    const moc = buildMoc(dominio, '2026-08-20');
+    const parsed = matter(moc, {});
+    expect(parsed.data['tipo']).toBe('moc');
+    expect(parsed.data['tags']).toEqual([dominio]);
+    expect(moc).toContain('## Notas');
+  });
+});
+
 describe('propagate', () => {
   let tmp = '';
   let vaultRoot = '';
@@ -287,6 +508,248 @@ describe('propagate', () => {
 
   afterEach(async () => {
     await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['vazio', '', 'domínio vazio'],
+    ['longo demais', 'd'.repeat(65), 'domínio longo demais'],
+    ['começando com ponto', '.oculto', 'domínio não pode começar com ponto'],
+    ['com asterisco', 'dev*', 'domínio com caractere não permitido'],
+    ['com dois-pontos', 'c:dev', 'domínio com caractere não permitido'],
+    ['com aspas', 'a"b', 'domínio com caractere não permitido'],
+    ['com barra vertical', 'a|b', 'domínio com caractere não permitido'],
+    ['com sinal de menor', 'a<b', 'domínio com caractere não permitido'],
+    ['com interrogação', 'a?b', 'domínio com caractere não permitido'],
+  ])('recusa um domínio %s sem escrever MOC nem índice', async (_rotulo, dominio, motivo) => {
+    // Each of these clauses can be deleted one at a time with the suite green. The worst is
+    // the filesystem metacharacter: the MOC path is refused further down by the write guard
+    // while the INDEX path is not built from the domain at all, so the index entry is
+    // written pointing at a MOC that was refused and never existed — a permanent broken
+    // link in a file the user reads by hand.
+    const indiceAntes = await fs.readFile(path.join(vaultRoot, INDEX_REL));
+    const wikiAntes = (await fs.readdir(path.join(vaultRoot, '02-wiki'))).sort();
+
+    const res = await propagate({
+      vaultRoot,
+      dominio,
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: true,
+      now: NOW,
+    });
+
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain(motivo);
+    // Only the daily was written, and the index is byte-identical.
+    expect(res.written).toEqual([path.join(vaultRoot, DAILY_REL)]);
+    expect((await fs.readFile(path.join(vaultRoot, INDEX_REL))).equals(indiceAntes)).toBe(true);
+    expect((await fs.readdir(path.join(vaultRoot, '02-wiki'))).sort()).toEqual(wikiAntes);
+    // The learning still happened, so the daily still gets its capture line.
+    expect(await read(vaultRoot, DAILY_REL)).toContain(`- ${NOW_TIME} [[nova-nota]] (gotcha)`);
+  });
+
+  it('aceita um domínio de exatamente 64 caracteres', () => {
+    // The ceiling is a ceiling, not a fence one character in front of it: a length check
+    // written as `>= 64` would refuse a name the vault can perfectly well hold.
+    const dominio = 'd'.repeat(64);
+    return propagate({
+      vaultRoot,
+      dominio,
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: [],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    }).then(async (res) => {
+      expect(res.warnings).toEqual([]);
+      expect(res.written).toContain(path.join(vaultRoot, `02-wiki/${dominio}/${dominio}-moc.md`));
+    });
+  });
+
+  it.each(INVISIVEIS)('recusa um domínio que carrega %s', async (_rotulo, ch) => {
+    // Every range of the shared class, one at a time. Without the range, the domain is
+    // accepted here (or refused for the WRONG reason, which the message pins) and a name
+    // that renders as one thing and writes as another reaches the vault.
+    const res = await propagate({
+      vaultRoot,
+      dominio: `a${ch}b`,
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: [],
+      created: true,
+      domainIsNew: true,
+      now: NOW,
+    });
+
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain('domínio com caractere de controle');
+    expect(res.written).toEqual([path.join(vaultRoot, DAILY_REL)]);
+  });
+
+  it.each(INVISIVEIS)('dobra %s para fora da entrada do MOC', async (_rotulo, ch) => {
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: `antes${ch}depois`,
+      tags: [],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings).toEqual([]);
+    const moc = await read(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    const entradas = moc.split('\n').filter((l) => l.includes('nova-nota'));
+    expect(entradas).toHaveLength(1);
+    expect(entradas[0]).not.toContain(ch);
+  });
+
+  it('cria o índice de conhecimento quando o vault não tem nenhum', async () => {
+    // `buildIndex` is executed by nothing else in the suite. A file born WITHOUT
+    // frontmatter is classified by the scanner as an ordinary `nota` and ranked as prose,
+    // which is the whole reason this branch exists.
+    await fs.rm(path.join(vaultRoot, INDEX_REL));
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'novissimo',
+      slug: 'nova-nota',
+      resumo: 'resumo da nova nota',
+      tags: [],
+      created: true,
+      domainIsNew: true,
+      now: NOW,
+    });
+
+    expect(res.warnings).toEqual([]);
+    expect(res.written).toContain(path.join(vaultRoot, INDEX_REL));
+
+    const indice = await read(vaultRoot, INDEX_REL);
+    const parsed = matter(indice, {});
+    expect(parsed.data['tipo']).toBe('moc');
+    expect(indice).toContain('# Índice de Conhecimento');
+    expect(indice).toContain('## Domínios');
+    expect(indice).toContain('- [[../02-wiki/novissimo/novissimo-moc|novissimo]] — resumo da nova nota');
+    expect(indice).toContain(`atualizado: ${NOW_DATE}`);
+  });
+
+  it('não substitui em silêncio um MOC que não pôde ser lido', async () => {
+    // A 3 GiB sparse file — instant to create and zero blocks on disk. `readFile` refuses
+    // it with ERR_FS_FILE_TOO_LARGE, which is NOT ENOENT. Without the rethrow the target is
+    // treated as "no file yet", `buildMoc` produces a fresh empty MOC and the atomic rename
+    // replaces the user's file with it: data loss, reported as a successful propagation.
+    const mocPath = path.join(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    const handle = await fs.open(mocPath, 'w');
+    await handle.truncate(3 * 1024 * 1024 * 1024);
+    await handle.close();
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: ['gotcha'],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain('nestjs-moc.md');
+    expect(res.written).not.toContain(mocPath);
+    // Untouched: still the same 3 GiB file, not a freshly built MOC.
+    expect((await fs.stat(mocPath)).size).toBe(3 * 1024 * 1024 * 1024);
+
+    // The daily still got its capture.
+    expect(res.written).toContain(path.join(vaultRoot, DAILY_REL));
+  });
+
+  it('não abre um FIFO no lugar do MOC', async () => {
+    // Reading a FIFO nobody writes to never returns. On the single-threaded stdio server
+    // that wedges every later tool call and only a SIGKILL recovers it — and the MOC path
+    // is built from caller input, so it is a path an attacker or a stray `mkfifo` can pick.
+    const mocPath = path.join(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    await fs.rm(mocPath);
+    await execFileAsync('mkfifo', [mocPath]);
+
+    const { result: res, opened } = await withFifoWatch(mocPath, () =>
+      propagate({
+        vaultRoot,
+        dominio: 'nestjs',
+        slug: 'nova-nota',
+        resumo: 'resumo qualquer',
+        tags: ['gotcha'],
+        created: true,
+        domainIsNew: false,
+        now: NOW,
+      }),
+    );
+
+    expect(opened).toBe(false);
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain('nestjs-moc.md');
+    expect(res.written).not.toContain(mocPath);
+    expect((await fs.lstat(mocPath)).isFIFO()).toBe(true);
+    // The daily is a different target and still gets its capture.
+    expect(await read(vaultRoot, DAILY_REL)).toContain(`- ${NOW_TIME} [[nova-nota]] (gotcha)`);
+  });
+
+  it('não abre um FIFO no lugar da daily', async () => {
+    const dailyPath = path.join(vaultRoot, DAILY_REL);
+    await fs.rm(dailyPath);
+    await execFileAsync('mkfifo', [dailyPath]);
+
+    const { result: res, opened } = await withFifoWatch(dailyPath, () =>
+      propagate({
+        vaultRoot,
+        dominio: 'nestjs',
+        slug: 'nova-nota',
+        resumo: 'resumo qualquer',
+        tags: ['gotcha'],
+        created: true,
+        domainIsNew: false,
+        now: NOW,
+      }),
+    );
+
+    expect(opened).toBe(false);
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain(`${NOW_DATE}.md`);
+    expect(res.written).not.toContain(dailyPath);
+    expect((await fs.lstat(dailyPath)).isFIFO()).toBe(true);
+    // The MOC is a different target and was still updated.
+    expect(await read(vaultRoot, '02-wiki/nestjs/nestjs-moc.md')).toContain('[[nova-nota]]');
+  });
+
+  it('não escreve através de um symlink no lugar do MOC', async () => {
+    // The rename of the atomic write lands ON the link, so the alias becomes a regular file
+    // holding the MOC while the file it pointed at never receives the entry.
+    const mocPath = path.join(vaultRoot, '02-wiki/nestjs/nestjs-moc.md');
+    const real = path.join(vaultRoot, '02-wiki/nestjs/moc-real.md');
+    const conteudo = '---\ntipo: moc\n---\n\n# Real\n\n## Notas\n\n';
+    await fs.writeFile(real, conteudo, 'utf8');
+    await fs.rm(mocPath);
+    await fs.symlink('moc-real.md', mocPath);
+
+    const res = await propagate({
+      vaultRoot,
+      dominio: 'nestjs',
+      slug: 'nova-nota',
+      resumo: 'resumo qualquer',
+      tags: [],
+      created: true,
+      domainIsNew: false,
+      now: NOW,
+    });
+
+    expect(res.warnings).toHaveLength(1);
+    expect(res.warnings[0]).toContain('nestjs-moc.md');
+    expect((await fs.lstat(mocPath)).isSymbolicLink()).toBe(true);
+    expect(await read(vaultRoot, '02-wiki/nestjs/moc-real.md')).toBe(conteudo);
   });
 
   it('adds the note to the domain MOC and bumps atualizado when the note is new', async () => {

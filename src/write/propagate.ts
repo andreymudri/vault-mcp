@@ -1,9 +1,9 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Stats } from 'node:fs';
 
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
 import { forMessage, guardedPath, INVISIBLE_CHARS, PathGuardError } from './paths.js';
-import { formatLocal } from './template.js';
+import { ensureFrontmatter, formatLocal } from './template.js';
 
 /**
  * Automatic propagation of a learning into the three places that make it findable again:
@@ -51,7 +51,11 @@ export function bumpAtualizado(content: string, date: string): string {
   if (end === -1) return content;
   const head = content.slice(0, end);
   const rest = content.slice(end);
-  const eol = head.includes('\r\n') ? '\r' : '';
+  // `endsWith` as well as `includes`, for the block that has no properties at all:
+  // `---\r\n---\r\n` is what Obsidian leaves when the user removes every property, and
+  // there `head` is the single line `---\r` — no `\r\n` inside it to find, so the field
+  // was inserted with a bare LF into a file that is CRLF everywhere else.
+  const eol = head.includes('\r\n') || head.endsWith('\r') ? '\r' : '';
   if (/^atualizado:/m.test(head)) {
     // No `eol` here: the match stops before the `\r`, which stays where it was.
     return head.replace(/^atualizado:.*$/m, `atualizado: ${date}`) + rest;
@@ -70,8 +74,17 @@ const HEADING_RE = /^\s{0,3}#{1,6}\s/;
 /** A bullet or ordered list item. */
 const ITEM_RE = /^\s*(?:[-*+]\s|\d+[.)]\s)/;
 
-/** The opening or closing line of a fenced code block. */
-const FENCE_RE = /^\s{0,3}(?:```|~~~)/;
+/**
+ * A fenced code block delimiter: three or more backticks or tildes, indented at most three
+ * spaces, with whatever info string follows captured.
+ *
+ * Both halves are load-bearing. The RUN has to be captured because a fence is closed only by
+ * a marker at least as long as the one that opened it, which is the whole point of writing
+ * ` ````md ` around a block that itself contains ``` — the form a MOC uses to document its
+ * own entry format. And the info string has to be captured because a CLOSING fence carries
+ * none.
+ */
+const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
  * `paths.ts`'s set with `g`, for the two functions that FOLD rather than refuse.
@@ -82,6 +95,20 @@ const FENCE_RE = /^\s{0,3}(?:```|~~~)/;
  */
 const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
+/** An open fence: what closes it is a marker of the same kind, at least this long. */
+interface OpenFence {
+  marker: string;
+  length: number;
+}
+
+/** The delimiter on this line, or `undefined` when the line is ordinary content. */
+function fenceOn(line: string): { marker: string; length: number; info: string } | undefined {
+  const match = FENCE_RE.exec(line);
+  if (match === null) return undefined;
+  const run = match[1] ?? '';
+  return { marker: run[0] ?? '', length: run.length, info: (match[2] ?? '').trim() };
+}
+
 /**
  * Marks every line that sits INSIDE a fenced code block.
  *
@@ -90,19 +117,45 @@ const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
  * section, and the new entry lands inside a code fence where no link resolver will ever
  * see it. Fence state is computed once over the whole file so heading detection, section
  * bounds, the duplicate scan and item detection all agree on it.
+ *
+ * The state is the OPEN FENCE, not a boolean, and that is the fix for a real defect: a
+ * plain toggle counts every delimiter, so the inner ``` of a ` ````md ` block — the exact
+ * shape a MOC uses to show what an entry looks like — closed the outer block. Everything
+ * after it read as ordinary content, a `## Notas` quoted inside the example became the
+ * target heading, and the new entry was written INTO the code block while the real section
+ * stayed empty. Reported as a successful write, with a diff and no warning.
+ *
+ * So a fence closes only on a marker of the SAME kind (a `~~~` inside a ``` block is
+ * content), at least as long as the opener, and with nothing after it — a closing fence
+ * carries no info string. A backtick fence whose info string contains a backtick is not a
+ * fence at all, which is CommonMark's rule and keeps an inline `` `a` `` from opening one.
  */
 function fencedLines(lines: string[]): boolean[] {
   const inFence: boolean[] = new Array<boolean>(lines.length).fill(false);
-  let open = false;
+  let open: OpenFence | undefined;
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? '';
-    if (FENCE_RE.test(line)) {
-      // The fence delimiter itself counts as inside: it is never a heading or an item.
-      inFence[i] = true;
-      open = !open;
+    const fence = fenceOn(lines[i] ?? '');
+    if (fence === undefined) {
+      inFence[i] = open !== undefined;
       continue;
     }
-    inFence[i] = open;
+
+    if (open === undefined) {
+      if (fence.marker === '`' && fence.info.includes('`')) {
+        // Not a fence: an inline code span, or a line that merely starts with backticks.
+        inFence[i] = false;
+        continue;
+      }
+      // The delimiter itself counts as inside: it is never a heading or an item.
+      inFence[i] = true;
+      open = { marker: fence.marker, length: fence.length };
+      continue;
+    }
+
+    inFence[i] = true;
+    if (fence.marker === open.marker && fence.length >= open.length && fence.info === '') {
+      open = undefined;
+    }
   }
   return inFence;
 }
@@ -255,14 +308,7 @@ function capitalize(dominio: string): string {
  * there is one code path that appends an entry rather than two that must agree.
  */
 export function buildMoc(dominio: string, date: string): string {
-  return [
-    '---',
-    'tipo: moc',
-    `tags: [${dominio}]`,
-    `criado: ${date}`,
-    `atualizado: ${date}`,
-    '---',
-    '',
+  const body = [
     `# ${capitalize(dominio)} — Mapa de Conteúdo`,
     '',
     '## Notas',
@@ -272,6 +318,20 @@ export function buildMoc(dominio: string, date: string): string {
     '- [[../../00-index/index-knowledge|índice de conhecimento]]',
     '',
   ].join('\n');
+  // SERIALISED, never interpolated. `tags: [${dominio}]` is string concatenation wearing
+  // YAML's clothes, and `dominioProblem` accepts `#`, `%`, `@`, `!`, quotes and a backtick:
+  // `#` opens a comment, `!` opens a tag, a backtick is a reserved indicator and a quote
+  // opens a scalar that never closes. js-yaml then refuses the WHOLE block, so the new MOC
+  // is born with no `tipo: moc` at all and the scanner files it as an ordinary note —
+  // invisible to `vault_list({tipo:'moc'})` and to every weighting that reads the type. A
+  // comma is the quiet version of the same bug: `tags: [a,b]` is two tags.
+  // `writer.ts` already builds every note's block this way.
+  return ensureFrontmatter(body, {
+    tipo: 'moc',
+    tags: [dominio],
+    criado: date,
+    atualizado: date,
+  });
 }
 
 /** A brand new daily note, with an empty `## Capturas` for the capture line to land in. */
@@ -376,6 +436,15 @@ export interface PropagateResult {
   warnings: string[];
 }
 
+/** `lstat` of a path, or `undefined` when nothing is there. */
+async function lstatOrUndefined(absPath: string): Promise<Stats | undefined> {
+  try {
+    return await fs.lstat(absPath);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Everything one target needs, so the read/transform/write/report dance lives in one place. */
 interface Target {
   relPath: string;
@@ -403,16 +472,32 @@ async function applyTarget(
   try {
     const absPath = await guardedPath(vaultRoot, target.relPath);
 
+    // Asked BEFORE anything is opened, and by `lstat`, which answers for the NAME rather
+    // than for whatever it points at. `readFile` follows a symlink — onto a FIFO it never
+    // returns from, on the single thread that serves every tool call, which wedges every
+    // later call until the process is killed — and `atomicWrite`'s rename lands ON a link
+    // instead of through it, so the user's alias becomes a regular file holding a divergent
+    // copy. Neither is a file this module may touch, and both paths here are built from
+    // caller-supplied input. `learn.ts`'s `pathState` draws the same line for the same
+    // reason and the two must not disagree.
+    const stat = await lstatOrUndefined(absPath);
+    if (stat !== undefined && !stat.isFile()) {
+      throw new PathGuardError('alvo não é um arquivo comum (link, diretório ou dispositivo)');
+    }
+
     let before = '';
-    let exists = true;
-    try {
-      before = await fs.readFile(absPath, 'utf8');
-    } catch (err) {
-      // ENOENT is the ordinary "create it" case. Anything else — a directory in the way,
-      // a permission problem — is a real failure and must be reported, not papered over
-      // by writing a fresh file on top of whatever is actually there.
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      exists = false;
+    let exists = stat !== undefined;
+    if (exists) {
+      try {
+        before = await fs.readFile(absPath, 'utf8');
+      } catch (err) {
+        // ENOENT is the ordinary "create it" case — here only as a race, since `lstat` just
+        // saw the file. Anything else — a file too large to read, a permission problem — is
+        // a real failure and must be reported, not papered over by writing a fresh file on
+        // top of whatever is actually there.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        exists = false;
+      }
     }
 
     // A ZERO-BYTE note is not a note: Obsidian's daily-note plugin with an empty template
