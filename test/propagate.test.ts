@@ -426,6 +426,59 @@ describe('insertUnderSection e cercas de código', () => {
     expect(lines.indexOf('- [[b]] — dois')).toBe(lines.indexOf('- [[a]] — um') + 1);
   });
 
+  it('não deixa um delimitador com info string fechar a cerca', () => {
+    // CommonMark: a CLOSING fence carries no info string. Dropping that clause does not merely
+    // close the block early — it inverts every fence after it, because the delimiter that really
+    // did close it then OPENS a new one. Here the sample entry escapes the example and becomes a
+    // real item, and the section's actual list disappears inside a fence that never closes.
+    const before = [
+      '## Notas',
+      '',
+      '```md',
+      '## Notas',
+      '```js',
+      '- [[falso]] — dentro do exemplo',
+      '```',
+      '',
+      '- [[a]] — um',
+      '',
+      '## Fim',
+      '',
+    ].join('\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+    const linhas = after.split('\n');
+
+    expect(linhas.indexOf('- [[b]] — dois')).toBe(linhas.indexOf('- [[a]] — um') + 1);
+    expect(linhas.filter((l) => l === '- [[falso]] — dentro do exemplo')).toHaveLength(1);
+    // The example block came out byte-identical, delimiters included.
+    expect(after).toContain('```md\n## Notas\n```js\n- [[falso]] — dentro do exemplo\n```\n');
+  });
+
+  it('não abre cerca numa linha cuja info string tem crase', () => {
+    // CommonMark again: the info string of a BACKTICK fence may not contain a backtick, because
+    // that line is an inline code span or ordinary prose, not a fence. A MOC that shows the entry
+    // format in one line — three backticks, then a phrase with `crases` in it — otherwise opens a
+    // block that nothing ever closes, and every real item below it becomes invisible: the entry
+    // lands directly under the heading, above the list it belongs at the end of.
+    const before = [
+      '## Notas',
+      '',
+      '```md `assim` fica uma entrada',
+      '',
+      '- [[a]] — um',
+      '',
+      '## Fim',
+      '',
+    ].join('\n');
+
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+    const linhas = after.split('\n');
+
+    expect(linhas.indexOf('- [[b]] — dois')).toBe(linhas.indexOf('- [[a]] — um') + 1);
+    expect(linhas.filter((l) => l === '```md `assim` fica uma entrada')).toHaveLength(1);
+  });
+
   it('fecha a cerca cujo delimitador tem espaços em branco no fim', () => {
     // CommonMark allows trailing whitespace on both delimiters, and Obsidian leaves it behind
     // whenever a line is edited. A closing fence read as having an info string never closes,

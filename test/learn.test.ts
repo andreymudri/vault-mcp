@@ -1230,6 +1230,12 @@ describe('learn - o insight nunca se perde', () => {
     // The classification runs BEFORE anything is opened. Without it the first thing to touch the
     // target is `readFile`, which follows the link onto a FIFO and never returns — the collision
     // guard further down cannot help here, because this target comes from the duplicate rule.
+    //
+    // Watched rather than merely timed out: a bare timeout makes the REGRESSION print a failure
+    // and then hang the runner, because the pending read keeps the worker alive and vitest ends
+    // in "close timed out". Reproduced in this task's own mutation runs, twice. `opened` is the
+    // assertion; the outcome assertions below are what say the code reached the target and
+    // refused it rather than never getting there.
     const cano = path.join(path.dirname(vaultRoot), 'cano-alvo');
     await execFileAsync('mkfifo', [cano]);
     const alias = '02-wiki/nestjs/alias-cano.md';
@@ -1238,22 +1244,26 @@ describe('learn - o insight nunca se perde', () => {
       search: () => ({ results: [scored(alias, 10, ['bullmq'])] }),
     } as unknown as Retriever;
 
-    const result = await learn({
-      vaultRoot,
-      retriever,
-      titulo: 'Retry de worker BullMQ',
-      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
-      contexto: 'Investigando a fila',
-      dominio: 'nestjs',
-      tags: ['bullmq'],
-      now: NOW,
-    });
+    const { result, opened } = await withFifoWatch(cano, () =>
+      learn({
+        vaultRoot,
+        retriever,
+        titulo: 'Retry de worker BullMQ',
+        insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+        contexto: 'Investigando a fila',
+        dominio: 'nestjs',
+        tags: ['bullmq'],
+        now: NOW,
+      }),
+    );
 
+    expect(opened).toBe(false);
     expect(result.action).toBe('created');
     expect(result.path).toBe('02-wiki/nestjs/retry-de-worker-bullmq.md');
     expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
     expect(result.warning).toContain(alias);
-  }, 15_000);
+    expect((await fs.lstat(cano)).isFIFO()).toBe(true);
+  }, 30_000);
 
   it('grava o aprendizado quando a guarda de escrita recusa o alvo da regra', async () => {
     // A target that classifies as an ordinary note and is then refused by `writeNote`'s own guards
@@ -1287,8 +1297,12 @@ describe('learn - o insight nunca se perde', () => {
   it('grava o aprendizado quando o alvo da regra de duplicata não é uma nota', async () => {
     // A directory standing where a note should be cannot take the text, so the append is refused
     // and the learning takes the note's own free name. Nothing opens the directory: the classifier
-    // answers from `lstat` alone, which is what keeps a FIFO in the same position from wedging the
-    // whole server.
+    // answers from `lstat` alone.
+    //
+    // This one is NOT a FIFO test and is deliberately not watched by `withFifoWatch`: a directory
+    // cannot block a reader, so there is no hang for the helper to prevent and nothing for it to
+    // observe. The FIFO in this same position is pinned by 'não abre o alvo da regra de duplicata
+    // antes de classificá-lo' above, which is watched.
     //
     // The retriever is a stub because the real one CANNOT produce this state: the scanner never
     // indexes a directory as a note, so nothing else can route an append onto one.
@@ -2039,22 +2053,28 @@ describe('learn - nada e removido do disco', () => {
     // Reading a FIFO never returns. On a single-threaded stdio server that is the whole process,
     // and the path merely LOOKS like a note - so nothing may open it, neither to judge whether it
     // is blank nor to append to it.
+    //
+    // Watched rather than merely timed out, for the reason the other FIFO tests give: a bare
+    // timeout turns a regression into a hung runner that prints a failure and never exits.
     const fifo = path.join(vaultRoot, '02-wiki/patterns/cache-wrapper-ttl.md');
     await execFileAsync('mkfifo', [fifo]);
 
-    const result = await learn({
-      vaultRoot,
-      retriever: makeRetriever(vaultRoot),
-      titulo: 'Cache Wrapper TTL',
-      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
-      contexto: 'Revisando o wrapper de cache',
-      dominio: 'patterns',
-      tags: ['redis', 'cache'],
-      now: NOW,
-    });
+    const { result, opened } = await withFifoWatch(fifo, () =>
+      learn({
+        vaultRoot,
+        retriever: makeRetriever(vaultRoot),
+        titulo: 'Cache Wrapper TTL',
+        insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+        contexto: 'Revisando o wrapper de cache',
+        dominio: 'patterns',
+        tags: ['redis', 'cache'],
+        now: NOW,
+      }),
+    );
 
+    expect(opened).toBe(false);
     expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
     expect(await read(vaultRoot, result.path)).toContain('TTL configuravel');
     expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
-  }, 15_000);
+  }, 30_000);
 });
