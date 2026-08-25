@@ -91,15 +91,15 @@ git revert <commit-hash>
 
 ## Ajustando o Ranking
 
-`test/golden-queries.test.ts` é a rede de regressão do scoring. Qualquer mudança nos seguintes parâmetros precisa passar nesse teste:
+Qualquer mudança nos seguintes parâmetros precisa passar na suíte completa: `npm test`. Cada constante é pinada em um local específico:
 
-- **`FIELD_WEIGHTS`** (`src/index/inverted-index.ts`): `heading: 3.0, tags: 2.0, prose: 1.0, code: 0.5`. Peso na frequência de cada campo.
-- **`NOTE_TYPE_WEIGHTS`** (`src/index/inverted-index.ts`): `moc: 0.3, daily: 0.3`. Multiplica o score final de notas do tipo MOC ou daily. Existe porque essas notas repetem a query em chunks curtos — sem o fator, o MOC supera a nota apontada.
-- **`GRAPH_DAMPING`** (`src/retrieval/budget.ts`): `0.4`. Multiplica o score de vizinhos do grafo — notas linkadas. Um salto, não múltiplos.
-- **`K1`** e **`B`** (`src/index/bm25.ts`): `1.2` e `0.75`. Parâmetros do BM25.
-- **`DUPLICATE_SCORE_RATIO`** (`src/write/learn.ts`): `1.8`. Razão mínima entre topo e segundo colocado para anexar.
+- **`FIELD_WEIGHTS`** (`src/index/inverted-index.ts`): `heading: 3.0, tags: 2.0, prose: 1.0, code: 0.5`. Peso na frequência de cada campo. Pinado em `test/bm25.test.ts`.
+- **`NOTE_TYPE_WEIGHTS`** (`src/index/inverted-index.ts`): `moc: 0.3, daily: 0.3`. Multiplica o score final de notas do tipo MOC ou daily. Existe porque essas notas repetem a query em chunks curtos — sem o fator, o MOC supera a nota apontada. Pinado em `test/golden-queries.test.ts` e `test/retrieval.test.ts`.
+- **`GRAPH_DAMPING`** (`src/retrieval/budget.ts`): `0.4`. Multiplica o score de vizinhos do grafo — notas linkadas. Um salto, não múltiplos. Pinado em `test/retrieval.test.ts:522`.
+- **`K1`** e **`B`** (`src/index/bm25.ts`): `1.2` e `0.75`. Parâmetros do BM25. Pinado em `test/bm25.test.ts:232-233`.
+- **`DUPLICATE_SCORE_RATIO`** (`src/write/learn.ts`): `1.8`. Razão mínima entre topo e segundo colocado para anexar. Pinado em `test/learn.test.ts:336`.
 
-Rodar os testes:
+Rodar a suíte completa:
 ```bash
 npm test
 ```
@@ -112,7 +112,7 @@ Escritas são recusadas para:
 - Symlinks (resolvidos antes de escrever)
 - Hard links
 
-Dois `vault_learn` ou `vault_write_note` concorrentes não interleave: cada escrita espera a anterior terminar, com timeout de 60 segundos.
+**Dentro de uma única instância do servidor**, dois `vault_learn` ou `vault_write_note` concorrentes não interleave: cada escrita espera a anterior terminar, com timeout de 60 segundos. Isto NÃO protege contra escritas simultâneas do Obsidian, de uma segunda instância do servidor, ou de um `git checkout` no vault.
 
 ## Busca e Recuperação
 
