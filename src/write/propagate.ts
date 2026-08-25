@@ -1,9 +1,8 @@
 import { promises as fs } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
-import { resolveWritePath, assertNoSymlinkEscape, PathGuardError } from './paths.js';
+import { forMessage, guardedPath, INVISIBLE_CHARS, PathGuardError } from './paths.js';
 import { formatLocal } from './template.js';
 
 /**
@@ -75,27 +74,12 @@ const ITEM_RE = /^\s*(?:[-*+]\s|\d+[.)]\s)/;
 const FENCE_RE = /^\s{0,3}(?:```|~~~)/;
 
 /**
- * Every C0 control, DEL, every C1 control, the two Unicode separators, and every bidi
- * control and zero-width format character.
+ * `paths.ts`'s set with `g`, for the two functions that FOLD rather than refuse.
  *
- * The same set `write/writer.ts`'s `CONTROL_CHARS` refuses and `write/diff.ts`'s
- * `headerPath` escapes, and the three MUST NOT DRIFT. Here it does two jobs: it refuses a
- * `dominio` carrying any of them, and it folds them out of the free prose (`resumo`,
- * `slug`, `projeto`) that gets spliced into a markdown line.
- *
- * Line breaks are the obvious half — a `resumo` with a `\n` turns one MOC entry into a
- * broken link plus orphan lines that stay in the user's index forever — and U+0085,
- * U+2028 and U+2029 break lines in every HTML-rendering client even though `split('\n')`
- * sees one line. The other half breaks no line at all: the bidi controls REORDER what
- * follows them and the zero-width formats render as nothing, so an entry can read as one
- * thing in Obsidian and name another on disk.
+ * Derived from the shared source rather than written out again: the same characters that
+ * make a path unwritable make a MOC entry unreadable, and the two answers drifting apart
+ * is how a `resumo` this module accepts becomes a line the user cannot check.
  */
-// eslint-disable-next-line no-control-regex
-const INVISIBLE_CHARS =
-  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
-
-/** The same set with `g`, for the two functions that fold rather than refuse. */
-// eslint-disable-next-line no-control-regex
 const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
 /**
@@ -343,148 +327,6 @@ function buildIndex(date: string): string {
  */
 function oneLine(text: string): string {
   return text.replace(INVISIBLE_CHARS_GLOBAL, ' ').replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Renders a path or a domain inside a warning WITHOUT letting it forge lines.
- *
- * The warning is concatenated into the tool response the user reads, and a `dominio` of
- * `../.. tudo propagado com sucesso` produced a message whose second rendered line read
- * as a success report attached to a write that was actually REFUSED. `diff.ts`'s
- * `headerPath` escapes for exactly this reason and this is the same lock on the other
- * exported surface: refusing the input is not enough on its own, because the input has to
- * be NAMED in the refusal for the message to be worth anything.
- */
-function forMessage(text: string): string {
-  return text.replace(INVISIBLE_CHARS_GLOBAL, (ch) => {
-    if (ch === '\n') return '\\n';
-    if (ch === '\r') return '\\r';
-    if (ch === '\t') return '\\t';
-    const code = ch.charCodeAt(0);
-    return code <= 0xff
-      ? `\\x${code.toString(16).padStart(2, '0')}`
-      : `\\u${code.toString(16).padStart(4, '0')}`;
-  });
-}
-
-/**
- * Directory names that are MACHINE STATE, not vault content, matched as a whole path
- * segment at any depth.
- *
- * `resolveWritePath`'s `DENIED_PREFIXES` answers a DIFFERENT question — which top-level
- * areas of the vault are read-only (`99-archive/`, `_templates/`) — and it left `.git/`
- * wide open here exactly as it did in `writer.ts`: a `dominio` of `../.git/refs/heads`
- * resolves to a path still inside the vault, whose first segment is `02-wiki`, and the
- * MOC was written into the repository's loose refs. `git fsck` then reported
- * `badRefName`, and through an in-vault symlink (`02-wiki/compartilhado →
- * ../.git/refs/heads`, which a user or a sync client can create) the same write landed in
- * `refs/heads/` and made `git log --all` and `git gc` fail outright with
- * `fatal: bad object`. That is not a file the user can delete and move on from: it breaks
- * every subsequent git operation, including the commit `vault_learn` is about to make.
- *
- * NOTE, and it is a real one: this DUPLICATES `writer.ts`'s `DENIED_SEGMENTS`,
- * `normalizeSegment`, `pathSegments` and the guard order of its `guardedPath`. The check
- * belongs in `paths.ts` beside `DENIED_PREFIXES`, so that one boundary serves every
- * writer — `writer.ts` says the same thing in its own docblock. Neither `paths.ts` nor
- * `writer.ts` is in this task's file set, so the guard is reimplemented at the only other
- * point every propagation write passes through, because the alternative is `propagate`
- * accepting input `writeNote` refuses against the same vault. FOLLOW-UP for a later
- * phase: move `DENIED_SEGMENTS` + `pathSegments` into `paths.ts` and have both writers
- * call it, deleting this copy and `writer.ts`'s.
- */
-const DENIED_SEGMENTS = new Set(['.git', '.obsidian', 'node_modules', '_templates']);
-
-/**
- * A path segment as the FILESYSTEM will compare it, not as the string was typed.
- *
- * `.git` is one directory under several spellings: case-insensitive on APFS and on every
- * Windows volume, and Windows strips trailing dots and spaces from a component before it
- * reaches the filesystem, so `.GIT`, `.Git`, `.git.` and `.git ` all open the real one
- * while `Set.has('.git')` answers false for every one of them. Normalising on every
- * platform is deliberate: a vault is synced between machines, so what this Linux process
- * considers legal will be checked out on the macOS laptop too.
- */
-function normalizeSegment(segment: string): string {
-  return segment.replace(/[. ]+$/, '').toLowerCase();
-}
-
-/**
- * The segments of `absPath` both LEXICALLY and after every symlink on the way has been
- * followed, relative to the vault's own real root.
- *
- * Both, and a denied segment in either refuses the write. The lexical path is not the
- * path that gets written — `02-wiki/compartilhado/x-moc.md` carries no `.git` segment for
- * a string check to find, yet lands in `<vault>/.git/refs/heads/` when `compartilhado` is
- * a link — and the resolved path is not the path the caller MEANT: `.git` could itself be
- * a symlink to an innocent directory, and honouring that would let a path the user plainly
- * meant as the repository through on the strength of a link the repository never had.
- */
-async function pathSegments(vaultRoot: string, absPath: string): Promise<string[]> {
-  const lexicalRoot = resolve(vaultRoot);
-  const segments = relative(lexicalRoot, absPath).split(sep);
-
-  let realRoot: string;
-  try {
-    realRoot = await fs.realpath(lexicalRoot);
-  } catch {
-    // A vault root that cannot be resolved is `assertNoSymlinkEscape`'s error to raise,
-    // with its own message. Here it just means there is nothing more to add.
-    return segments;
-  }
-
-  // Walk up to the deepest ancestor that exists — a new domain's directory does not yet —
-  // realpath it, and put the not-yet-existing tail back on the end.
-  let head = absPath;
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      head = await fs.realpath(head);
-      break;
-    } catch {
-      const parent = dirname(head);
-      if (parent === head) return segments;
-      tail.unshift(basename(head));
-      head = parent;
-    }
-  }
-
-  const resolved = tail.length === 0 ? head : join(head, ...tail);
-  return [...segments, ...relative(realRoot, resolved).split(sep)];
-}
-
-/**
- * Every half of the path guard, in the order they have to run — the same guard
- * `writer.ts` applies to `writeNote`.
- *
- * Symmetry between the two exported write paths is the point. `propagate` writes files
- * whose paths are built from caller-supplied input just as `writeNote` does, and a
- * `dominio` that `writeNote` refuses must not be a `dominio` `propagate` accepts: one
- * lenient writer is enough to put a file in `.git/refs/heads/` and break the repository
- * for every other writer.
- */
-async function guardedPath(vaultRoot: string, relPath: string): Promise<string> {
-  // First, before any `fs` call and before `resolveWritePath` interpolates the string into
-  // a message: a NUL makes `fs` throw its own `TypeError` from inside the write.
-  if (INVISIBLE_CHARS.test(relPath)) {
-    throw new PathGuardError(
-      `caminho não pode conter caractere de controle: ${forMessage(relPath)}`,
-    );
-  }
-
-  const absPath = resolveWritePath(vaultRoot, relPath);
-
-  // Segment-wise, on the RESOLVED path as well as the lexical one. Whole segments, not
-  // string prefixes, so an ordinary note under `02-wiki/git/` stays legal.
-  for (const segment of await pathSegments(vaultRoot, absPath)) {
-    if (DENIED_SEGMENTS.has(normalizeSegment(segment))) {
-      throw new PathGuardError(
-        `escrita negada em ${forMessage(segment)}/ (área interna, não é conteúdo)`,
-      );
-    }
-  }
-
-  await assertNoSymlinkEscape(vaultRoot, absPath);
-  return absPath;
 }
 
 /**

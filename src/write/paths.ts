@@ -1,7 +1,121 @@
-import { resolve, relative, sep, isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promises as fs } from 'node:fs';
 
 export const DENIED_PREFIXES = ['99-archive', '_templates'] as const;
+
+/**
+ * Directory names that are MACHINE STATE, not vault content, matched as a whole path
+ * segment at any depth.
+ *
+ * `DENIED_PREFIXES` above is about READ-ONLY AREAS of the vault (`99-archive/`,
+ * `_templates/`) and only looks at the first segment. That is a different question from
+ * this one, and it left `.git/` wide open: `writeNote({path: '.git/refs/heads/pwn.md'})`
+ * created the file and reported success, after which `git gc`, `git log --all` and
+ * `git fsck` all failed on the user's real vault with `badRefContent`. A malformed loose
+ * ref is not a note the user can delete and move on from — it breaks every subsequent git
+ * operation, including the commits this server makes itself.
+ *
+ * The set is the ignore list T6's scanner uses. That is deliberate: a path the indexer
+ * will never read is a path this server has no business writing, and the two disagreeing
+ * is how a note becomes permanently invisible. Nothing enforces the agreement — the
+ * scanner keeps its own list — so the two have to be changed together by hand.
+ *
+ * It lives HERE, beside `DENIED_PREFIXES`, and every writer reaches it through
+ * `guardedPath`. It used to live TWICE, once in `writer.ts` and once in `propagate.ts`,
+ * because neither task that added it was allowed to touch this file. The two copies were
+ * equivalent and the whole risk was that one day they would not be: one lenient writer is
+ * enough to put a file in `.git/refs/heads/` and break the repository for every other one.
+ */
+export const DENIED_SEGMENTS: ReadonlySet<string> = new Set([
+  '.git',
+  '.obsidian',
+  'node_modules',
+  '_templates',
+]);
+
+/**
+ * Every C0 control, DEL, every C1 control, the two Unicode separators, and every bidi
+ * control and zero-width format character — under ONE name, for the two modules that
+ * refuse it and the one that folds it.
+ *
+ * A newline in a filename is not merely odd, it FORGES REPORTS. `unifiedDiff` labels its
+ * output `--- a/<path>`, and a path carrying a newline followed by `+++ b/CLAUDE.md`, a
+ * hunk header and a pair of `-`/`+` lines produced a diff containing a complete,
+ * fabricated hunk attributing an edit to a file that was never opened. The same string
+ * reaches `commitFiles` as a commit message subject. A user reading either has no way to
+ * tell the forged lines from the real ones.
+ *
+ * `write/diff.ts`'s `headerPath` escapes this same set — this is the outer lock, refusing
+ * the input rather than rendering it, because a path no legitimate note ever has is better
+ * rejected than sanitised into something the user did not ask for. The two are NOT
+ * redundant and neither may be dropped: this one rejects, that one escapes, and each has
+ * to hold on its own — `unifiedDiff` is exported to callers that never pass through here,
+ * and a path can reach a commit message without ever reaching a diff. NUL matters
+ * separately again: it makes `fs` throw a bare `TypeError` from deep inside the write
+ * instead of a `PathGuardError` the tool layer knows how to report.
+ *
+ * It is not just the C0 range for two separate reasons, and the second was missed when
+ * only the first was fixed. Line breaks: a path carrying U+2028, U+2029 or U+0085 is ONE
+ * line to `split()` — but CSS Text 3 makes all three FORCED LINE BREAKS in any
+ * HTML-rendering client, so such a path shipped raw and rendered as a complete fabricated
+ * hunk in the user's client. `git log --format=%B` showed the injected lines too: the same
+ * string is the commit message subject.
+ *
+ * And characters that are INVISIBLE or REORDER what is around them. These break no line,
+ * which is exactly why widening the set to the forced-break characters left every one of
+ * them through: a name wrapped in U+202E and U+202C is one line by every reader's
+ * definition, and in any bidi-aware renderer — a chat client, a terminal, Obsidian's file
+ * list, `git log` — it reads back to front while the write lands somewhere else entirely.
+ * The same string reaches `WriteResult.diff`, `WriteResult.path` and the commit subject,
+ * so all three showed the user a filename that was not the file on disk.
+ *
+ * `propagate.ts` uses the very same set for a second job — folding the free prose it
+ * splices into a single markdown line — which is why this is exported rather than private.
+ */
+// eslint-disable-next-line no-control-regex
+export const INVISIBLE_CHARS =
+  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+
+/**
+ * A path segment as the FILESYSTEM will compare it, not as the string was typed.
+ *
+ * `.git` is one directory under several spellings, and the guard has to see all of them.
+ * On macOS's HFS+/APFS and on every Windows volume the comparison is case-insensitive, so
+ * `.GIT/` and `.Git/` open the real `.git`. Windows additionally STRIPS trailing dots and
+ * spaces from a component before it reaches the filesystem, so `.git./` and `.git /` open
+ * it too — all four were confirmed creatable, and each one of them arrives here as a
+ * string that `Set.has('.git')` answers `false` for.
+ *
+ * Normalising on every platform rather than only where it matters is deliberate: a vault is
+ * a directory a user syncs between machines, so a note this Linux process considers legal
+ * is a note that will be checked out on the macOS laptop too. The cost of the extra
+ * strictness is a directory literally named `.Git` that holds notes, which no vault has.
+ */
+export function normalizeSegment(segment: string): string {
+  return segment.replace(/[. ]+$/, '').toLowerCase();
+}
+
+/**
+ * Renders a caller-influenced string inside a message WITHOUT letting it forge a line.
+ *
+ * Naming the refused input is the whole value of a guard message, and the refusal is
+ * concatenated into the tool response the user reads. A `dominio` of `../.. tudo propagado
+ * com sucesso` produced a message whose second rendered line read as a success report
+ * attached to a write that was actually REFUSED. Refusing the input is not enough on its
+ * own, because the input has to be NAMED in the refusal for the message to be worth
+ * anything.
+ */
+export function forMessage(text: string): string {
+  return text.replace(new RegExp(INVISIBLE_CHARS.source, 'g'), (ch) => {
+    if (ch === '\n') return '\\n';
+    if (ch === '\r') return '\\r';
+    if (ch === '\t') return '\\t';
+    const code = ch.charCodeAt(0);
+    return code <= 0xff
+      ? `\\x${code.toString(16).padStart(2, '0')}`
+      : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
+}
 
 export class PathGuardError extends Error {}
 
@@ -75,4 +189,97 @@ export async function assertNoSymlinkEscape(vaultRoot: string, abs: string): Pro
   if (rel.startsWith('..')) {
     throw new PathGuardError(`symlink apontaria para fora do vault: ${abs}`);
   }
+}
+
+/**
+ * The segments of `absPath` LEXICALLY and as they exist AFTER every symlink on the way has
+ * been followed, relative to the vault's own real root.
+ *
+ * Both, and a denied segment in EITHER refuses the write. The lexical path is not the path
+ * that gets written: an in-vault symlink `02-wiki/compartilhado -> ../.git/refs/heads` is
+ * not an escape — it stays inside the vault, so `assertNoSymlinkEscape` passes it — and
+ * `02-wiki/compartilhado/pwn.md` carries no `.git` segment for a string check to find, yet
+ * the write lands in `<vault>/.git/refs/heads/pwn.md` and breaks every subsequent git
+ * operation exactly as the plain `.git/refs/heads/pwn.md` did. And the resolved path is not
+ * the path the caller MEANT: `.git` could itself be a symlink to an innocent directory, and
+ * honouring that would let `.git/x.md` — a path the user plainly meant as the repository —
+ * through on the strength of a link the repository never had.
+ *
+ * `assertNoSymlinkEscape` already realpaths the deepest existing ancestor, and this walks
+ * the same ground for a different question: is the RESOLVED path in a denied directory,
+ * rather than is it outside the vault.
+ */
+async function pathSegments(vaultRoot: string, absPath: string): Promise<string[]> {
+  const lexicalRoot = resolve(vaultRoot);
+  const segments = relative(lexicalRoot, absPath).split(sep);
+
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(lexicalRoot);
+  } catch {
+    // A vault root that cannot be resolved is `assertNoSymlinkEscape`'s error to raise,
+    // with its own message. Here it just means there is nothing more to add.
+    return segments;
+  }
+
+  // Walk up to the deepest ancestor that exists — a new note's own directories may not
+  // exist yet — realpath it, and put the not-yet-existing tail back on the end.
+  let head = absPath;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      head = await fs.realpath(head);
+      break;
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return segments;
+      tail.unshift(basename(head));
+      head = parent;
+    }
+  }
+
+  const resolved = tail.length === 0 ? head : join(head, ...tail);
+  return [...segments, ...relative(realRoot, resolved).split(sep)];
+}
+
+/**
+ * EVERY half of the path guard, in the order they have to run — the one entry point every
+ * write in this directory passes through.
+ *
+ * `resolveWritePath` is purely SYNTACTIC: it rejects `..`, absolute paths, non-`.md`, glob
+ * metacharacters and the read-only prefixes by reading the string. It cannot see a symlink,
+ * and `02-wiki/atalho/nota.md` is a perfectly well-formed vault-relative path even when
+ * `02-wiki/atalho` is a link to `/etc`. `assertNoSymlinkEscape` is another half, the
+ * segment scan a third, and calling only some of them is the mistake this function exists
+ * to make impossible for its callers.
+ *
+ * Symmetry between the exported write paths is the point of having exactly ONE of these:
+ * `propagate` writes files whose paths are built from caller-supplied input just as
+ * `writeNote` does, and a path `writeNote` refuses must not be a path `propagate` accepts.
+ */
+export async function guardedPath(vaultRoot: string, relPath: string): Promise<string> {
+  // First, before any `fs` call and before `resolveWritePath` interpolates the string into
+  // a message: a NUL makes `fs` throw its own `TypeError` from inside the write.
+  if (INVISIBLE_CHARS.test(relPath)) {
+    throw new PathGuardError(
+      `caminho não pode conter caractere de controle: ${forMessage(relPath)}`,
+    );
+  }
+
+  const absPath = resolveWritePath(vaultRoot, relPath);
+
+  // Segment-wise, on the RESOLVED path as well as the lexical one, so `02-wiki/./.git/x.md`
+  // and a link that lands in `.git` are both caught. Matching whole segments and not string
+  // prefixes is what keeps an ordinary note at `02-wiki/git/rebase-interativo.md` legal,
+  // exactly as `99-archive-notes/` stays legal beside the denied `99-archive/`.
+  for (const segment of await pathSegments(vaultRoot, absPath)) {
+    if (DENIED_SEGMENTS.has(normalizeSegment(segment))) {
+      throw new PathGuardError(
+        `escrita negada em ${forMessage(segment)}/ (área interna, não é conteúdo)`,
+      );
+    }
+  }
+
+  await assertNoSymlinkEscape(vaultRoot, absPath);
+  return absPath;
 }

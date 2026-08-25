@@ -7,7 +7,7 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { ScoredChunk } from '../types.js';
 import { commitFiles } from './git.js';
-import { resolveWritePath } from './paths.js';
+import { INVISIBLE_CHARS, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
 import { editNote, writeNote, type WriteResult } from './writer.js';
@@ -78,18 +78,14 @@ const MAX_SLUG_CHARS = 80;
 const MAX_RESUMO_CHARS = 120;
 
 /**
- * Every C0 control, DEL, every C1 control, the two Unicode separators, and every bidi control
- * and zero-width format character — the same set `write/writer.ts` and `write/propagate.ts`
- * refuse, and it must not drift from them.
+ * `paths.ts`'s set with `g`: the ONE list of characters this directory refuses in a path
+ * and folds out of a line, derived from the shared source rather than written out again.
  *
- * Here it folds the free text that gets spliced into a single line (the section heading, the
- * commit subject, a link name) and refuses a `dominio` outright. A `titulo` carrying a newline
- * turns one commit subject into a forged multi-line message; one carrying U+202E reads in the
- * user's client as a name that is not the file on disk.
+ * Here it folds the free text that gets spliced into a single line (the section heading,
+ * the commit subject, a link name) and refuses a `dominio` outright. A `titulo` carrying a
+ * newline turns one commit subject into a forged multi-line message; one carrying U+202E
+ * reads in the user's client as a name that is not the file on disk.
  */
-// eslint-disable-next-line no-control-regex
-const INVISIBLE_CHARS =
-  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
 /**
