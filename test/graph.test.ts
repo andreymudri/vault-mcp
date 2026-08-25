@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { LinkGraph } from '../src/graph/graph.js';
+import type { Note } from '../src/types.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
@@ -113,5 +114,30 @@ describe('LinkGraph.build', () => {
     expect(graph.backlinks(CACHE_WRAPPER)).not.toContain(POTENTIA_README);
     // O link para auth-guard.md permanece intacto na mesma nota.
     expect(graph.backlinks(AUTH_GUARD)).toContain(POTENTIA_README);
+  });
+
+  it('neighbors exclui o próprio caminho quando a nota linka para si mesma', () => {
+    // Cenário real: 02-wiki/docker/multi-stage.md menciona "[[multi-stage]]" na própria
+    // prosa. Nenhuma nota da fixture faz isso hoje, então esse Note é construído em memória
+    // para exercitar de fato o ramo de auto-exclusão de `neighbors` — sem essa nota,
+    // `neighbors(path) !== path` nunca é realmente testado, porque `path` nunca aparece como
+    // seu próprio alvo de link em `test/fixtures/vault/`.
+    const selfLinking: Note = {
+      path: '02-wiki/docker/multi-stage.md',
+      title: 'multi-stage',
+      frontmatter: {},
+      body: '',
+      links: ['02-wiki/docker/multi-stage.md'],
+      brokenLinks: [],
+      mtimeMs: 0,
+    };
+
+    const graph = new LinkGraph();
+    graph.build([selfLinking]);
+
+    expect(graph.outLinks(selfLinking.path)).toEqual([selfLinking.path]);
+    expect(graph.backlinks(selfLinking.path)).toEqual([selfLinking.path]);
+    expect(graph.neighbors(selfLinking.path)).not.toContain(selfLinking.path);
+    expect(graph.neighbors(selfLinking.path)).toEqual([]);
   });
 });
