@@ -68,6 +68,9 @@ async function makeVault(withGit = true): Promise<string> {
     await git(vaultRoot, ['config', 'user.name', 'Vault MCP Test']);
     await git(vaultRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
     await git(vaultRoot, ['config', 'commit.gpgsign', 'false']);
+    // `git gc --auto` runs in the BACKGROUND after a commit and keeps writing into `.git`
+    // after this process has moved on, which races the teardown below.
+    await git(vaultRoot, ['config', 'gc.auto', '0']);
     await git(vaultRoot, ['add', '-A']);
     await git(vaultRoot, ['commit', '-m', 'chore: vault inicial']);
   }
@@ -76,6 +79,16 @@ async function makeVault(withGit = true): Promise<string> {
 
 function makeRetriever(vaultRoot: string): Retriever {
   return new Retriever({ scanner: new VaultScanner({ vaultRoot }) });
+}
+
+/**
+ * Teardown that tolerates a transient writer inside the throwaway repo.
+ *
+ * A plain `fs.rm` raced git and failed with ENOTEMPTY on `.git/` under a loaded machine. The
+ * retries are `fs.rm`'s own answer to exactly that, and `gc.auto 0` above removes the writer.
+ */
+async function removeTree(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 async function read(vaultRoot: string, rel: string): Promise<string> {
@@ -346,7 +359,7 @@ describe('learn — roteamento', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+    await removeTree(path.dirname(vaultRoot));
   });
 
   it('anexa a nota existente quando o insight se sobrepõe fortemente a ela', async () => {
@@ -525,7 +538,7 @@ describe('learn — domínio', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+    await removeTree(path.dirname(vaultRoot));
   });
 
   const rustOpts = {
@@ -586,7 +599,7 @@ describe('learn — propagação e commit', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+    await removeTree(path.dirname(vaultRoot));
   });
 
   it('uma criação em nestjs entra num único commit com a nota, o MOC e o daily', async () => {
@@ -713,7 +726,7 @@ describe('learn — propagação e commit', () => {
       expect(await read(noRepo, MOC_NESTJS)).toContain('- [[health-check-com-terminus]] —');
       expect(await read(noRepo, DAILY_REL)).toContain('[[health-check-com-terminus]]');
     } finally {
-      await fs.rm(path.dirname(noRepo), { recursive: true, force: true });
+      await removeTree(path.dirname(noRepo));
     }
   });
 
@@ -789,7 +802,7 @@ describe('learn — links', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+    await removeTree(path.dirname(vaultRoot));
   });
 
   it('renderiza os links numa seção ## Links da nota criada', async () => {
@@ -912,7 +925,7 @@ describe('learn - texto livre nao vira estrutura', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+    await removeTree(path.dirname(vaultRoot));
   });
 
   const terminus = {
@@ -1076,7 +1089,7 @@ describe('learn - o insight nunca se perde', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(path.dirname(vaultRoot), { recursive: true, force: true });
+    await removeTree(path.dirname(vaultRoot));
   });
 
   // Obsidian leaves exactly these behind: click an unresolved link, or press Enter in a new note.
