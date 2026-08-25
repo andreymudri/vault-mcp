@@ -222,7 +222,9 @@ export function decideDuplicate(
   // neighbour inherits `GRAPH_DAMPING` (0.4) times the best DIRECT score and every idf here is
   // strictly positive, so a graph-only chunk cannot outrank the hit it inherited from — a sweep
   // of 4497 queries over the test fixture found 1546 results carrying a graph chunk and not one
-  // of them at rank 1. It becomes reachable the moment `GRAPH_DAMPING` rises above 1, and what it
+  // of them at rank 1. It becomes reachable the moment `GRAPH_DAMPING` REACHES 1 — at exactly 1
+  // an inherited score ties the direct one and the chunk-id tie-break can seat the neighbour
+  // first — and what it
   // refuses then is the worst outcome this rule has: appending an insight to a note whose own
   // words never matched the query. The unit test below builds the state synthetically, which is
   // the only way to reach it.
@@ -339,9 +341,15 @@ function tagsByPath(results: ScoredChunk[]): (path: string) => string[] {
  * and closes the injection `a]] texto forjado [[b` — a name that would otherwise close this
  * item's link and open another, putting text into the note that reads as content the user never
  * wrote. No legitimate wiki-link target contains a bracket.
+ *
+ * An alias goes with them: `auth-guard|cache-wrapper` RENDERS as `cache-wrapper` while the edge
+ * it creates points at `auth-guard`, and a line that reads as one note and links to another is
+ * the same "not what it says it is" problem the brackets are. `links` names notes, so there is
+ * nothing to alias. An anchor (`nota#secao`) is kept: it points where it says it points.
  */
 function linkName(raw: string): string {
   return indexText(raw)
+    .replace(/\|.*$/, '')
     .replace(/\.md$/i, '')
     .trim();
 }
@@ -444,6 +452,59 @@ async function appendSection(
   });
 }
 
+/** The outcome of one append attempt: the write, or the reason this target could not take it. */
+interface AppendAttempt {
+  write?: WriteResult;
+  failure?: string;
+}
+
+/**
+ * Appends to `relPath`, turning the three "this target cannot take the text" failures into a
+ * reportable reason instead of an exception. Anything else is a real fault and is rethrown.
+ */
+async function attemptAppend(
+  opts: LearnOptions,
+  relPath: string,
+  titulo: string,
+  date: string,
+): Promise<AppendAttempt> {
+  try {
+    return { write: await appendSection(opts, relPath, titulo, date) };
+  } catch (err) {
+    if (!isRecoverableAppendFailure(err)) throw err;
+    const detail = oneLine(err instanceof Error ? err.message : String(err));
+    return { failure: `não foi possível anexar em ${oneLine(relPath)} (${detail})` };
+  }
+}
+
+/**
+ * A path in the domain that NO file occupies, for the one case where the learning has nowhere
+ * else to go: the note of this title exists and cannot be appended to.
+ *
+ * `writeNote` is create-OR-REPLACE, so handing it an occupied path is how an existing note gets
+ * destroyed. The date suffix keeps the name meaningful (`cache-wrapper-ttl-2026-08-20.md`) and
+ * the numeric suffixes after it keep the search bounded and terminating. Exhausting them means a
+ * vault state no ordinary use produces, and it is refused loudly rather than written over: the
+ * caller still holds the text, which a silent overwrite would not leave true of the note.
+ */
+async function freeNotePath(
+  vaultRoot: string,
+  dominio: string,
+  noteSlug: string,
+  date: string,
+): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const suffix = attempt === 0 ? date : `${date}-${attempt + 1}`;
+    const room = MAX_SLUG_CHARS - suffix.length - 1;
+    const head = (noteSlug.length <= room ? noteSlug : noteSlug.slice(0, room)).replace(/-$/, '');
+    const candidate = `${WIKI_PREFIX}${dominio}/${head}-${suffix}.md`;
+    if (!(await fileExists(resolveWritePath(vaultRoot, candidate)))) return candidate;
+  }
+  throw new LearnError(
+    `não há nome livre para a nota em ${WIKI_PREFIX}${dominio}/: 100 variações já existem`,
+  );
+}
+
 /**
  * Learns one insight: route, write, propagate, commit once.
  *
@@ -500,35 +561,52 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const decision = decideDuplicate(results, tags, opts.dominio, tagsByPath(results));
 
   const date = formatLocal(opts.now, 'YYYY-MM-DD');
-  const newRelPath = `02-wiki/${opts.dominio}/${noteSlug}.md`;
+  let newRelPath = `${WIKI_PREFIX}${opts.dominio}/${noteSlug}.md`;
 
-  let targetPath = decision.targetPath;
+  const targetPath = decision.targetPath;
   let reason = decision.reason;
-  // The rule said "not a duplicate", but the vault's identity for a note is its FILE NAME:
-  // `writeNote` would replace an existing `cache-wrapper.md` with these three paragraphs and
-  // report it as an ordinary write. Same title, same note — append instead.
-  if (targetPath === undefined && (await fileExists(resolveWritePath(opts.vaultRoot, newRelPath)))) {
-    targetPath = newRelPath;
-    reason = `nota já existe em ${newRelPath}`;
-  }
 
   let write: WriteResult | undefined;
   let action: 'appended' | 'created' = 'created';
-  let appendFailure: string | undefined;
+  const failures: string[] = [];
 
   if (targetPath !== undefined) {
-    try {
-      write = await appendSection(opts, targetPath, titulo, date);
+    // Losing the user's insight is the worst outcome this tool has, so a target that cannot take
+    // the text does not abort the call — it falls through to the paths below, and the warning
+    // says where the learning did not land.
+    const attempt = await attemptAppend(opts, targetPath, titulo, date);
+    if (attempt.write !== undefined) {
+      write = attempt.write;
       action = 'appended';
-    } catch (err) {
-      // Losing the user's insight is the worst outcome this tool has, so a target that cannot
-      // take the text becomes a NEW NOTE rather than an exception: the learning is written either
-      // way and the warning says where it did not land. Anything that is not one of the three
-      // recoverable failures is a real fault and must surface.
-      if (!isRecoverableAppendFailure(err)) throw err;
-      const detail = oneLine(err instanceof Error ? err.message : String(err));
-      appendFailure = `não foi possível anexar em ${oneLine(targetPath)} (${detail}); nota nova criada`;
-      reason = `${reason}; ${appendFailure}`;
+    } else if (attempt.failure !== undefined) {
+      failures.push(attempt.failure);
+    }
+  }
+
+  // The vault's identity for a note is its FILE NAME, and `writeNote` is create-OR-REPLACE: it
+  // would replace an existing `cache-wrapper.md` with these three paragraphs and report it as an
+  // ordinary write. So the question is asked HERE, on the path actually about to be written,
+  // rather than once up front — asked up front it leaves the failed-append route going straight
+  // to the replace, which is exactly the destruction this guard exists to stop. Same title, same
+  // note: append to it instead.
+  if (write === undefined && (await fileExists(resolveWritePath(opts.vaultRoot, newRelPath)))) {
+    if (newRelPath !== targetPath) {
+      const attempt = await attemptAppend(opts, newRelPath, titulo, date);
+      if (attempt.write !== undefined) {
+        write = attempt.write;
+        action = 'appended';
+        reason = `nota já existe em ${newRelPath}`;
+      } else if (attempt.failure !== undefined) {
+        failures.push(attempt.failure);
+      }
+    }
+
+    // Occupied and unappendable. A brand new name keeps both the existing note and the learning,
+    // which is the only outcome here that loses nothing — and, because the file is then genuinely
+    // new, `writeNote` applies the `_templates/wiki.md` skeleton, which it skips for a path that
+    // already exists (a zero-byte stub included).
+    if (write === undefined) {
+      newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date);
     }
   }
 
@@ -543,6 +621,12 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     });
   }
 
+  const appendFailure =
+    failures.length === 0
+      ? undefined
+      : `${failures.join('; ')}; aprendizado gravado em ${write.path}`;
+  if (appendFailure !== undefined) reason = `${reason}; ${appendFailure}`;
+
   // `projeto` lands inside the daily capture line, which is one of the machine-written index
   // lines, so it goes through `indexText` like the `resumo` does.
   const projeto = opts.projeto === undefined ? '' : indexText(opts.projeto);
@@ -550,9 +634,11 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const prop = await propagate({
     vaultRoot: opts.vaultRoot,
     dominio: opts.dominio,
-    // An append is filed under the note it landed in, so the daily and the MOC link to the note
-    // the reader has to open, not to a note that was never created.
-    slug: action === 'appended' ? basename(write.path, '.md') : noteSlug,
+    // Always the name of the file actually written, never the slug this call started from: an
+    // append is filed under the note it landed in, and a creation that had to take a free name is
+    // filed under that name. The MOC and the daily must link to the note the reader has to open,
+    // not to one that does not exist.
+    slug: basename(write.path, '.md'),
     resumo: resumoOf(opts.insight),
     tags,
     ...(projeto === '' ? {} : { projeto }),

@@ -309,9 +309,11 @@ describe('decideDuplicate', () => {
   });
 
   it('refuses a top hit that only entered through graph expansion', () => {
-    // A neighbour inherits 0.4x of a hit's UNDAMPED score while a direct hit already paid the
-    // note-type weight, so a neighbour can top the list without ever matching the query. Appending
-    // an insight to a note whose words never matched is the worst outcome this rule can produce.
+    // This state is SYNTHETIC and cannot be produced by the real `Retriever`: an inherited score
+    // is 0.4x the best DIRECT score and every idf is positive, so a graph-only chunk never reaches
+    // rank 1 (measured: 1546 of 4497 fixture searches carry one, none of them first). The guard
+    // is an assertion for the day `GRAPH_DAMPING` reaches 1, and this test is the only way to
+    // reach it - it pins what the guard must do, not something a user can hit today.
     const results = [scored(BULLMQ, 10, TAGS[BULLMQ], true), scored(CACHE_WRAPPER, 1)];
     const decision = decideDuplicate(results, ['bullmq'], 'nestjs', tagsFrom(TAGS));
     expect(decision.isDuplicate).toBe(false);
@@ -787,6 +789,26 @@ describe('learn — links', () => {
     expect(note).not.toContain('[[[[');
   });
 
+  it('descarta o alias de um link, que renderiza um nome e aponta para outro', async () => {
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Health check com Terminus',
+      insight: 'O modulo terminus expoe um indicador de saude que agrega disco e memoria heap',
+      contexto: 'Subindo o healthcheck do cluster',
+      dominio: 'nestjs',
+      tags: ['nestjs'],
+      links: ['auth-guard|cache-wrapper'],
+      now: NOW,
+    });
+
+    const note = await read(vaultRoot, result.path);
+    expect(note).toContain('- [[auth-guard]]');
+    expect(note).not.toContain('cache-wrapper');
+    // What the reader sees and what the graph records are the same note again.
+    expect(extractLinkTargets(note)).toEqual(['auth-guard']);
+  });
+
   it('não deixa um nome de link fechar o próprio wiki-link e forjar texto', async () => {
     const result = await learn({
       vaultRoot,
@@ -1050,9 +1072,142 @@ describe('learn - o insight nunca se perde', () => {
     });
 
     expect(result.action).toBe('created');
-    expect(result.path).toBe(stub);
+    // NOT over the stub: `writeNote` is create-OR-REPLACE, so an occupied path is never handed to
+    // it. A free name keeps both files.
+    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md');
+    expect(await read(vaultRoot, stub)).toBe('');
     expect(result.warning).toContain(stub);
     expect(result.committed).toBe(true);
-    expect(await read(vaultRoot, stub)).toContain('TTL configuravel');
+
+    const nota = await read(vaultRoot, result.path);
+    expect(nota).toContain('TTL configuravel');
+    // A genuinely new file, so the `_templates/wiki.md` skeleton applies - which `writeNote`
+    // skips for any path that already exists, a zero-byte stub included.
+    expect(nota).toContain('## Contexto');
+    expect(nota).toContain('## Solução');
+    expect(nota).toContain('## Exemplo');
+    expect(nota.split('\n').some((l) => l.startsWith('# '))).toBe(true);
+
+    // The MOC and the daily point at the file that exists, not at the name the call started from.
+    expect(await read(vaultRoot, '02-wiki/patterns/patterns-moc.md')).toContain(
+      '- [[cache-wrapper-ttl-2026-08-20]] —',
+    );
+    expect(await read(vaultRoot, DAILY_REL)).toContain('[[cache-wrapper-ttl-2026-08-20]]');
+  });
+
+  it('grava o aprendizado quando a nota alvo sumiu entre o índice e a escrita', async () => {
+    // The index can name a note that is no longer on disk - the user deleted it in Obsidian
+    // between the scan and the write. Through the real retriever that is a race; the stub makes
+    // it deterministic. ENOENT is recoverable: the learning becomes a new note.
+    const fantasma = '02-wiki/nestjs/fantasma.md';
+    const retriever = {
+      search: () => ({ results: [scored(fantasma, 10, ['bullmq'])] }),
+    } as unknown as Retriever;
+
+    const result = await learn({
+      vaultRoot,
+      retriever,
+      titulo: 'Retry de worker BullMQ',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+      contexto: 'Investigando a fila',
+      dominio: 'nestjs',
+      tags: ['bullmq'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/nestjs/retry-de-worker-bullmq.md');
+    expect(result.warning).toContain(fantasma);
+    expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
+  });
+
+  it('deixa vazar uma falha de anexação que não é "este alvo não aceita o texto"', async () => {
+    // The fallback must not swallow real faults: only the write guard refusing the path, an edit
+    // with nothing to anchor to, and a file that vanished are recoverable. A directory where the
+    // note should be is none of those - `readFile` fails with EISDIR - and silently writing a new
+    // note there would hide a broken vault.
+    //
+    // The retriever is a stub because the real one CANNOT produce this state: the scanner never
+    // indexes a directory as a note, so nothing else can route an append onto one.
+    const pasta = '02-wiki/nestjs/pasta.md';
+    await fs.mkdir(path.join(vaultRoot, pasta));
+    const retriever = {
+      search: () => ({ results: [scored(pasta, 10, ['bullmq'])] }),
+    } as unknown as Retriever;
+
+    await expect(
+      learn({
+        vaultRoot,
+        retriever,
+        titulo: 'Retry de worker BullMQ',
+        insight: 'O worker BullMQ aplica retry com backoff exponencial na fila',
+        contexto: 'Investigando a fila',
+        dominio: 'nestjs',
+        tags: ['bullmq'],
+        now: NOW,
+      }),
+    ).rejects.toThrow(/EISDIR/);
+
+    // Nothing was written and nothing was committed.
+    expect(await exists(path.join(vaultRoot, '02-wiki/nestjs/retry-de-worker-bullmq.md'))).toBe(
+      false,
+    );
+    expect(await logLines(vaultRoot)).toBe(1);
+  });
+
+  it('procura o próximo nome livre quando o nome com data também está ocupado', async () => {
+    const stub = '02-wiki/patterns/cache-wrapper-ttl.md';
+    const datado = '02-wiki/patterns/cache-wrapper-ttl-2026-08-20.md';
+    await fs.writeFile(path.join(vaultRoot, stub), '', 'utf8');
+    await fs.writeFile(path.join(vaultRoot, datado), 'conteudo anterior sem relacao\n', 'utf8');
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper TTL',
+      insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    });
+
+    expect(result.path).toBe('02-wiki/patterns/cache-wrapper-ttl-2026-08-20-2.md');
+    // Neither occupied file was written over.
+    expect(await read(vaultRoot, stub)).toBe('');
+    expect(await read(vaultRoot, datado)).toBe('conteudo anterior sem relacao\n');
+  });
+
+  it('nunca substitui uma nota existente quando a anexação no alvo falha', async () => {
+    // A completely ordinary Obsidian filename that `resolveWritePath` refuses (glob
+    // metacharacters) while the scanner indexes it happily. The duplicate rule therefore routes
+    // the append to a path the write guard will not take, and the fallback used to hand the
+    // colliding `cache-wrapper.md` to create-OR-REPLACE: 722 bytes of note replaced by a 6-line
+    // stub, in a vault where only this tool commits.
+    const rascunho = '02-wiki/nestjs/bullmq-worker [rascunho].md';
+    await fs.rename(path.join(vaultRoot, BULLMQ), path.join(vaultRoot, rascunho));
+    const before = await read(vaultRoot, CACHE_WRAPPER);
+
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Cache Wrapper',
+      insight: 'bullmq retry backoff exponencial notificacoes worker',
+      contexto: 'Investigando a fila de notificacoes',
+      dominio: 'patterns',
+      tags: ['bullmq'],
+      now: NOW,
+    });
+
+    const after = await read(vaultRoot, CACHE_WRAPPER);
+    expect(after.startsWith(before.trimEnd())).toBe(true);
+    expect(after).toContain('## Solução');
+    expect(after).toContain('[[auth-guard]]');
+    expect(after).toContain('backoff exponencial');
+    expect(after.length).toBeGreaterThan(before.length);
+
+    expect(result.action).toBe('appended');
+    expect(result.path).toBe(CACHE_WRAPPER);
+    expect(result.warning).toContain(rascunho);
   });
 });
