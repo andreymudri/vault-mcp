@@ -81,6 +81,27 @@ describe('InvertedIndex.addChunk — pesos de campo testados no mecanismo', () =
     expect(index.chunkLengths.get('h#1')).toBe(3.0);
   });
 
+  it('termo só no heading de um chunk REAL (via chunkNote em markdown real) recebe peso 3.0, não 4.0', () => {
+    // Regressão: chunk.text inclui a própria linha do heading que abriu o chunk (chunkNote faz
+    // `currentLines = [line]` no momento do match), e splitFields roteia toda linha não cercada —
+    // inclusive essa — para `prose`. Um addChunk ingênuo soma headingText (3.0) E prose (1.0) para
+    // o mesmo termo, produzindo peso efetivo 4.0 em vez dos 3.0 do spec. Um chunk sintético com
+    // `text: ''` (como o teste acima) não expõe esse bug porque não tem heading duplicado dentro
+    // do texto — só chunkNote sobre markdown real reproduz a condição.
+    const index = new InvertedIndex();
+    const chunks = loadChunks(BULLMQ_PATH, 'wiki', ['nestjs', 'bullmq', 'filas']);
+    const retryChunk = chunks.find((c) => c.headingPath.join('/') === 'Contexto/Retry e backoff');
+    expect(retryChunk).toBeDefined();
+
+    // "backoff" só ocorre na linha "### Retry e backoff" deste chunk — a próxima ocorrência no
+    // arquivo (`backoff: { type: 'exponential', ... }`) está dentro do bloco de código do chunk
+    // ## Exemplo, um chunk diferente. Isso isola o termo: se ele aparecer com peso > 3.0 aqui, é
+    // porque a linha do heading foi contada de novo como prosa.
+    index.addChunk(retryChunk!);
+
+    expect(index.postings.get('backoff')?.get(retryChunk!.id)).toBe(FIELD_WEIGHTS.heading);
+  });
+
   it('termo só nas tags recebe frequência ponderada igual a FIELD_WEIGHTS.tags (2.0)', () => {
     const index = new InvertedIndex();
     index.addChunk(makeChunk({ id: 't#1', tags: ['alpha'] }));
@@ -159,6 +180,37 @@ describe('InvertedIndex — estrutura e navegação', () => {
     }
   });
 
+  it('removeByPath de uma nota permanece rápido mesmo com um vocabulário grande no resto do índice', () => {
+    // Reproduz a cena de risco: um vocabulário de 100.000 termos distintos (outras notas do
+    // vault) e uma nota-alvo de 200 chunks a remover. Uma implementação de removeChunkById que
+    // varre `postings` inteiro por chunk removido custa O(chunks removidos × vocabulário) — medido
+    // ~501ms neste cenário exato. Com a lista de termos por chunk guardada em addChunk, o custo é
+    // O(termos do próprio chunk) e deve terminar em milissegundos.
+    const index = new InvertedIndex();
+    for (let i = 0; i < 100_000; i++) {
+      index.addChunk(
+        makeChunk({ id: `vocab#${i}`, path: `outras-notas/${i}.md`, headingPath: [`termovocab${i}`] }),
+      );
+    }
+    const TARGET_PATH = 'nota-alvo.md';
+    for (let i = 0; i < 200; i++) {
+      index.addChunk(
+        makeChunk({ id: `${TARGET_PATH}#${i}`, path: TARGET_PATH, text: `conteudo chunk ${i} da nota alvo` }),
+      );
+    }
+    expect(index.has(TARGET_PATH)).toBe(true);
+
+    const start = Date.now();
+    index.removeByPath(TARGET_PATH);
+    const elapsedMs = Date.now() - start;
+
+    expect(index.has(TARGET_PATH)).toBe(false);
+    // Bound folgado o bastante para não ser flaky em CI, mas bem abaixo dos ~501ms medidos com o
+    // scan completo de postings — qualquer regressão que volte a varrer o vocabulário todo por
+    // chunk removido estoura isso.
+    expect(elapsedMs).toBeLessThan(200);
+  }, 10000);
+
   it('vocabulary() devolve os termos indexados', () => {
     const index = buildNestjsIndex();
     const vocab = new Set(index.vocabulary());
@@ -232,6 +284,21 @@ describe('search — sanidade de integração', () => {
     expect(results).toEqual([]);
   });
 
+  it('limit corta a lista de resultados quando há mais candidatos do que o limite', () => {
+    const index = buildNestjsIndex();
+    // "nestjs" está nas tags de todo chunk das três notas da fixture — 10 candidatos ao todo
+    // (verificado por inspeção), bem mais do que o limit=3 abaixo. Deletar o `.slice(0, limit)`
+    // deixaria a suíte inteira verde até este teste: os `limit: 1` testes de `keep` passam só
+    // porque `keep` reduz os candidatos a exatamente um, então nunca exercitam o corte em si.
+    const full = search(index, 'nestjs', 100);
+    expect(full.length).toBe(10);
+
+    const limited = search(index, 'nestjs', 3);
+
+    expect(limited.length).toBe(3);
+    expect(limited).toEqual(full.slice(0, 3));
+  });
+
   it('keep filtra ANTES de fatiar por limit — não retorna vazio quando o topo falha no filtro', () => {
     const index = buildNestjsIndex();
     // Sem filtro, o topo de "jwt" é auth-guard.md (verificado no teste acima). Com limit=1 e um
@@ -246,6 +313,38 @@ describe('search — sanidade de integração', () => {
 
     expect(filtered.length).toBe(1);
     expect(filtered[0]?.chunk.path).not.toBe(AUTH_GUARD_PATH);
+  });
+
+  it('score retornado bate com o cálculo manual do BM25 — não é um placeholder', () => {
+    // Índice de um único chunk: N=1, docsWithTerm=1, freq=1.0 (só prosa), dl=avgdl (único chunk),
+    // tipo indefinido (noteTypeWeight=1.0). Isso reduz o score a uma fórmula fechada que pode ser
+    // recalculada aqui à mão a partir do texto do spec, sem reusar a implementação de `search`.
+    const index = new InvertedIndex();
+    index.addChunk(makeChunk({ id: 'score#1', text: 'unicotermo' }));
+
+    const results = search(index, 'unicotermo', 10);
+    expect(results).toHaveLength(1);
+
+    const N = 1;
+    const n = 1;
+    const freq = 1.0;
+    const dl = 1.0;
+    const avgdl = 1.0;
+    const expectedIdf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+    const expectedScore =
+      (expectedIdf * freq * (1.2 + 1)) / (freq + 1.2 * (1 - 0.75 + (0.75 * dl) / avgdl));
+
+    expect(results[0]?.score).toBeCloseTo(expectedScore);
+  });
+
+  it('viaGraph vem false para todo resultado de search — esta função não faz travessia de grafo', () => {
+    const index = buildNestjsIndex();
+    const results = search(index, 'bullmq', 10);
+
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      expect(r.viaGraph).toBe(false);
+    }
   });
 });
 
@@ -269,6 +368,10 @@ describe('NOTE_TYPE_WEIGHTS — peso por tipo de nota aplicado ao score acumulad
   it('NOTE_TYPE_WEIGHTS.moc é 0.3 — mutação-alvo: removê-lo faz o MOC vencer', () => {
     expect(NOTE_TYPE_WEIGHTS.moc).toBe(0.3);
   });
+
+  it('NOTE_TYPE_WEIGHTS.daily é 0.3 — mutação-alvo: mutar esse valor sobrevive sem esta asserção', () => {
+    expect(NOTE_TYPE_WEIGHTS.daily).toBe(0.3);
+  });
 });
 
 describe('suggestTerms', () => {
@@ -281,9 +384,27 @@ describe('suggestTerms', () => {
 
   it('respeita o limite `max`', () => {
     const index = buildNestjsIndex();
-    // "workor" está próximo de vários termos do vocabulário nestjs (worker, etc).
+    // No vocabulário real da fixture nestjs, "worker" é o único termo a distância <= 2 de
+    // "workor" (verificado por inspeção: suggestTerms(index, 'workor', 5) também devolve só
+    // ['worker']). Uma asserção de `.length <= 1` também seria satisfeita por `[]`, o que não
+    // prova que `max` cortou nada — aqui fixamos o conteúdo exato esperado.
     const suggestions = suggestTerms(index, 'workor', 1);
-    expect(suggestions.length).toBeLessThanOrEqual(1);
+    expect(suggestions).toEqual(['worker']);
+  });
+
+  it('`max` corta a lista de candidatos quando há mais do que o limite', () => {
+    // Com "workor" há um único candidato no vocabulário real (verificado acima), então esse caso
+    // sozinho não exercita o corte por `max` — deletar `.slice(0, max)` de `suggestTerms` deixaria
+    // aquele teste verde do mesmo jeito. Aqui, 4 termos qualificam (foo=0, fooa=1, foob=1,
+    // fooxy=2), mais do que max=2, então o corte é observável.
+    const index = new InvertedIndex();
+    for (const term of ['foo', 'fooa', 'foob', 'fooxy', 'bar']) {
+      index.addChunk(makeChunk({ id: `syn#${term}`, headingPath: [term] }));
+    }
+
+    const suggestions = suggestTerms(index, 'foo', 2);
+
+    expect(suggestions).toEqual(['foo', 'fooa']);
   });
 
   it('ordena por distância crescente e depois alfabeticamente', () => {
@@ -304,4 +425,42 @@ describe('suggestTerms', () => {
     const index = buildNestjsIndex();
     expect(suggestTerms(index, 'a de', 5)).toEqual([]);
   });
+
+  it('termos de vocabulário absurdamente longos (base64/hex sem separadores) não travam o event loop', () => {
+    // Reproduz a cena de risco: 200 termos de vocabulário de 5.000 caracteres cada, todos do
+    // MESMO comprimento que a query (o early-exit por diferença de comprimento não ajuda) e
+    // quase idênticos entre si (o early-exit por mínimo de linha também não ajuda, porque o
+    // mínimo permanece baixo por quase toda a matriz). Um clipping cheio de data-URIs base64 ou
+    // hex digests produz exatamente esse vocabulário — `tokenizer.ts` não tem cap de tamanho de
+    // token. Sem o cap de comprimento em `levenshtein`, isso mede ~37s de event loop bloqueado;
+    // com o cap, cada comparação é O(1) (só checagem de tamanho) e o suggestTerms inteiro deve
+    // terminar em milissegundos.
+    // Todo par (term_i, queryTerm) só difere nos 3 últimos caracteres (dígitos vs. "xxx"), então
+    // a distância de edição verdadeira é sempre exatamente 3 (> maxDistance) — o prefixo de 4997
+    // "x"s idênticos alinha em diagonal a custo zero, e nenhuma combinação de inserção/deleção
+    // supera o custo de 3 substituições. Isso garante que `suggestions` fica vazio independente
+    // do cap, e mantém o mínimo de cada linha da matriz baixo (0 ou 1) por quase toda a extensão
+    // do cálculo — exatamente a condição em que o early-exit por mínimo de linha NÃO ajuda,
+    // forçando a matriz O(len²) inteira a rodar sem o cap de comprimento.
+    const index = new InvertedIndex();
+    const LONG = 5000;
+    const prefix = 'x'.repeat(LONG - 3);
+    for (let i = 0; i < 200; i++) {
+      const suffix = String(i).padStart(3, '0');
+      const term = prefix + suffix;
+      index.addChunk(makeChunk({ id: `long#${i}`, headingPath: [term] }));
+    }
+    const queryTerm = 'x'.repeat(LONG);
+
+    const start = Date.now();
+    const suggestions = suggestTerms(index, queryTerm, 10);
+    const elapsedMs = Date.now() - start;
+
+    // Nenhum termo de 5.000 caracteres deve ser sugerido — o cap trata termos além dele como
+    // fora de alcance, então nada no vocabulário sintético qualifica.
+    expect(suggestions).toEqual([]);
+    // Bound folgado o bastante para não ser flaky em CI, mas várias ordens de grandeza abaixo dos
+    // ~37s medidos sem o cap — qualquer regressão que reintroduza o scan completo estoura isso.
+    expect(elapsedMs).toBeLessThan(2000);
+  }, 10000);
 });

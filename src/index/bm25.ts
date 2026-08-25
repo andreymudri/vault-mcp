@@ -55,6 +55,20 @@ export function search(
 }
 
 /**
+ * Nenhum termo de vocabulário real (linguagem natural, identificadores de código) passa disso —
+ * o comprimento existe para descartar lixo tokenizado como um único termo enorme: um base64 ou
+ * hex embutido num clipping, que `tokenizer.ts` não corta por não ter cap de tamanho de token.
+ * Sem esse corte, dois termos longos e quase idênticos (ex.: dois blobs base64 que diferem em
+ * poucos bytes) fazem `levenshtein` rodar a matriz O(len²) inteira — o early-exit por diferença
+ * de comprimento não ajuda (comprimentos iguais) e o early-exit por mínimo de linha não ajuda
+ * (o mínimo fica baixo a matriz inteira, porque as strings são quase iguais). Medido: 200 termos
+ * de vocabulário de 5.000 caracteres cada, mais um termo de query de 5.000 caracteres, bloqueiam
+ * o event loop por ~37s num servidor single-threaded. Termos além do cap são tratados como fora
+ * de alcance (nunca sugeridos), sem rodar a matriz.
+ */
+const MAX_TERM_LENGTH = 64;
+
+/**
  * Distância de Levenshtein entre `a` e `b`, com early-exit assim que o mínimo da linha corrente
  * já ultrapassa `maxDistance`: a partir daí nenhuma célula futura da mesma linha pode descer
  * abaixo desse mínimo (cada célula é >= o mínimo da linha menos as operações restantes), então a
@@ -62,6 +76,7 @@ export function search(
  */
 function levenshtein(a: string, b: string, maxDistance: number): number {
   if (a === b) return 0;
+  if (a.length > MAX_TERM_LENGTH || b.length > MAX_TERM_LENGTH) return maxDistance + 1;
   if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
 
   let prevRow = new Array<number>(b.length + 1);

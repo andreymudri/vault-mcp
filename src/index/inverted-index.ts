@@ -27,6 +27,31 @@ export function noteTypeWeight(tipo: string | undefined): number {
   return (tipo ? NOTE_TYPE_WEIGHTS[tipo] : undefined) ?? 1.0;
 }
 
+const HEADING_LINE_RE = /^#{2,3}\s+.*$/;
+
+/**
+ * `chunkNote` (src/index/chunker.ts) starts a chunk's `text` with the very heading line
+ * (`##`/`###`) that opened it — `currentLines = [line]` at the moment of the match — so that
+ * line survives untouched in `chunk.text` for callers that need the literal source. That line's
+ * terms are already counted once via `headingPath`/`FIELD_WEIGHTS.heading` below; without this
+ * strip, `splitFields` would route the same line to `prose` (it is not fenced) and `addChunk`
+ * would count it a second time at `FIELD_WEIGHTS.prose`, making the effective heading weight
+ * `heading + prose` instead of the spec'd `heading`. Only the first line is ever the duplicate —
+ * chunkNote flushes and starts a fresh chunk on every `##`/`###` match, so a chunk's text can
+ * contain at most one such heading line, and always at position 0. A trailing `\r` (CRLF source)
+ * is stripped before matching only, mirroring chunker.ts's own `stripTrailingCR`, and is left
+ * untouched in the returned remainder.
+ */
+function withoutLeadingHeadingLine(text: string): string {
+  const newlineIndex = text.indexOf('\n');
+  const firstLine = newlineIndex === -1 ? text : text.slice(0, newlineIndex);
+  const firstLineNoCR = firstLine.endsWith('\r') ? firstLine.slice(0, -1) : firstLine;
+  if (!HEADING_LINE_RE.test(firstLineNoCR)) {
+    return text;
+  }
+  return newlineIndex === -1 ? '' : text.slice(newlineIndex + 1);
+}
+
 /**
  * Índice invertido sobre chunks: termo -> chunkId -> frequência já ponderada por campo
  * (`FIELD_WEIGHTS`). `chunkLengths` guarda a soma das frequências ponderadas de cada chunk (não
@@ -40,6 +65,13 @@ export class InvertedIndex {
   totalLength = 0;
 
   /**
+   * Termos indexados de cada chunk, guardados no momento do `addChunk` para que a remoção não
+   * precise varrer `postings` inteiro procurando quem referencia o chunk removido — ver
+   * `removeChunkById`.
+   */
+  private readonly chunkTerms = new Map<string, string[]>();
+
+  /**
    * Tokeniza cada campo do chunk separadamente (heading a partir de `headingPath`, tags a partir
    * de `tags`, prose/code a partir de `splitFields(text)`), acumula a frequência de cada termo
    * ponderada por `FIELD_WEIGHTS`, e registra o resultado nas estruturas do índice. Reindexar um
@@ -48,7 +80,7 @@ export class InvertedIndex {
   addChunk(chunk: Chunk): void {
     this.removeChunkById(chunk.id);
 
-    const { prose, code } = splitFields(chunk.text);
+    const { prose, code } = splitFields(withoutLeadingHeadingLine(chunk.text));
     const headingText = chunk.headingPath.join(' ');
     const tagsText = chunk.tags.join(' ');
 
@@ -76,6 +108,7 @@ export class InvertedIndex {
 
     this.chunks.set(chunk.id, chunk);
     this.chunkLengths.set(chunk.id, chunkLength);
+    this.chunkTerms.set(chunk.id, [...weighted.keys()]);
     this.totalLength += chunkLength;
   }
 
@@ -86,14 +119,24 @@ export class InvertedIndex {
     }
   }
 
+  /**
+   * Remove um chunk usando a lista de termos guardada por `addChunk` em vez de varrer `postings`
+   * inteiro: sem isso, remover N chunks custa O(N × tamanho do vocabulário) e cresce com o vault
+   * todo (medido: ~501ms para remover uma nota de 200 chunks de um vocabulário de 100.000 termos),
+   * mesmo que cada chunk só referencie um punhado de termos. Com a lista, o custo por chunk é
+   * O(termos do próprio chunk).
+   */
   private removeChunkById(chunkId: string): void {
     if (!this.chunks.has(chunkId)) return;
     const length = this.chunkLengths.get(chunkId) ?? 0;
     this.totalLength -= length;
     this.chunkLengths.delete(chunkId);
     this.chunks.delete(chunkId);
-    for (const [term, postings] of this.postings) {
-      if (postings.delete(chunkId) && postings.size === 0) {
+    const terms = this.chunkTerms.get(chunkId);
+    this.chunkTerms.delete(chunkId);
+    for (const term of terms ?? []) {
+      const postings = this.postings.get(term);
+      if (postings?.delete(chunkId) && postings.size === 0) {
         this.postings.delete(term);
       }
     }
