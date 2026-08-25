@@ -296,13 +296,26 @@ const NO_NEWLINE = '\\ No newline at end of file';
  * U+0085 NEXT LINE forced breaks in every HTML-rendering client, and a chat UI showing a
  * diff is exactly such a client. A path carrying a raw U+2028 rendered there as a
  * complete, fabricated `+++`/`@@` hunk while `split('\n')` over the same string saw one
- * line and reported nothing wrong. So the escaped set is every C0 control, DEL, every C1
- * control (U+0085 among them), and the two Unicode separators — the same set
+ * line and reported nothing wrong.
+ *
+ * "One line" is not the whole question either. A path can occupy exactly one line and
+ * still not READ as itself: U+202E RIGHT-TO-LEFT OVERRIDE and the rest of the bidi
+ * controls reorder the characters after them, and the zero-width formats render as
+ * nothing at all, so `02-wiki/nota\u202edm.hsab\u202c.md` displays as `nota basit.md` in
+ * every bidi-aware client while naming a different file. That cannot forge a hunk the way
+ * a break can, but a header the reader cannot read is a header that certifies nothing, and
+ * escaping costs the same either way.
+ *
+ * So the escaped set is every C0 control, DEL, every C1 control (U+0085 among them), the
+ * two Unicode separators, and every bidi control and zero-width format — the same set
  * `writer.ts`'s `CONTROL_CHARS` refuses, which is not a coincidence and must not drift.
+ * `test/writer.test.ts`'s `INVISIBLE_CODEPOINTS` runs one table against both, so adding a
+ * codepoint to one side and not the other fails there rather than silently reopening the
+ * hole on whichever side was forgotten.
  */
 function headerPath(path: string): string {
   // eslint-disable-next-line no-control-regex
-  return path.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) => {
+  return path.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (ch) => {
     if (ch === '\n') return '\\n';
     if (ch === '\r') return '\\r';
     if (ch === '\t') return '\\t';
@@ -477,7 +490,18 @@ function groupChanges(ops: Op[]): void {
     const dels = run.filter((op) => op.kind === '-');
     const adds = run.filter((op) => op.kind === '+');
     if (dels.length > 0 && adds.length > 0) {
-      ops.splice(i, j - i, ...dels, ...adds);
+      // Written back one element at a time, NOT `splice(i, j - i, ...dels, ...adds)`.
+      // A spread passes every op as a separate function argument and V8 caps that at the
+      // stack, so the splice threw `RangeError: Maximum call stack size exceeded` from
+      // ~249k lines per side — a full rewrite comes back from `fallbackOps` as ONE run
+      // holding the entire edit script, so the spread's width is the whole op count. That
+      // is under half `MAX_DIFF_INPUT_CHARS`, and `safeDiff` swallowed the throw into
+      // `@@ diff indisponível @@`: the note still written, the diff that is the only
+      // visible record of it gone, at a size the caller picks. The run is only reordered
+      // and `dels.length + adds.length === j - i`, so an in-place write does the same job
+      // with no argument list at all.
+      for (let k = 0; k < dels.length; k += 1) ops[i + k] = dels[k]!;
+      for (let k = 0; k < adds.length; k += 1) ops[i + dels.length + k] = adds[k]!;
     }
     i = j;
   }

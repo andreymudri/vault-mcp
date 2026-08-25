@@ -95,16 +95,31 @@ const DENIED_SEGMENTS = new Set(['.git', '.obsidian', 'node_modules', '_template
  * makes `fs` throw a bare `TypeError` from deep inside the write instead of a
  * `PathGuardError` the tool layer knows how to report.
  *
- * The set is every C0 control, DEL, every C1 control and the two Unicode separators, and
- * the last three are the reason it is not just `\u0000-\u001f`. `split('\n')` sees one
+ * The set is every C0 control, DEL, every C1 control, the two Unicode separators, and
+ * every bidi control and zero-width format character. It is not just `\u0000-\u001f` for
+ * two separate reasons, and the second was missed when only the first was fixed. Line
+ * breaks: `split('\n')` sees one
  * line in a path carrying U+2028, U+2029 or U+0085 — but CSS Text 3 makes all three FORCED
  * LINE BREAKS in any HTML-rendering client, so `02-wiki/a\u2028+++ b/CLAUDE.md\u2028@@ -1
  * +1 @@\u2028-real\u2028+forjado.md` shipped raw and rendered as a complete fabricated
  * hunk in the user's client. `git log --format=%B` showed the injected lines too: the same
  * string is the commit message subject.
+ *
+ * And characters that are INVISIBLE or REORDER what is around them. These break no line,
+ * which is exactly why widening the set to the forced-break characters left every one of
+ * them through: `02-wiki/nota\u202edm.hsab\u202c.md` is one line by every reader's
+ * definition, and in any bidi-aware renderer — a chat client, a terminal, Obsidian's file
+ * list, `git log` — it reads as `nota basit.md` while the write lands somewhere else
+ * entirely. The same string reaches `WriteResult.diff`, `WriteResult.path` and the commit
+ * subject, so all three showed the user a filename that was not the file on disk. It
+ * cannot forge a hunk, which is why this is not the line-break hole over again; but a name
+ * the user cannot read is a name the user cannot check, and this docblock asserting the
+ * set was complete while U+202E walked through it is what made it worth closing rather
+ * than documenting.
  */
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+const CONTROL_CHARS =
+  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 
 /**
  * A path segment as the FILESYSTEM will compare it, not as the string was typed.

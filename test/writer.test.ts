@@ -16,6 +16,49 @@ const execFileAsync = promisify(execFile);
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'vault');
 
+/**
+ * Codepoints that render as NOTHING, or reorder what is around them, in the clients that
+ * show a diff and a commit subject.
+ *
+ * These are not line breaks, which is why the round-2 widening to the forced-break set
+ * missed all of them: `02-wiki/nota\u202edm.hsab\u202c.md` is one line by every reader's
+ * definition, and in any bidi-aware renderer — a chat client, a terminal, Obsidian's file
+ * list, `git log` — it reads as `nota basit.md` while the write lands on a different file
+ * entirely. `WriteResult.diff`, `WriteResult.path` and the commit subject all carried the
+ * override raw.
+ *
+ * The one table is used against BOTH locks on purpose. `writer.ts` refuses these and
+ * `diff.ts` escapes them, the two are reached by different callers, and the docblocks on
+ * each say the sets must not drift — so a codepoint added to one and not the other fails
+ * here rather than quietly reopening the hole on whichever side was forgotten.
+ */
+// Written as escapes, never as the literal characters: a test file that carries a raw
+// RIGHT-TO-LEFT OVERRIDE is a test file whose own source reads backwards in the editor.
+const INVISIBLE_CODEPOINTS: ReadonlyArray<readonly [string, string]> = [
+  ['U+00AD SOFT HYPHEN', '\u00ad'],
+  ['U+061C ARABIC LETTER MARK', '\u061c'],
+  ['U+200B ZERO WIDTH SPACE', '\u200b'],
+  ['U+200C ZERO WIDTH NON-JOINER', '\u200c'],
+  ['U+200D ZERO WIDTH JOINER', '\u200d'],
+  ['U+200E LEFT-TO-RIGHT MARK', '\u200e'],
+  ['U+200F RIGHT-TO-LEFT MARK', '\u200f'],
+  ['U+202A LEFT-TO-RIGHT EMBEDDING', '\u202a'],
+  ['U+202B RIGHT-TO-LEFT EMBEDDING', '\u202b'],
+  ['U+202C POP DIRECTIONAL FORMATTING', '\u202c'],
+  ['U+202D LEFT-TO-RIGHT OVERRIDE', '\u202d'],
+  ['U+202E RIGHT-TO-LEFT OVERRIDE', '\u202e'],
+  ['U+2060 WORD JOINER', '\u2060'],
+  ['U+2061 FUNCTION APPLICATION', '\u2061'],
+  ['U+2062 INVISIBLE TIMES', '\u2062'],
+  ['U+2063 INVISIBLE SEPARATOR', '\u2063'],
+  ['U+2064 INVISIBLE PLUS', '\u2064'],
+  ['U+2066 LEFT-TO-RIGHT ISOLATE', '\u2066'],
+  ['U+2067 RIGHT-TO-LEFT ISOLATE', '\u2067'],
+  ['U+2068 FIRST STRONG ISOLATE', '\u2068'],
+  ['U+2069 POP DIRECTIONAL ISOLATE', '\u2069'],
+  ['U+FEFF ZERO WIDTH NO-BREAK SPACE', '\ufeff'],
+];
+
 /** Runs a git command in `repoRoot`, returning trimmed stdout. */
 async function git(repoRoot: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', repoRoot, ...args]);
@@ -859,6 +902,25 @@ describe('unifiedDiff hardening', () => {
     expect(lines).not.toContain('+forjado.md');
   });
 
+  it.each(INVISIBLE_CODEPOINTS)(
+    'escapes %s rather than shipping it raw into a header',
+    (_label, ch) => {
+      const diff = unifiedDiff('antes\n', 'depois\n', `02-wiki/nota${ch}dm.hsab${ch}.md`);
+
+      // Shipped raw, this character is invisible to the reader while it is part of the
+      // name of the file that was actually written.
+      expect(diff).not.toContain(ch);
+      // Same escape convention the C1 controls already use: one byte gets `\xNN`,
+      // anything wider gets the four-digit `\uNNNN` that can only mean what it names.
+      const code = ch.charCodeAt(0);
+      const escaped =
+        code <= 0xff
+          ? `\\x${code.toString(16).padStart(2, '0')}`
+          : `\\u${code.toString(16).padStart(4, '0')}`;
+      expect(diff.split('\n')[0]).toContain(escaped);
+    }
+  );
+
   it('escapes a C1 control in the path unambiguously', () => {
     // `\x2028` would read back as `\x20` then a literal `28`, so a codepoint wider than one
     // byte gets the four-digit form. U+0085 is one byte and keeps the short one.
@@ -972,6 +1034,40 @@ describe('unifiedDiff hardening', () => {
     expect(lines).toContain('-linha 1');
     expect(lines).toContain('+linha 1');
     expect(lines).not.toContain(' linha 1');
+  });
+
+  it('diffs a full rewrite far past the argument limit instead of overflowing the stack', () => {
+    // `groupChanges` used to reorder each run of changed ops with
+    // `ops.splice(i, j - i, ...dels, ...adds)`. The spread passes every op in the run as a
+    // separate function argument and V8 caps that at the stack, so a full rewrite — two
+    // texts with nothing in common, which `fallbackOps` returns as ONE run carrying every
+    // deletion and every addition — threw `RangeError: Maximum call stack size exceeded`
+    // from 248,671 lines per side, ~995 kB combined. That is under half
+    // `MAX_DIFF_INPUT_CHARS`, so `unifiedDiff` was refusing inputs it had already decided
+    // were small enough to diff, and `safeDiff` turned the throw into
+    // `@@ diff indisponível @@` — the note still written and committed, but the diff that
+    // is the only visible record of the write silently gone, at any size a caller chose.
+    const N = 300_000;
+    const before = 'a\n'.repeat(N);
+    const after = 'b\n'.repeat(N);
+    // Still inside the input bound, so the coarse summary must NOT be what comes back.
+    expect(before.length + after.length).toBeLessThan(2 * 1024 * 1024);
+
+    const diff = unifiedDiff(before, after, 'nota.md');
+
+    expect(diff).toContain('--- a/nota.md');
+    expect(diff).not.toContain('diff resumido');
+    // The whole edit is one run, so the grouping has to hold across all 600,000 ops:
+    // every deletion first, then every addition, and no `+` before the last `-`.
+    const lines = diff.split('\n');
+    const firstAdd = lines.findIndex((l) => l.startsWith('+') && !l.startsWith('+++'));
+    let lastDel = -1;
+    for (let k = 0; k < lines.length; k += 1) {
+      if (lines[k]!.startsWith('-') && !lines[k]!.startsWith('---')) lastDel = k;
+    }
+    expect(firstAdd).toBeGreaterThan(lastDel);
+    expect(lines.filter((l) => l === '-a')).toHaveLength(N);
+    expect(lines.filter((l) => l === '+b')).toHaveLength(N);
   });
 });
 
@@ -1182,6 +1278,30 @@ describe('write guard', () => {
     );
   });
 
+  it.each(INVISIBLE_CODEPOINTS)('refuses a path containing %s', async (_label, ch) => {
+    // Not a line break, so the round-2 widening to the forced-break set let every one of
+    // these through: the path is one line by every reader's definition and the name still
+    // renders as something other than the file that gets written. Reproduced end to end —
+    // `writeNote` accepted it and the raw override reached `WriteResult.diff`,
+    // `WriteResult.path` and the commit subject, so a user reading any of the three saw a
+    // filename that was not the one on disk.
+    await expect(
+      writeNote({ vaultRoot, path: `02-wiki/nota${ch}dm.hsab${ch}.md`, content: 'x' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+  });
+
+  it('refuses the bidi-override filename before it can reach a result or a commit', async () => {
+    const forged = '02-wiki/nota\u202edm.hsab\u202c.md';
+    await expect(
+      writeNote({ vaultRoot, path: forged, content: 'x' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+
+    // Nothing was written and nothing was committed under either reading of the name.
+    const log = await git(vaultRoot, ['log', '--format=%s']);
+    expect(log).not.toContain('\u202e');
+    expect(await exists(path.join(vaultRoot, forged))).toBe(false);
+  });
+
   it('refuses a write that reaches a denied directory through an in-vault symlink', async () => {
     // The guard used to read the LEXICAL path, and this path has no `.git` segment in it.
     // The link does not escape the vault either, so `assertNoSymlinkEscape` is satisfied
@@ -1198,6 +1318,23 @@ describe('write guard', () => {
       writeNote({ vaultRoot, path: '02-wiki/compartilhado/pwn.md', content: 'lixo' })
     ).rejects.toBeInstanceOf(PathGuardError);
     expect(await exists(path.join(vaultRoot, '.git', 'refs', 'heads', 'pwn.md'))).toBe(false);
+  });
+
+  it('refuses a denied directory that is itself a link to somewhere ordinary', async () => {
+    // The other direction of the same guard, and the half nothing covered: `pathSegments`
+    // checks the LEXICAL segments as well as the resolved ones, and dropping the lexical
+    // half — `return relative(realRoot, resolved).split(sep)` — survived every other test
+    // in this file. It is not redundant. A link the repository never had is not a reason
+    // to honour a path the user plainly meant as the repository: with `node_modules` made
+    // a symlink to an ordinary folder of notes, the resolved path carries no denied
+    // segment at all, so the resolved half alone accepts the write and it lands silently
+    // in the link's target under a name that says it went somewhere else.
+    await fs.symlink(path.join('02-wiki'), path.join(vaultRoot, 'node_modules'), 'dir');
+
+    await expect(
+      writeNote({ vaultRoot, path: 'node_modules/notas.md', content: 'lixo' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+    expect(await exists(path.join(vaultRoot, '02-wiki', 'notas.md'))).toBe(false);
   });
 
   it('refuses an edit that reaches a denied directory through an in-vault symlink', async () => {
