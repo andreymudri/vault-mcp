@@ -103,10 +103,16 @@ async function withFifoWatch<T>(
         const handle = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
         await handle.close();
         opened = true;
-        return;
       } catch {
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        // ENXIO: nobody has it open for reading, which is the answer these tests want.
       }
+      // Keeps watching for the WHOLE call instead of stopping at the first reader. One call can
+      // reach the same path more than once — a classification, then a read, then a template —
+      // and a watcher that retired after the first unblock left the second read pending with
+      // nobody to free it: the test failed, then the worker could not be terminated. Measured
+      // on the duplicate-rule target: 90 s and SIGKILL with the one-shot watcher, 5 s and a
+      // clean exit with this one.
+      await new Promise((resolve) => setTimeout(resolve, 20));
     }
   })();
 
