@@ -104,6 +104,24 @@ function levenshtein(a: string, b: string, maxDistance: number): number {
 }
 
 /**
+ * `MAX_TERM_LENGTH` faz cada PAR (termo do vocabulário, termo da query) O(1), mas nada limitava
+ * quantos pares rodam: o laço de `suggestTerms` percorre TODO o vocabulário e, para cada termo,
+ * TODA a query. Ambos os lados são influenciáveis por um atacante — o vocabulário vem de conteúdo
+ * web recortado, a query é um argumento de tool call — então o produto pode crescer sem limite
+ * mesmo com cada par barato. Medido: vocabulário de 20.000 termos com query de 1.000 termos
+ * custava 2.936 ms; com query de 5.000 termos, 13.295 ms — tudo síncrono, bloqueando o único
+ * event loop do servidor.
+ *
+ * Este orçamento limita o total de pares escaneados por chamada, derivando quantos termos da
+ * query participam do escaneamento a partir do tamanho do vocabulário (`MAX_CANDIDATE_PAIRS /
+ * vocabularySize`, arredondado para baixo, nunca menos de 1). Escalar o corte pelo tamanho do
+ * vocabulário — em vez de um número fixo de termos de query — é o que deixa uso legítimo
+ * intocado: um vocabulário de 100.000 termos com uma query de 6 palavras (100.000 × 6 = 600.000
+ * pares) fica abaixo do orçamento e não sofre corte nenhum, exatamente como hoje.
+ */
+const MAX_CANDIDATE_PAIRS = 750_000;
+
+/**
  * Devolve até `max` termos do vocabulário do índice a distância de Levenshtein <= 2 de algum
  * termo tokenizado de `query`, ordenados por distância crescente e depois alfabeticamente.
  */
@@ -112,10 +130,16 @@ export function suggestTerms(index: InvertedIndex, query: string, max: number): 
   const queryTerms = tokenize(query);
   if (queryTerms.length === 0) return [];
 
+  const vocabularySize = index.postings.size;
+  const scannedQueryTerms =
+    vocabularySize === 0
+      ? queryTerms
+      : queryTerms.slice(0, Math.max(1, Math.floor(MAX_CANDIDATE_PAIRS / vocabularySize)));
+
   const candidates: Array<{ term: string; distance: number }> = [];
   for (const term of index.vocabulary()) {
     let best = MAX_DISTANCE + 1;
-    for (const queryTerm of queryTerms) {
+    for (const queryTerm of scannedQueryTerms) {
       const distance = levenshtein(term, queryTerm, MAX_DISTANCE);
       if (distance < best) best = distance;
       if (best === 0) break;

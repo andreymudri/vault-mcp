@@ -463,4 +463,84 @@ describe('suggestTerms', () => {
     // ~37s medidos sem o cap — qualquer regressão que reintroduza o scan completo estoura isso.
     expect(elapsedMs).toBeLessThan(2000);
   }, 10000);
+
+  it('cap de comprimento não é baixo demais: um termo real de 13 caracteres ainda é sugerido', () => {
+    // Bracket inferior de MAX_TERM_LENGTH. O teste acima só prova que o cap não é ALTO demais
+    // (não deixa passar termos absurdos). Nada até aqui prova que ele não é BAIXO demais — um cap
+    // de, digamos, 8 sobreviveria ao resto da suíte inteira e ainda assim rejeitaria "bullmq-worker"
+    // (13 caracteres), um termo de vocabulário real e comum na fixture, antes mesmo de calcular a
+    // distância. "bullmq-workor" (erro de digitação de um caractere em "worker") deve continuar
+    // sugerindo "bullmq-worker" — se MAX_TERM_LENGTH cair abaixo de 13, este teste falha porque
+    // levenshtein passa a tratar ambos os termos como fora de alcance por comprimento, não por
+    // distância de edição.
+    const index = buildNestjsIndex();
+    const suggestions = suggestTerms(index, 'bullmq-workor', 5);
+    expect(suggestions).toEqual(['bullmq-worker']);
+  });
+});
+
+describe('suggestTerms — orçamento total de pares (vocabulário × termos da query)', () => {
+  /** Chunk sintético mínimo, um termo de vocabulário por chunk. */
+  function vocabChunk(id: string, term: string): Chunk {
+    return {
+      id,
+      path: 'sintetico.md',
+      headingPath: [term],
+      lineStart: 1,
+      lineEnd: 1,
+      text: '',
+      tipo: undefined,
+      tags: [],
+    };
+  }
+
+  it('query com milhares de termos contra vocabulário de 20.000 termos não trava o event loop', () => {
+    // MAX_TERM_LENGTH torna cada PAR O(1), mas nada limitava quantos pares rodam: o laço externo
+    // de suggestTerms percorre TODO o vocabulário e, para cada termo, TODA a query. Query é um
+    // argumento de tool call (atacante controla o número de "termos" que tokenize produz) e
+    // vocabulário vem de conteúdo web recortado (atacante também o influencia), então o produto
+    // pode crescer sem limite mesmo com cada par barato. Medido antes deste fix: vocabulário de
+    // 20.000 termos com query de 5.000 termos custava dezenas de segundos de event loop bloqueado
+    // num servidor single-threaded.
+    const index = new InvertedIndex();
+    for (let i = 0; i < 20000; i++) {
+      index.addChunk(vocabChunk(`v#${i}`, `voc${String(i).padStart(6, '0')}xy`));
+    }
+    const queryTerms: string[] = [];
+    for (let i = 0; i < 5000; i++) queryTerms.push(`qry${String(i).padStart(6, '0')}xy`);
+    const query = queryTerms.join(' ');
+
+    const start = Date.now();
+    suggestTerms(index, query, 10);
+    const elapsedMs = Date.now() - start;
+
+    // Bound folgado o bastante para não ser flaky em CI, mas ordens de grandeza abaixo do tempo
+    // sem orçamento — qualquer regressão que remova o corte de pares (ou o eleve o bastante para
+    // deixar o produto vocabulário×query explodir de novo) estoura isso.
+    expect(elapsedMs).toBeLessThan(8000);
+  }, 15000);
+
+  it('orçamento não é baixo demais: vocabulário de 100.000 termos com query de 6 palavras continua achando a sugestão que só bate na última palavra', () => {
+    // Bracket inferior do orçamento de pares. O teste acima só prova que o orçamento não é ALTO
+    // demais. Este prova que ele não é BAIXO demais: um vocabulário de 100.000 termos com uma
+    // query de 6 palavras é o caso de uso legítimo citado como referência (não deve ser afetado
+    // pelo corte). Aqui, das 6 palavras da query, só a ÚLTIMA ("consultaxy") está a distância <= 2
+    // de um termo do vocabulário ("consult00"). Se o orçamento de pares for baixo demais para as
+    // 100.000 entradas do vocabulário, a implementação escaneia só um PREFIXO dos termos da query
+    // por termo de vocabulário, e — como o termo que bate está na última posição — a sugestão some
+    // mesmo estando dentro da distância de edição permitida. "consulta" -> "consultaxy" é distância
+    // 2 (duas inserções); todos os outros termos, entre si e contra o resto do vocabulário-ruído,
+    // ficam a distância > 2 (verificado por cálculo). Isso falha para qualquer orçamento menor que
+    // 100.000 (vocabulário) × 6 (posição da palavra que bate).
+    const index = new InvertedIndex();
+    for (let i = 0; i < 100000; i++) {
+      const term = i === 42 ? 'consulta' : `noise${String(i).padStart(6, '0')}`;
+      index.addChunk(vocabChunk(`v#${i}`, term));
+    }
+    const query = 'alfa beta gama delta epsilon consultaxy';
+
+    const suggestions = suggestTerms(index, query, 10);
+
+    expect(suggestions).toEqual(['consulta']);
+  }, 15000);
 });
