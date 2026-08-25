@@ -80,7 +80,66 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
- * A throwaway copy of `test/fixtures/vault` in `os.tmpdir()`. The fixture itself is
+ * Runs `work` while WATCHING `fifo` for a reader, and unblocks any reader that appears.
+ *
+ * A read of a FIFO nobody writes to never returns, and a test that hits one does not fail — it
+ * HANGS: vitest prints the failure and then never exits ("close timed out", "Failed to terminate
+ * worker"), which costs a whole run and reports nothing. So the write end is opened NON-BLOCKING,
+ * which answers ENXIO while nobody is reading and succeeds the instant somebody is; closing it
+ * immediately hands the reader EOF. The call under test therefore always finishes, and `opened`
+ * says whether it opened the FIFO at all — which is the thing being asserted, rather than left to
+ * a timeout.
+ */
+async function withFifoWatch<T>(
+  fifo: string,
+  work: () => Promise<T>
+): Promise<{ result: T; opened: boolean }> {
+  let finished = false;
+  let opened = false;
+  const watch = (async (): Promise<void> => {
+    const deadline = Date.now() + 20_000;
+    while (!finished && Date.now() < deadline) {
+      try {
+        const handle = await fs.open(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+        await handle.close();
+        opened = true;
+      } catch {
+        // ENXIO: nobody has it open for reading, which is the answer these tests want.
+      }
+      // Keeps watching for the WHOLE call instead of stopping at the first reader. One call can
+      // reach the same path more than once — a classification, then a read, then a template —
+      // and a watcher that retired after the first unblock left the second read pending with
+      // nobody to free it: the test failed, then the worker could not be terminated. Measured
+      // on the duplicate-rule target: 90 s and SIGKILL with the one-shot watcher, 5 s and a
+      // clean exit with this one.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  })();
+
+  try {
+    const result = await work();
+    return { result, opened };
+  } finally {
+    finished = true;
+    await watch;
+  }
+}
+
+/**
+ * Runs `work` and returns its OUTCOME — the rejection reason, or the resolved value.
+ *
+ * The resolved value rather than a marker string, so an assertion about what a successful call
+ * would have handed back still has the object to look at: a guard that stops refusing turns a
+ * `PathGuardError` into a `WriteResult` whose `diff` is exactly the thing under test.
+ */
+async function refusal(work: () => Promise<unknown>): Promise<unknown> {
+  return work().then(
+    (value: unknown) => value,
+    (err: unknown) => err
+  );
+}
+
+/** A throwaway copy of `test/fixtures/vault` in `os.tmpdir()`. The fixture itself is
  * read-only shared state across parallel test files, so every write test gets its own
  * copy and never touches the original.
  */
@@ -91,8 +150,33 @@ async function makeVault(): Promise<{ tmp: string; vaultRoot: string }> {
   return { tmp, vaultRoot };
 }
 
+/**
+ * A throwaway git repository with no background writer.
+ *
+ * `git gc --auto` runs in the BACKGROUND after a commit and keeps writing inside `.git`
+ * after the awaited command has returned, which races the teardown below: the phase gate —
+ * not a teammate's laptop — failed once with `ENOTEMPTY: rmdir '.../vault/.git'`, on a run
+ * whose only job is to be evidence. Turning the writer off is the half that removes the
+ * cause; `removeTree` is the half that survives anything else still holding the directory.
+ */
+async function initScratchRepo(repo: string): Promise<void> {
+  await git(repo, ['init']);
+  await git(repo, ['config', 'gc.auto', '0']);
+}
+
+/**
+ * Teardown that tolerates a transient writer inside a throwaway repository.
+ *
+ * A plain `fs.rm` raced git and failed with ENOTEMPTY on `.git/` under a loaded machine. The
+ * retries are `fs.rm`'s own answer to exactly that, and `gc.auto 0` above removes the writer.
+ * The same hardening `test/learn.test.ts` already carries.
+ */
+async function removeTree(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
 async function initRepo(vaultRoot: string): Promise<void> {
-  await git(vaultRoot, ['init']);
+  await initScratchRepo(vaultRoot);
   await git(vaultRoot, ['config', 'user.name', 'Vault MCP Test']);
   await git(vaultRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
   await git(vaultRoot, ['add', '--all']);
@@ -280,11 +364,11 @@ describe('unifiedDiff round-trip', () => {
 
   beforeEach(async () => {
     repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-roundtrip-'));
-    await git(repo, ['init']);
+    await initScratchRepo(repo);
   });
 
   afterEach(async () => {
-    await fs.rm(repo, { recursive: true, force: true });
+    await removeTree(repo);
   });
 
   /** Applies `unifiedDiff(before, after)` to `before` with git, returning the result. */
@@ -368,7 +452,7 @@ describe('atomicWrite', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('creates the parent directory when it is missing', async () => {
@@ -402,7 +486,7 @@ describe('writeNote', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('creates the note, resolves every template token, and makes one commit', async () => {
@@ -584,7 +668,7 @@ describe('writeNote', () => {
       expect(result.warning).toBeTruthy();
       expect(await fs.readFile(result.absPath, 'utf8')).toContain('Escrito mesmo sem git.');
     } finally {
-      await fs.rm(bare, { recursive: true, force: true });
+      await removeTree(bare);
     }
   });
 
@@ -689,7 +773,7 @@ describe('editNote', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('replaces the single occurrence, commits, and reports the diff', async () => {
@@ -742,14 +826,14 @@ describe('editNote', () => {
 
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-diff-apply-'));
     try {
-      await git(repo, ['init']);
+      await initScratchRepo(repo);
       await fs.mkdir(path.join(repo, path.dirname(rel)), { recursive: true });
       await fs.writeFile(path.join(repo, rel), beforeBytes, 'utf8');
       await fs.writeFile(path.join(repo, 'p.diff'), result.diff, 'utf8');
       await execFileAsync('git', ['-C', repo, 'apply', '--whitespace=nowarn', 'p.diff']);
       expect(await fs.readFile(path.join(repo, rel), 'utf8')).toBe(afterBytes);
     } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+      await removeTree(repo);
     }
   });
 
@@ -853,7 +937,7 @@ describe('editNote', () => {
       expect(result.warning).toBeTruthy();
       expect(await fs.readFile(result.absPath, 'utf8')).toContain('GuardaSemGit');
     } finally {
-      await fs.rm(bare, { recursive: true, force: true });
+      await removeTree(bare);
     }
   });
 });
@@ -1080,7 +1164,7 @@ describe('atomicWrite guarantees', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   /**
@@ -1223,7 +1307,7 @@ describe('write guard', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('refuses to write inside .git', async () => {
@@ -1392,6 +1476,157 @@ describe('write guard', () => {
     expect(await exists(result.absPath)).toBe(true);
   });
 
+  it('não abre um FIFO no caminho da nota ao escrever', async () => {
+    // `guardedPath` answers a question about the PATH: containment, suffix, denied segments,
+    // symlink escape. A FIFO inside the vault passes every one of them — it is `.md`, it is
+    // contained, it is in no denied directory — and the read that follows blocks on `open()` of
+    // a pipe with no writer and never returns. The server serialises writes through a queue
+    // that chains onto the previous promise, so ONE of these wedges every later write for the
+    // life of the process while unqueued reads keep answering: a server that looks alive with
+    // its whole write surface dead.
+    const fifo = path.join(vaultRoot, '02-wiki', 'cano.md');
+    await execFileAsync('mkfifo', [fifo]);
+    const antes = await countCommits(vaultRoot);
+
+    const { result, opened } = await withFifoWatch(fifo, () =>
+      refusal(() => writeNote({ vaultRoot, path: '02-wiki/cano.md', content: 'texto' }))
+    );
+
+    expect(opened).toBe(false);
+    expect(result).toBeInstanceOf(PathGuardError);
+    // Nothing was written over it and nothing was committed.
+    expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+    expect(await countCommits(vaultRoot)).toBe(antes);
+  }, 30_000);
+
+  it('não abre um FIFO no caminho da nota ao editar', async () => {
+    // The same hole on the other exported write path, and the same classification closes it.
+    const fifo = path.join(vaultRoot, '02-wiki', 'cano.md');
+    await execFileAsync('mkfifo', [fifo]);
+
+    const { result, opened } = await withFifoWatch(fifo, () =>
+      refusal(() =>
+        editNote({ vaultRoot, path: '02-wiki/cano.md', oldText: 'a', newText: 'b' })
+      )
+    );
+
+    expect(opened).toBe(false);
+    expect(result).toBeInstanceOf(PathGuardError);
+    expect((await fs.lstat(fifo)).isFIFO()).toBe(true);
+  }, 30_000);
+
+  it('recusa um HARD link para fora do vault em vez de vazar os bytes no diff', async () => {
+    // `guardedPath` cannot see this one and neither can `realpath`: a hard link has no
+    // "original" to resolve to, it IS the file under a second name, and that name happens to be
+    // inside the vault and to end in `.md`. Containment, suffix, denied segments and the symlink
+    // walk all pass, and the read that follows hands the out-of-vault bytes to `unifiedDiff` —
+    // which returns them in `WriteResult.diff`, straight into the caller's context.
+    // `vault_write_note` takes the path from the caller, so this is a live route.
+    const segredo = path.join(tmp, 'segredo.txt');
+    const conteudoSegredo = 'chave-secreta-nao-deve-vazar\nlinha dois do segredo\n';
+    await fs.writeFile(segredo, conteudoSegredo, 'utf8');
+    const link = path.join(vaultRoot, '02-wiki', 'vazamento.md');
+    await fs.link(segredo, link);
+    const antes = await countCommits(vaultRoot);
+
+    const resultado = await refusal(() =>
+      writeNote({ vaultRoot, path: '02-wiki/vazamento.md', content: 'texto novo' })
+    );
+
+    // The payload assertion goes FIRST so the failure names the leak rather than the type:
+    // without the guard this is a `WriteResult` whose `diff` carries the linked file's lines,
+    // while a `PathGuardError` serialises to `{}`.
+    expect(JSON.stringify(resultado)).not.toContain('chave-secreta');
+    expect(resultado).toBeInstanceOf(PathGuardError);
+    // Nothing was written through the link, and the file outside is byte-identical.
+    expect(await fs.readFile(segredo, 'utf8')).toBe(conteudoSegredo);
+    expect(await fs.readFile(link, 'utf8')).toBe(conteudoSegredo);
+    expect((await fs.lstat(link)).nlink).toBe(2);
+    expect(await countCommits(vaultRoot)).toBe(antes);
+  });
+
+  it('recusa um HARD link também na edição', async () => {
+    const segredo = path.join(tmp, 'segredo-edit.txt');
+    const conteudoSegredo = 'chave-secreta-da-edicao\n';
+    await fs.writeFile(segredo, conteudoSegredo, 'utf8');
+    await fs.link(segredo, path.join(vaultRoot, '02-wiki', 'vazamento-edit.md'));
+
+    const resultado = await refusal(() =>
+      editNote({
+        vaultRoot,
+        path: '02-wiki/vazamento-edit.md',
+        oldText: 'chave-secreta-da-edicao',
+        newText: 'trocado',
+      })
+    );
+
+    expect(JSON.stringify(resultado)).not.toContain('chave-secreta');
+    expect(resultado).toBeInstanceOf(PathGuardError);
+    expect(await fs.readFile(segredo, 'utf8')).toBe(conteudoSegredo);
+  });
+
+  it('não confunde uma nota comum com um hard link', async () => {
+    // The check is on the LINK COUNT, and an ordinary note has exactly one name. A guard that
+    // refused every regular file would pass the two tests above and break the vault.
+    const criada = await writeNote({
+      vaultRoot,
+      path: '02-wiki/nota-sem-link.md',
+      content: 'conteudo comum',
+    });
+    expect(criada.created).toBe(true);
+    expect((await fs.lstat(criada.absPath)).nlink).toBe(1);
+
+    const substituida = await writeNote({
+      vaultRoot,
+      path: '02-wiki/nota-sem-link.md',
+      content: 'conteudo trocado',
+    });
+    expect(substituida.created).toBe(false);
+    expect(await fs.readFile(substituida.absPath, 'utf8')).toContain('conteudo trocado');
+  });
+
+  it('recusa um diretório e um symlink no caminho da nota', async () => {
+    // `foreign` is not only a FIFO: a directory makes the read fail with EISDIR deep inside the
+    // write instead of a guard rejection the tool layer can report, and a symlink is a name for
+    // a note that lives somewhere else — the atomic rename lands ON the link, so the alias
+    // becomes a regular file holding a divergent copy while the note it named never changes.
+    await fs.mkdir(path.join(vaultRoot, '02-wiki', 'pasta.md'));
+    await fs.writeFile(path.join(vaultRoot, '02-wiki', 'alvo-real.md'), '# Real\n', 'utf8');
+    await fs.symlink('alvo-real.md', path.join(vaultRoot, '02-wiki', 'alias.md'));
+
+    await expect(
+      writeNote({ vaultRoot, path: '02-wiki/pasta.md', content: 'texto' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+    await expect(
+      writeNote({ vaultRoot, path: '02-wiki/alias.md', content: 'texto' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+    await expect(
+      editNote({ vaultRoot, path: '02-wiki/alias.md', oldText: 'Real', newText: 'Falso' })
+    ).rejects.toBeInstanceOf(PathGuardError);
+
+    // The link is still a link and the note it names is untouched.
+    expect((await fs.lstat(path.join(vaultRoot, '02-wiki', 'alias.md'))).isSymbolicLink()).toBe(
+      true
+    );
+    expect(await fs.readFile(path.join(vaultRoot, '02-wiki', 'alvo-real.md'), 'utf8')).toBe(
+      '# Real\n'
+    );
+  });
+
+  it('ainda cria uma nota num caminho livre e ainda substitui uma nota comum', async () => {
+    // The classification must not turn into "refuse everything that is not already a file":
+    // creating is the ordinary case, and replacing an ordinary note is what `writeNote` is for.
+    const criada = await writeNote({ vaultRoot, path: '02-wiki/nova-comum.md', content: 'um' });
+    expect(criada.created).toBe(true);
+    const substituida = await writeNote({
+      vaultRoot,
+      path: '02-wiki/nova-comum.md',
+      content: 'dois',
+    });
+    expect(substituida.created).toBe(false);
+    expect(await fs.readFile(substituida.absPath, 'utf8')).toContain('dois');
+  });
+
   it('refuses an edit inside .git just as it refuses a write', async () => {
     await expect(
       editNote({ vaultRoot, path: '.git/config.md', oldText: 'a', newText: 'b' })
@@ -1411,7 +1646,7 @@ describe('write ordering', () => {
   afterEach(async () => {
     vi.doUnmock('../src/write/diff.js');
     vi.resetModules();
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   /**
@@ -1567,7 +1802,7 @@ describe('editNote occurrence counting', () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmp, { recursive: true, force: true });
+    await removeTree(tmp);
   });
 
   it('refuses an ambiguous edit whose occurrences overlap', async () => {

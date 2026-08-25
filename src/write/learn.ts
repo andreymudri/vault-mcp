@@ -7,7 +7,7 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { ScoredChunk } from '../types.js';
 import { commitFiles } from './git.js';
-import { resolveWritePath } from './paths.js';
+import { classifyStat, INVISIBLE_CHARS, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
 import { editNote, writeNote, type WriteResult } from './writer.js';
@@ -78,18 +78,14 @@ const MAX_SLUG_CHARS = 80;
 const MAX_RESUMO_CHARS = 120;
 
 /**
- * Every C0 control, DEL, every C1 control, the two Unicode separators, and every bidi control
- * and zero-width format character — the same set `write/writer.ts` and `write/propagate.ts`
- * refuse, and it must not drift from them.
+ * `paths.ts`'s set with `g`: the ONE list of characters this directory refuses in a path
+ * and folds out of a line, derived from the shared source rather than written out again.
  *
- * Here it folds the free text that gets spliced into a single line (the section heading, the
- * commit subject, a link name) and refuses a `dominio` outright. A `titulo` carrying a newline
- * turns one commit subject into a forged multi-line message; one carrying U+202E reads in the
- * user's client as a name that is not the file on disk.
+ * Here it folds the free text that gets spliced into a single line (the section heading,
+ * the commit subject, a link name) and refuses a `dominio` outright. A `titulo` carrying a
+ * newline turns one commit subject into a forged multi-line message; one carrying U+202E
+ * reads in the user's client as a name that is not the file on disk.
  */
-// eslint-disable-next-line no-control-regex
-const INVISIBLE_CHARS =
-  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
 /**
@@ -327,8 +323,16 @@ const MAX_BLANK_BYTES = 1024 * 1024;
  * - `blank`: a regular file with NO content. Obsidian leaves one whenever a user clicks an
  *   unresolved link or presses Enter in a new note; it is a placeholder, not a note.
  * - `note`: a regular file with content.
- * - `foreign`: a SYMLINK, a directory, a FIFO, a socket, a device. Not a note, and nothing this
- *   module may read, write, or rename onto.
+ * - `foreign`: a SYMLINK, a HARD LINK, a directory, a FIFO, a socket, a device. Not a note,
+ *   and nothing this module may read, write, or rename onto.
+ *
+ * `foreign` exists so that no path in `learn()` OPENS one, and that is a claim about every
+ * read this call makes, not only the ones on the note itself. It was false when it was first
+ * written: the note path was classified, while `_templates/wiki.md` and `propagate`'s three
+ * targets were read with no classification at all, and a `mkfifo` on any of them left the
+ * promise pending for as long as the process lived. `skeletonContent` below asks this same
+ * question before the template read, `writer.ts` asks it before its own, and `propagate.ts`
+ * lstats each target before opening it.
  *
  * A symlink is `foreign` and that is the whole of its handling here. It cannot be read through:
  * `readFile` follows it, so a link to a FIFO is a read that never returns, on the single thread
@@ -357,7 +361,12 @@ async function pathState(absPath: string): Promise<PathState> {
     return 'free';
   }
 
-  if (!stat.isFile()) return 'foreign';
+  // The SHARED rule, over the `Stats` this function already has: not a regular file, or a
+  // regular file wearing a second name. A hard link classifies here for the reason `paths.ts`
+  // spells out — `fs.link(<segredo fora do vault>, <vault>/.../<slug>.md)` otherwise reads as
+  // an ordinary note, the append reads it, and the secret travels into the note, into the
+  // commit and into the `result.diff` handed back to the caller.
+  if (classifyStat(stat) === 'foreign') return 'foreign';
   if (stat.size === 0) return 'blank';
   if (stat.size > MAX_BLANK_BYTES) return 'note';
 
@@ -386,7 +395,15 @@ async function pathState(absPath: string): Promise<PathState> {
   } catch {
     return 'note';
   } finally {
-    await handle.close();
+    // A rejecting `close` must not escape: the answer is already decided, the descriptor is
+    // gone either way, and neither call site of `pathState` guards against a throw. A raw EIO
+    // from here left `learn` with nothing written and the user's insight lost — for a file
+    // this function had already finished reading.
+    try {
+      await handle.close();
+    } catch {
+      // Nothing to do about it, and nothing that depends on it.
+    }
   }
 }
 
@@ -413,11 +430,13 @@ function isWritable(state: PathState): boolean {
  * ever.
  *
  * The two routes are pinned against each other by test, and they agree byte for byte except in
- * ONE field: `criado`. `writeNote` stamps it from wall-clock time on the free path, while this one
- * passes `opts.now` — the same instant the MOC entry, the daily capture and the append heading of
- * this very call already use. `opts.now` is the right value and `writeNote` is the outlier, but
- * `writer.ts` is outside this task's file set, so the divergence stands and is asserted rather
- * than described.
+ * ONE field: `criado`. `writeNote` stamps it from wall-clock time on the free path (through the
+ * template's own `tp.date.now`), while this one passes `opts.now` — the same instant the MOC
+ * entry, the daily capture and the append heading of this very call already use. `opts.now` is
+ * the right value and `writeNote` is the outlier, but its stamp is its contract with every other
+ * caller and not only with this one, so the divergence stands and is ASSERTED by test rather than
+ * described here. The assertion names both calendar days the wall clock can be on, because a
+ * single sample taken after the call fails on a correct note whenever the run crosses midnight.
  */
 function titleFromPath(relPath: string): string {
   return basename(relPath, '.md')
@@ -471,9 +490,22 @@ async function skeletonContent(
   relPath: string,
   body: string,
 ): Promise<{ content: string; warning?: string }> {
+  const templatePath = join(opts.vaultRoot, '_templates', 'wiki.md');
+  // Classified BEFORE it is opened, by the same `pathState` the note path goes through.
+  // `readFile` on a FIFO never returns, and this path is not caller-supplied but it is inside
+  // a directory the user syncs: `mkfifo <vault>/_templates/wiki.md` left this promise pending
+  // for ~6000 ms and then for as long as the process lived, wedging every later tool call on
+  // the single-threaded stdio server. Reproduced; SIGKILL was the only way out.
+  if ((await pathState(templatePath)) === 'foreign') {
+    return {
+      content: body,
+      warning: 'template ignorado: _templates/wiki.md não é um arquivo comum',
+    };
+  }
+
   let templateText: string;
   try {
-    templateText = await fs.readFile(join(opts.vaultRoot, '_templates', 'wiki.md'), 'utf8');
+    templateText = await fs.readFile(templatePath, 'utf8');
   } catch {
     // The same warning `writeNote` raises for the same missing file, since it will not raise it
     // itself on this route. The learning is still written: the body is what the user asked for.

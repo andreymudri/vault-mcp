@@ -1,10 +1,15 @@
 import { promises as fs } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
-import { resolveWritePath, assertNoSymlinkEscape, PathGuardError } from './paths.js';
-import { formatLocal } from './template.js';
+import {
+  classifyNode,
+  forMessage,
+  guardedPath,
+  INVISIBLE_CHARS,
+  PathGuardError,
+} from './paths.js';
+import { ensureFrontmatter, formatLocal } from './template.js';
 
 /**
  * Automatic propagation of a learning into the three places that make it findable again:
@@ -52,7 +57,11 @@ export function bumpAtualizado(content: string, date: string): string {
   if (end === -1) return content;
   const head = content.slice(0, end);
   const rest = content.slice(end);
-  const eol = head.includes('\r\n') ? '\r' : '';
+  // `endsWith` as well as `includes`, for the block that has no properties at all:
+  // `---\r\n---\r\n` is what Obsidian leaves when the user removes every property, and
+  // there `head` is the single line `---\r` — no `\r\n` inside it to find, so the field
+  // was inserted with a bare LF into a file that is CRLF everywhere else.
+  const eol = head.includes('\r\n') || head.endsWith('\r') ? '\r' : '';
   if (/^atualizado:/m.test(head)) {
     // No `eol` here: the match stops before the `\r`, which stays where it was.
     return head.replace(/^atualizado:.*$/m, `atualizado: ${date}`) + rest;
@@ -71,32 +80,50 @@ const HEADING_RE = /^\s{0,3}#{1,6}\s/;
 /** A bullet or ordered list item. */
 const ITEM_RE = /^\s*(?:[-*+]\s|\d+[.)]\s)/;
 
-/** The opening or closing line of a fenced code block. */
-const FENCE_RE = /^\s{0,3}(?:```|~~~)/;
+/**
+ * A fenced code block delimiter: three or more backticks or tildes, indented at most three
+ * spaces, with whatever info string follows captured.
+ *
+ * Both halves are load-bearing. The RUN has to be captured because a fence is closed only by
+ * a marker at least as long as the one that opened it, which is the whole point of writing
+ * ` ````md ` around a block that itself contains ``` — the form a MOC uses to document its
+ * own entry format. And the info string has to be captured because a CLOSING fence carries
+ * none.
+ *
+ * The `\r?` before the anchor is not decoration. `insertUnderSection` splits on `\n`, so every
+ * line of a file synced from Windows arrives with its `\r` still attached and a fence reads as
+ * "```\r" — which `.` cannot match and `$` will not match in front of. Anchoring without it
+ * made EVERY delimiter in a CRLF file invisible, so the file parsed as if it had no code block
+ * at all: a `## Notas` quoted inside an example became the target heading and the entry was
+ * written into the block, reported as a successful propagation with a diff and no warning.
+ * That is the very defect this fence state exists to close, and the anchor reopened it for
+ * CRLF only. It is also why the `\r` is kept OUT of the capture: an info string of `md\r` is
+ * not the empty string, so the opener would never be recognised as closed by its own fence.
+ */
+const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})([^\r\n]*)\r?$/;
 
 /**
- * Every C0 control, DEL, every C1 control, the two Unicode separators, and every bidi
- * control and zero-width format character.
+ * `paths.ts`'s set with `g`, for the two functions that FOLD rather than refuse.
  *
- * The same set `write/writer.ts`'s `CONTROL_CHARS` refuses and `write/diff.ts`'s
- * `headerPath` escapes, and the three MUST NOT DRIFT. Here it does two jobs: it refuses a
- * `dominio` carrying any of them, and it folds them out of the free prose (`resumo`,
- * `slug`, `projeto`) that gets spliced into a markdown line.
- *
- * Line breaks are the obvious half — a `resumo` with a `\n` turns one MOC entry into a
- * broken link plus orphan lines that stay in the user's index forever — and U+0085,
- * U+2028 and U+2029 break lines in every HTML-rendering client even though `split('\n')`
- * sees one line. The other half breaks no line at all: the bidi controls REORDER what
- * follows them and the zero-width formats render as nothing, so an entry can read as one
- * thing in Obsidian and name another on disk.
+ * Derived from the shared source rather than written out again: the same characters that
+ * make a path unwritable make a MOC entry unreadable, and the two answers drifting apart
+ * is how a `resumo` this module accepts becomes a line the user cannot check.
  */
-// eslint-disable-next-line no-control-regex
-const INVISIBLE_CHARS =
-  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
-
-/** The same set with `g`, for the two functions that fold rather than refuse. */
-// eslint-disable-next-line no-control-regex
 const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
+
+/** An open fence: what closes it is a marker of the same kind, at least this long. */
+interface OpenFence {
+  marker: string;
+  length: number;
+}
+
+/** The delimiter on this line, or `undefined` when the line is ordinary content. */
+function fenceOn(line: string): { marker: string; length: number; info: string } | undefined {
+  const match = FENCE_RE.exec(line);
+  if (match === null) return undefined;
+  const run = match[1] ?? '';
+  return { marker: run[0] ?? '', length: run.length, info: (match[2] ?? '').trim() };
+}
 
 /**
  * Marks every line that sits INSIDE a fenced code block.
@@ -106,19 +133,45 @@ const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
  * section, and the new entry lands inside a code fence where no link resolver will ever
  * see it. Fence state is computed once over the whole file so heading detection, section
  * bounds, the duplicate scan and item detection all agree on it.
+ *
+ * The state is the OPEN FENCE, not a boolean, and that is the fix for a real defect: a
+ * plain toggle counts every delimiter, so the inner ``` of a ` ````md ` block — the exact
+ * shape a MOC uses to show what an entry looks like — closed the outer block. Everything
+ * after it read as ordinary content, a `## Notas` quoted inside the example became the
+ * target heading, and the new entry was written INTO the code block while the real section
+ * stayed empty. Reported as a successful write, with a diff and no warning.
+ *
+ * So a fence closes only on a marker of the SAME kind (a `~~~` inside a ``` block is
+ * content), at least as long as the opener, and with nothing after it — a closing fence
+ * carries no info string. A backtick fence whose info string contains a backtick is not a
+ * fence at all, which is CommonMark's rule and keeps an inline `` `a` `` from opening one.
  */
 function fencedLines(lines: string[]): boolean[] {
   const inFence: boolean[] = new Array<boolean>(lines.length).fill(false);
-  let open = false;
+  let open: OpenFence | undefined;
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? '';
-    if (FENCE_RE.test(line)) {
-      // The fence delimiter itself counts as inside: it is never a heading or an item.
-      inFence[i] = true;
-      open = !open;
+    const fence = fenceOn(lines[i] ?? '');
+    if (fence === undefined) {
+      inFence[i] = open !== undefined;
       continue;
     }
-    inFence[i] = open;
+
+    if (open === undefined) {
+      if (fence.marker === '`' && fence.info.includes('`')) {
+        // Not a fence: an inline code span, or a line that merely starts with backticks.
+        inFence[i] = false;
+        continue;
+      }
+      // The delimiter itself counts as inside: it is never a heading or an item.
+      inFence[i] = true;
+      open = { marker: fence.marker, length: fence.length };
+      continue;
+    }
+
+    inFence[i] = true;
+    if (fence.marker === open.marker && fence.length >= open.length && fence.info === '') {
+      open = undefined;
+    }
   }
   return inFence;
 }
@@ -271,14 +324,7 @@ function capitalize(dominio: string): string {
  * there is one code path that appends an entry rather than two that must agree.
  */
 export function buildMoc(dominio: string, date: string): string {
-  return [
-    '---',
-    'tipo: moc',
-    `tags: [${dominio}]`,
-    `criado: ${date}`,
-    `atualizado: ${date}`,
-    '---',
-    '',
+  const body = [
     `# ${capitalize(dominio)} — Mapa de Conteúdo`,
     '',
     '## Notas',
@@ -288,6 +334,20 @@ export function buildMoc(dominio: string, date: string): string {
     '- [[../../00-index/index-knowledge|índice de conhecimento]]',
     '',
   ].join('\n');
+  // SERIALISED, never interpolated. `tags: [${dominio}]` is string concatenation wearing
+  // YAML's clothes, and `dominioProblem` accepts `#`, `%`, `@`, `!`, quotes and a backtick:
+  // `#` opens a comment, `!` opens a tag, a backtick is a reserved indicator and a quote
+  // opens a scalar that never closes. js-yaml then refuses the WHOLE block, so the new MOC
+  // is born with no `tipo: moc` at all and the scanner files it as an ordinary note —
+  // invisible to `vault_list({tipo:'moc'})` and to every weighting that reads the type. A
+  // comma is the quiet version of the same bug: `tags: [a,b]` is two tags.
+  // `writer.ts` already builds every note's block this way.
+  return ensureFrontmatter(body, {
+    tipo: 'moc',
+    tags: [dominio],
+    criado: date,
+    atualizado: date,
+  });
 }
 
 /** A brand new daily note, with an empty `## Capturas` for the capture line to land in. */
@@ -343,148 +403,6 @@ function buildIndex(date: string): string {
  */
 function oneLine(text: string): string {
   return text.replace(INVISIBLE_CHARS_GLOBAL, ' ').replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Renders a path or a domain inside a warning WITHOUT letting it forge lines.
- *
- * The warning is concatenated into the tool response the user reads, and a `dominio` of
- * `../.. tudo propagado com sucesso` produced a message whose second rendered line read
- * as a success report attached to a write that was actually REFUSED. `diff.ts`'s
- * `headerPath` escapes for exactly this reason and this is the same lock on the other
- * exported surface: refusing the input is not enough on its own, because the input has to
- * be NAMED in the refusal for the message to be worth anything.
- */
-function forMessage(text: string): string {
-  return text.replace(INVISIBLE_CHARS_GLOBAL, (ch) => {
-    if (ch === '\n') return '\\n';
-    if (ch === '\r') return '\\r';
-    if (ch === '\t') return '\\t';
-    const code = ch.charCodeAt(0);
-    return code <= 0xff
-      ? `\\x${code.toString(16).padStart(2, '0')}`
-      : `\\u${code.toString(16).padStart(4, '0')}`;
-  });
-}
-
-/**
- * Directory names that are MACHINE STATE, not vault content, matched as a whole path
- * segment at any depth.
- *
- * `resolveWritePath`'s `DENIED_PREFIXES` answers a DIFFERENT question — which top-level
- * areas of the vault are read-only (`99-archive/`, `_templates/`) — and it left `.git/`
- * wide open here exactly as it did in `writer.ts`: a `dominio` of `../.git/refs/heads`
- * resolves to a path still inside the vault, whose first segment is `02-wiki`, and the
- * MOC was written into the repository's loose refs. `git fsck` then reported
- * `badRefName`, and through an in-vault symlink (`02-wiki/compartilhado →
- * ../.git/refs/heads`, which a user or a sync client can create) the same write landed in
- * `refs/heads/` and made `git log --all` and `git gc` fail outright with
- * `fatal: bad object`. That is not a file the user can delete and move on from: it breaks
- * every subsequent git operation, including the commit `vault_learn` is about to make.
- *
- * NOTE, and it is a real one: this DUPLICATES `writer.ts`'s `DENIED_SEGMENTS`,
- * `normalizeSegment`, `pathSegments` and the guard order of its `guardedPath`. The check
- * belongs in `paths.ts` beside `DENIED_PREFIXES`, so that one boundary serves every
- * writer — `writer.ts` says the same thing in its own docblock. Neither `paths.ts` nor
- * `writer.ts` is in this task's file set, so the guard is reimplemented at the only other
- * point every propagation write passes through, because the alternative is `propagate`
- * accepting input `writeNote` refuses against the same vault. FOLLOW-UP for a later
- * phase: move `DENIED_SEGMENTS` + `pathSegments` into `paths.ts` and have both writers
- * call it, deleting this copy and `writer.ts`'s.
- */
-const DENIED_SEGMENTS = new Set(['.git', '.obsidian', 'node_modules', '_templates']);
-
-/**
- * A path segment as the FILESYSTEM will compare it, not as the string was typed.
- *
- * `.git` is one directory under several spellings: case-insensitive on APFS and on every
- * Windows volume, and Windows strips trailing dots and spaces from a component before it
- * reaches the filesystem, so `.GIT`, `.Git`, `.git.` and `.git ` all open the real one
- * while `Set.has('.git')` answers false for every one of them. Normalising on every
- * platform is deliberate: a vault is synced between machines, so what this Linux process
- * considers legal will be checked out on the macOS laptop too.
- */
-function normalizeSegment(segment: string): string {
-  return segment.replace(/[. ]+$/, '').toLowerCase();
-}
-
-/**
- * The segments of `absPath` both LEXICALLY and after every symlink on the way has been
- * followed, relative to the vault's own real root.
- *
- * Both, and a denied segment in either refuses the write. The lexical path is not the
- * path that gets written — `02-wiki/compartilhado/x-moc.md` carries no `.git` segment for
- * a string check to find, yet lands in `<vault>/.git/refs/heads/` when `compartilhado` is
- * a link — and the resolved path is not the path the caller MEANT: `.git` could itself be
- * a symlink to an innocent directory, and honouring that would let a path the user plainly
- * meant as the repository through on the strength of a link the repository never had.
- */
-async function pathSegments(vaultRoot: string, absPath: string): Promise<string[]> {
-  const lexicalRoot = resolve(vaultRoot);
-  const segments = relative(lexicalRoot, absPath).split(sep);
-
-  let realRoot: string;
-  try {
-    realRoot = await fs.realpath(lexicalRoot);
-  } catch {
-    // A vault root that cannot be resolved is `assertNoSymlinkEscape`'s error to raise,
-    // with its own message. Here it just means there is nothing more to add.
-    return segments;
-  }
-
-  // Walk up to the deepest ancestor that exists — a new domain's directory does not yet —
-  // realpath it, and put the not-yet-existing tail back on the end.
-  let head = absPath;
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      head = await fs.realpath(head);
-      break;
-    } catch {
-      const parent = dirname(head);
-      if (parent === head) return segments;
-      tail.unshift(basename(head));
-      head = parent;
-    }
-  }
-
-  const resolved = tail.length === 0 ? head : join(head, ...tail);
-  return [...segments, ...relative(realRoot, resolved).split(sep)];
-}
-
-/**
- * Every half of the path guard, in the order they have to run — the same guard
- * `writer.ts` applies to `writeNote`.
- *
- * Symmetry between the two exported write paths is the point. `propagate` writes files
- * whose paths are built from caller-supplied input just as `writeNote` does, and a
- * `dominio` that `writeNote` refuses must not be a `dominio` `propagate` accepts: one
- * lenient writer is enough to put a file in `.git/refs/heads/` and break the repository
- * for every other writer.
- */
-async function guardedPath(vaultRoot: string, relPath: string): Promise<string> {
-  // First, before any `fs` call and before `resolveWritePath` interpolates the string into
-  // a message: a NUL makes `fs` throw its own `TypeError` from inside the write.
-  if (INVISIBLE_CHARS.test(relPath)) {
-    throw new PathGuardError(
-      `caminho não pode conter caractere de controle: ${forMessage(relPath)}`,
-    );
-  }
-
-  const absPath = resolveWritePath(vaultRoot, relPath);
-
-  // Segment-wise, on the RESOLVED path as well as the lexical one. Whole segments, not
-  // string prefixes, so an ordinary note under `02-wiki/git/` stays legal.
-  for (const segment of await pathSegments(vaultRoot, absPath)) {
-    if (DENIED_SEGMENTS.has(normalizeSegment(segment))) {
-      throw new PathGuardError(
-        `escrita negada em ${forMessage(segment)}/ (área interna, não é conteúdo)`,
-      );
-    }
-  }
-
-  await assertNoSymlinkEscape(vaultRoot, absPath);
-  return absPath;
 }
 
 /**
@@ -561,16 +479,32 @@ async function applyTarget(
   try {
     const absPath = await guardedPath(vaultRoot, target.relPath);
 
+    // Asked BEFORE anything is opened, and by `lstat`, which answers for the NAME rather
+    // than for whatever it points at. `readFile` follows a symlink — onto a FIFO it never
+    // returns from, on the single thread that serves every tool call, which wedges every
+    // later call until the process is killed — and `atomicWrite`'s rename lands ON a link
+    // instead of through it, so the user's alias becomes a regular file holding a divergent
+    // copy. Neither is a file this module may touch, and both paths here are built from
+    // caller-supplied input. `learn.ts`'s `pathState` draws the same line for the same
+    // reason and the two must not disagree.
+    const kind = await classifyNode(absPath);
+    if (kind === 'foreign') {
+      throw new PathGuardError('alvo não é um arquivo comum (link, diretório ou dispositivo)');
+    }
+
     let before = '';
-    let exists = true;
-    try {
-      before = await fs.readFile(absPath, 'utf8');
-    } catch (err) {
-      // ENOENT is the ordinary "create it" case. Anything else — a directory in the way,
-      // a permission problem — is a real failure and must be reported, not papered over
-      // by writing a fresh file on top of whatever is actually there.
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      exists = false;
+    let exists = kind === 'file';
+    if (exists) {
+      try {
+        before = await fs.readFile(absPath, 'utf8');
+      } catch (err) {
+        // ENOENT is the ordinary "create it" case — here only as a race, since `lstat` just
+        // saw the file. Anything else — a file too large to read, a permission problem — is
+        // a real failure and must be reported, not papered over by writing a fresh file on
+        // top of whatever is actually there.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        exists = false;
+      }
     }
 
     // A ZERO-BYTE note is not a note: Obsidian's daily-note plugin with an empty template
