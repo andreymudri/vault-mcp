@@ -896,6 +896,16 @@ async function hardLinkHint(vaultRoot: string, relPath: string): Promise<string 
  *
  * `EditError` and `LearnError` are refusals of the ARGUMENTS — an anchor that matches nothing, a
  * domain that does not exist — and adding a link count to those would be noise.
+ *
+ * That exemption is DELIBERATELY UNPINNED, and this note exists so the next reader does not spend
+ * the afternoon I spent trying to pin it. Reaching it needs an argument refusal ON a hardlinked
+ * file, and the write guard in `src/write/paths.ts` classifies `nlink > 1` as `foreign` and refuses
+ * it BEFORE any anchor is compared — correctly, since a shared inode must not be read or written
+ * through. So that combination cannot occur, and on a file with a single link `hardLinkHint`
+ * returns `undefined` anyway. The branch stays because this module should not lean on another
+ * module's guard for a property it states itself; what IS reachable — a file-level refusal carrying
+ * the count, an argument refusal carrying nothing about the file — is asserted as a pair in
+ * `test/tools.test.ts`.
  */
 async function withWriteDetail<T>(
   vaultRoot: string,

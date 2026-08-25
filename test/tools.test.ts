@@ -1287,39 +1287,40 @@ describe('vault_write_note e vault_edit_note', () => {
     expect(await vaultContains(vaultRoot, 'zztagnumerica')).toHaveLength(0);
   });
 
-  it('uma escrita recusada num arquivo com hard link diz a contagem de links', async () => {
+  it('recusa de ARQUIVO leva a contagem de links; recusa de ARGUMENTO não leva nada disso', async () => {
     const vaultRoot = await makeVault();
-    const alvo = path.join(vaultRoot, '99-archive', 'com-link.md');
-    await fs.writeFile(alvo, '# Arquivada\n', 'utf8');
-    await fs.link(alvo, path.join(vaultRoot, '99-archive', 'espelho.md'));
-
     const { call } = makeTools(vaultRoot);
-    // `99-archive/` é área somente leitura: a escrita é recusada pelo guard de caminho…
-    const resultado = await call('vault_write_note', { path: '99-archive/com-link.md', content: '# X\n' });
 
-    expect(resultado.isError).toBe(true);
-    // …e a resposta diz POR QUE o arquivo é especial, em vez de deixar o usuário adivinhar.
-    expect(textOf(resultado)).toContain('hard link');
-    expect(textOf(resultado)).toContain('2');
-  });
+    // Metade 1 — recusa sobre o ARQUIVO: `99-archive/` é área somente leitura, e o alvo tem dois
+    // nomes apontando para o mesmo inode. A resposta precisa dizer isso, senão o usuário não
+    // distingue um link hostil de um snapshot `cp -al` que ele mesmo fez.
+    const arquivada = path.join(vaultRoot, '99-archive', 'com-link.md');
+    await fs.writeFile(arquivada, '# Arquivada\n', 'utf8');
+    await fs.link(arquivada, path.join(vaultRoot, '99-archive', 'espelho.md'));
+    const sobreArquivo = await call('vault_write_note', { path: '99-archive/com-link.md', content: '# X\n' });
 
-  it('uma recusa de argumento não ganha ruído sobre links, nem em arquivo com hard link', async () => {
-    const vaultRoot = await makeVault();
-    // O arquivo TEM hard link: é o que separa "não menciona porque não há" de "não menciona porque
-    // a recusa é sobre o argumento".
-    await fs.link(path.join(vaultRoot, AUTH_GUARD), path.join(vaultRoot, '02-wiki/nestjs/espelho.md'));
-    expect((await fs.lstat(path.join(vaultRoot, AUTH_GUARD))).nlink).toBe(2);
+    expect(sobreArquivo.isError).toBe(true);
+    expect(textOf(sobreArquivo)).toContain('hard link');
+    expect(textOf(sobreArquivo)).toContain('2');
 
-    const { call } = makeTools(vaultRoot);
-    const resultado = await call('vault_edit_note', {
+    // Metade 2 — recusa sobre o ARGUMENTO, num arquivo com UM só nome. O `old_text` é que está
+    // errado, e a resposta não pode misturar propriedades do arquivo nisso.
+    //
+    // O arquivo desta metade é deliberadamente NÃO linkado, e não por conveniência: o guard de
+    // escrita recusa um caminho com `nlink > 1` ANTES de comparar a âncora, então "recusa de
+    // argumento num arquivo com hard link" é um estado que o sistema não produz. Uma versão
+    // anterior deste teste pedia exatamente esse estado e só passava porque o guard ainda não
+    // existia.
+    expect((await fs.lstat(path.join(vaultRoot, AUTH_GUARD))).nlink).toBe(1);
+    const sobreArgumento = await call('vault_edit_note', {
       path: AUTH_GUARD,
       old_text: 'trecho que não existe',
       new_text: 'x',
     });
 
-    expect(resultado.isError).toBe(true);
-    expect(textOf(resultado)).toMatch(/não encontrado/i);
-    expect(textOf(resultado)).not.toContain('hard link');
+    expect(sobreArgumento.isError).toBe(true);
+    expect(textOf(sobreArgumento)).toMatch(/não encontrado/i);
+    expect(textOf(sobreArgumento)).not.toContain('hard link');
   });
 
   it('não conta links de um arquivo FORA do vault alcançado por symlink', async () => {
