@@ -28,27 +28,11 @@ VAULT_PATH="$HOME/Path/To/Your/Vault" npx vault-mcp
 Adicione o MCP com:
 
 ```bash
-claude mcp add vault --env VAULT_PATH="$HOME/Path/To/Your/Vault" -- \
-  node /path/to/vault-mcp/dist/server/index.js
+claude mcp add vault --env VAULT_PATH="/home/user/Knowledge/Vault" -- \
+  node /home/user/projetos/vault-mcp/dist/server/index.js
 ```
 
-Troque `/path/to/vault-mcp` pelo caminho absoluto ao diretório do projeto e `$HOME/Path/To/Your/Vault` pela raiz do seu vault.
-
-No arquivo `claude_desktop_config.json`, a entrada equivalente é:
-
-```json
-{
-  "mcpServers": {
-    "vault": {
-      "command": "node",
-      "args": ["/path/to/vault-mcp/dist/server/index.js"],
-      "env": {
-        "VAULT_PATH": "$HOME/Path/To/Your/Vault"
-      }
-    }
-  }
-}
-```
+Substitua `/home/user/Knowledge/Vault` pelo caminho **absoluto** da raiz do seu vault e `/home/user/projetos/vault-mcp` pelo caminho absoluto do diretório do projeto. Note que a variável `VAULT_PATH` é expandida pelo shell no comando acima, mas não seria em arquivos de configuração JSON (não há expansão de variáveis no JSON — sempre use caminhos absolutos).
 
 ## As Sete Tools
 
@@ -60,7 +44,7 @@ No arquivo `claude_desktop_config.json`, a entrada equivalente é:
 | `vault_backlinks` | `path` (caminho relativo) | Medir conectividade de um assunto, achar o MOC que indexa uma nota, avaliar impacto de mudança. Deduplica links: uma nota que linka o alvo duas vezes conta como um backlink. |
 | `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
 | `vault_edit_note` | `path`, `old_text`, `new_text` (obrigatórios) | Substituir um trecho exato de uma nota. Falha se o trecho não existir ou aparecer mais de uma vez — nesse caso, inclua mais contexto em `old_text`. |
-| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (obrigatórios); `projeto`, `tags`, `links`, `confirm_novo_dominio` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. |
+| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (obrigatórios); `projeto`, `tags`, `links`, `confirm_novo_dominio` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. **Se o domínio não existe em `02-wiki/`, a chamada falha; use `confirm_novo_dominio: true` para criar.** |
 
 ## Como o `vault_learn` Decide
 
@@ -73,16 +57,26 @@ Quando ambas as condições são atendidas, **anexa** à nota existente numa se�
 
 O viés é deliberado: quando há dúvida, cria nota nova em vez de enterrar aprendizado num lugar errado. É sempre possível mesclar notas depois; é impossível recuperar aprendizado perdido.
 
+### Escape hatches
+
+Duas exceções podem mudar o destino final:
+
+1. **Colisão de título**: a regra de duplicata recusa, mas um arquivo com aquele nome já existe (nota antiga com o mesmo slug). O servidor **anexa nela mesmo assim** e avisa `anexado em <path> por coincidência de título; a checagem de duplicata não indicou essa nota`. Isso traz uma nota perdida de volta para o fluxo de acúmulo.
+
+2. **Criação com nome livre**: o servidor decide anexar, mas o alvo não pode receber o texto (arquivo desapareceu, está vazio, é um symlink ou FIFO). O servidor **cria nota nova com um nome diferente** (`2026-08-25-titulo.md` em vez de `titulo.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
+
+Em ambos os casos, nenhuma insight é perdida — a resposta diz exatamente onde o aprendizado foi a parar.
+
 ## O Que `vault_learn` Escreve
 
 Uma chamada a `vault_learn` pode tocar até 4 arquivos, todos em **um único commit** com mensagem `docs(vault): {titulo}`:
 
-1. **A nota** (`02-wiki/<dominio>/<slug>.md`): criada ou com aprendizado anexado. Obrigatória.
-2. **O MOC do domínio** (`02-wiki/<dominio>/<dominio>-moc.md`): criado se não existir; atualizado com uma linha `- [[<slug>]] — <resumo>` se a nota for nova. Obrigatório.
-3. **Índice de conhecimento** (`00-index/index-knowledge.md`): atualizado com entrada do novo domínio APENAS se o domínio não existia antes. Obrigatório quando `domainIsNew`.
-4. **Nota diária** (`04-daily/YYYY-MM-DD.md`): criada ou atualizada com captura `- HH:MM [[<slug>]] (<tipo>, <projeto>)`. Obrigatória.
+1. **A nota** (`02-wiki/<dominio>/<slug>.md`): criada ou com aprendizado anexado. Sempre escrita.
+2. **O MOC do domínio** (`02-wiki/<dominio>/<dominio>-moc.md`): criado se não existir. Atualizado com `atualizado:` em toda chamada; com uma linha `- [[<slug>]] — <resumo>` apenas se a nota for nova. Escrito **apenas se o conteúdo mudar**.
+3. **Índice de conhecimento** (`00-index/index-knowledge.md`): atualizado APENAS se o domínio não existia antes. Escrito **apenas se o conteúdo mudar**.
+4. **Nota diária** (`04-daily/YYYY-MM-DD.md`): criada se não existir. Atualizada com captura `- HH:MM [[<slug>]] (<tipo>, <projeto>)` apenas se a linha não existir. Escrito **apenas se o conteúdo mudar**.
 
-Todos os arquivos são gravados atomicamente. Se qualquer um falhar (ex.: git timeout), os arquivos permanecem em disco e a resposta inclui aviso nomeando o arquivo que não foi commitado.
+Todos os arquivos são gravados atomicamente. Se a propagação falhar (ex.: sem espaço em disco), os arquivos permanecem em disco e a resposta inclui aviso nomeando o alvo que não foi atualizado. Se o commit git falhar (ex.: repositório não existe), os arquivos permanecem gravados em disco e a resposta inclui aviso.
 
 Reverter um aprendizado inteiro é:
 ```bash
@@ -112,7 +106,7 @@ Escritas são recusadas para:
 - Symlinks (resolvidos antes de escrever)
 - Hard links
 
-**Dentro de uma única instância do servidor**, dois `vault_learn` ou `vault_write_note` concorrentes não interleave: cada escrita espera a anterior terminar, com timeout de 60 segundos. Isto NÃO protege contra escritas simultâneas do Obsidian, de uma segunda instância do servidor, ou de um `git checkout` no vault.
+**Dentro de uma única instância do servidor**, dois `vault_learn` ou `vault_write_note` concorrentes não interleave inicialmente: cada escrita espera a anterior terminar. Se uma escrita ficar pendurada (ex.: git bloqueado), o timeout de 60 segundos **libera a fila para a próxima escrita**, não o chamador — a chamada anterior continua aguardando seu resultado real. Quando a próxima escrita inicia, ambas podem estar rodando — a chamada ganha um aviso dizendo que a exclusividade não foi garantida. Isto NÃO protege contra escritas simultâneas do Obsidian, de uma segunda instância do servidor, ou de um `git checkout` no vault.
 
 ## Busca e Recuperação
 
