@@ -2,6 +2,7 @@ import { LinkGraph } from '../graph/graph.js';
 import { search as bm25Search, suggestTerms } from '../index/bm25.js';
 import { chunkNote } from '../index/chunker.js';
 import { InvertedIndex } from '../index/inverted-index.js';
+import { tokenize } from '../index/tokenizer.js';
 import type { Chunk, Note, ScoredChunk, SearchResult } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import {
@@ -44,6 +45,34 @@ const RAW_PREFIX = '01-raw/';
  * numbers absolute means adding the offset to `Note`, in the scanner's own task.
  */
 const BODY_START_LINE = 1;
+
+/**
+ * Ceiling on how many query terms reach the index, applied here because `search` in
+ * `src/index/bm25.ts` iterates the token LIST rather than the distinct set and walks a full
+ * posting list per occurrence. The query is a tool-call argument, so its length is attacker
+ * controlled, and the server is a single-threaded stdio process: measured on this vault, a
+ * one-word query repeated 80.000 times costs 11.9s of synchronous work and stalls every other
+ * tool call, while producing the same ranking as the word typed once.
+ *
+ * The cap is on the COUNT, not on distinctness. Deduplicating would be cheaper still, but it is
+ * not ranking-neutral: this BM25 sums one contribution per occurrence, so `jwt jwt docker`
+ * deliberately weighs `jwt` twice, and collapsing it would silently rewrite the user's query.
+ * Truncating instead leaves every query anyone actually types — a handful of words, a whole
+ * sentence — scored exactly as before, and only the pathological tail is dropped.
+ */
+const MAX_QUERY_TERMS = 64;
+
+/**
+ * The query as the index should see it: unchanged when it is within the cap, otherwise its first
+ * `MAX_QUERY_TERMS` terms rejoined. Rejoining is lossless — `tokenize` output is already folded,
+ * hyphen-trimmed, stopword-free and free of separators, so tokenizing it again yields the same
+ * list.
+ */
+function boundedQuery(query: string): string {
+  const terms = tokenize(query);
+  if (terms.length <= MAX_QUERY_TERMS) return query;
+  return terms.slice(0, MAX_QUERY_TERMS).join(' ');
+}
 
 /** Frontmatter is parsed from untrusted files, so `tipo` may be any YAML scalar, not a string. */
 function noteTipo(note: Note): string | undefined {
@@ -95,20 +124,35 @@ export class Retriever {
   private sync(): void {
     const { changed, removed } = this.scanner.refresh();
 
-    // Forget first, and for `changed` too, not only for `removed`: chunk ids carry the line the
-    // chunk starts at, so an edit that moves or deletes a heading would otherwise leave the old
-    // chunk indexed under its old id, and the search would answer with text no longer on disk.
-    for (const path of [...changed, ...removed]) {
-      this.index.removeByPath(path);
-      this.chunksByPath.delete(path);
-    }
+    for (const path of removed) this.forget(path);
 
     for (const path of changed) {
       const note = this.scanner.getNote(path);
-      if (note === undefined) continue;
+      // Unreachable while the scanner reports what it just read, but a path we cannot read must
+      // not stay indexed: answering from a copy nobody can verify is the one outcome to avoid.
+      if (note === undefined) {
+        this.forget(path);
+        continue;
+      }
+
       const chunks = chunkNote(path, note.body, noteTipo(note), noteTags(note), BODY_START_LINE);
+      const rewritten = new Set(chunks.map((chunk) => chunk.id));
+      const previous = this.chunksByPath.get(path) ?? [];
+
+      // Forgetting the old chunks matters — a chunk id carries the line it starts at, so an edit
+      // that moves or deletes a heading would otherwise leave the old chunk indexed under its old
+      // id and the search would answer with text no longer on disk. But `removeByPath` scans
+      // every chunk in the vault, while `addChunk` replaces a same-id chunk at a cost
+      // proportional to that one chunk. So the scan runs only when this note really does leave an
+      // id behind. That is what keeps a touch-everything event linear: `git checkout` or a sync
+      // client restamps every file without changing a byte, and the scanner reports all of them
+      // as changed — measured at 992ms inside `removeByPath` alone for 4.000 notes, growing with
+      // the square of the vault.
+      if (previous.some((chunk) => !rewritten.has(chunk.id))) this.index.removeByPath(path);
       for (const chunk of chunks) this.index.addChunk(chunk);
+
       if (chunks.length > 0) this.chunksByPath.set(path, chunks);
+      else this.chunksByPath.delete(path);
     }
 
     // A single added or removed note changes how OTHER notes' links resolve (the scanner
@@ -120,10 +164,11 @@ export class Retriever {
     this.sync();
 
     const keep = this.predicate(options);
+    const query = boundedQuery(options.query);
 
     // `keep` goes INTO the BM25 call: filtering after the top-K cut would return nothing whenever
     // the eight best candidates all failed the filter, even with valid candidates further down.
-    const direct = bm25Search(this.index, options.query, BM25_TOP_K, keep);
+    const direct = bm25Search(this.index, query, BM25_TOP_K, keep);
 
     // `bm25Search` accumulates into a `Map` keyed by chunk id, so `direct` is already unique.
     const merged = new Map<string, ScoredChunk>();
@@ -132,11 +177,19 @@ export class Retriever {
     for (const [path, score] of this.inheritedScores(direct)) {
       for (const chunk of this.chunksOf(path)) {
         const previous = merged.get(chunk.id);
-        // Strictly greater: a chunk that arrived directly keeps its own score and its
-        // `viaGraph: false`, so a hit is never demoted into an inherited one.
-        if (previous === undefined || score > previous.score) {
+        if (previous === undefined) {
           merged.set(chunk.id, { chunk, score, viaGraph: true });
+          continue;
         }
+        // Reached both ways. The score is the greater of the two, as the spec asks — and the
+        // inherited one wins often, because it is a share of a neighbour's UNDAMPED score while
+        // the direct one already paid `NOTE_TYPE_WEIGHTS` (0.3 for a MOC or a daily). But
+        // `viaGraph` answers "did this chunk enter the result set through expansion?"
+        // (src/types.ts), and this one did not: it matched the query on its own terms and would
+        // be here with the graph switched off. Overwriting the whole record would relabel a
+        // genuine BM25 hit as a graph neighbour, which is exactly backwards for a reader deciding
+        // how much to trust the result.
+        if (score > previous.score) merged.set(chunk.id, { ...previous, score });
       }
     }
 
@@ -155,8 +208,23 @@ export class Retriever {
     );
 
     const results = applyBudget(scored, options.limit ?? DEFAULT_LIMIT, DEFAULT_CHAR_BUDGET);
-    if (results.length > 0) return { results };
-    return { results, suggestions: suggestTerms(this.index, options.query, 5) };
+
+    // Suggestions are spelling repair, so they are gated on the QUERY having found nothing in the
+    // vocabulary — not on the final list being empty, which is what the plan's wording says
+    // literally. An empty list after a filter, or after `limit: 0`, means the query was
+    // understood and the caller narrowed it away; answering that with "did you mean jwt?" for a
+    // query that is already the word `jwt`, spelled correctly and genuinely matching, is noise
+    // that reads as a bug.
+    if (results.length > 0 || this.matchesVocabulary(query)) return { results };
+    return { results, suggestions: suggestTerms(this.index, query, 5) };
+  }
+
+  /** True when at least one query term is in the index — i.e. the query itself matched something. */
+  private matchesVocabulary(query: string): boolean {
+    for (const term of tokenize(query)) {
+      if (this.index.postings.has(term)) return true;
+    }
+    return false;
   }
 
   /**
@@ -187,6 +255,21 @@ export class Retriever {
 
   private chunksOf(path: string): readonly Chunk[] {
     return this.chunksByPath.get(path) ?? [];
+  }
+
+  /**
+   * Drops every trace of a note. A deleted note still costs one full scan of the index, because
+   * `InvertedIndex` exposes no per-id removal — that lives in `src/index/inverted-index.ts`,
+   * outside this task's files. Deletions are rare next to edits, which the loop above keeps
+   * linear.
+   *
+   * The `chunksByPath` line is memory hygiene, not behaviour, and no test can see it: a deleted
+   * note has no edges left in the rebuilt graph, so expansion can never ask for its chunks. What
+   * it prevents is a vault that deletes notes over a long session holding their text forever.
+   */
+  private forget(path: string): void {
+    this.index.removeByPath(path);
+    this.chunksByPath.delete(path);
   }
 
   private predicate(options: SearchOptions): (chunk: Chunk) => boolean {

@@ -3,8 +3,15 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { applyBudget, DEFAULT_CHAR_BUDGET, GRAPH_DAMPING } from '../src/retrieval/budget.js';
-import { Retriever } from '../src/retrieval/retrieval.js';
+import {
+  applyBudget,
+  BM25_TOP_K,
+  DEFAULT_CHAR_BUDGET,
+  DEFAULT_LIMIT,
+  GRAPH_DAMPING,
+  TRUNCATION_MARKER,
+} from '../src/retrieval/budget.js';
+import { Retriever, type SearchOptions } from '../src/retrieval/retrieval.js';
 import type { Chunk, ScoredChunk } from '../src/types.js';
 import { VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
 
@@ -190,24 +197,69 @@ describe('Retriever.search — expansão pelo grafo', () => {
     expect(totalChars(results)).toBeLessThan(DEFAULT_CHAR_BUDGET);
   });
 
-  it('dedupe por chunk.id mantém o maior score quando o chunk chega pelas duas vias', () => {
+  it('dedupe por chunk.id mantém o maior score e a etiqueta de como o chunk foi encontrado', () => {
     const retriever = diskRetriever();
-    const { results } = retriever.search({ query: 'jwt', limit: 12 });
 
+    // Cada pasta abaixo tem uma nota só, e todos os vizinhos dela estão fora: filtrada assim, a
+    // busca não tem de onde expandir, então o que sobra é o score DIRETO puro daquele chunk.
+    // Essa é a referência que este teste precisa — um máximo sobre os resultados da nota não
+    // serve, porque já vem contaminado pelo score herdado que se quer medir.
+    const isolated: Array<{ folder: string; path: string }> = [
+      { folder: '02-wiki/patterns', path: CACHE_WRAPPER },
+      { folder: '03-projects/potentia', path: POTENTIA },
+    ];
+
+    const { results } = retriever.search({ query: 'autenticacao jwt', limit: 20 });
     const ids = results.map((result) => result.chunk.id);
     expect(new Set(ids).size).toBe(ids.length);
 
-    // `nestjs-moc.md` é acerto direto de `jwt` e linka `auth-guard.md`, então todo chunk de
-    // `auth-guard.md` também chega pela expansão com `0.4 ×` o score do MOC. O chunk de topo de
-    // `auth-guard.md` tem de manter o score direto, maior, e continuar marcado como direto.
-    const mocScore = Math.max(
-      ...results.filter((r) => r.chunk.path === NESTJS_MOC).map((r) => r.score),
+    const sourceScore = Math.max(
+      ...results.filter((r) => r.chunk.path === AUTH_GUARD && !r.viaGraph).map((r) => r.score),
     );
-    expect(Number.isFinite(mocScore)).toBe(true);
-    const top = results.find((result) => result.chunk.path === AUTH_GUARD);
-    expect(top).toBeDefined();
-    expect(top!.viaGraph).toBe(false);
-    expect(top!.score).toBeGreaterThan(GRAPH_DAMPING * mocScore);
+
+    for (const { folder, path } of isolated) {
+      const alone = retriever.search({ query: 'autenticacao jwt', folder, limit: 20 });
+      expect(alone.results).toHaveLength(1);
+      const directHit = alone.results[0]!;
+      expect(directHit.chunk.path).toBe(path);
+      expect(directHit.viaGraph).toBe(false);
+
+      const merged = results.find((result) => result.chunk.id === directHit.chunk.id);
+      expect(merged).toBeDefined();
+      // Chegou pelas duas vias: fica com o maior dos dois scores, que aqui é o herdado — ele é
+      // uma fatia do score NÃO amortecido do vizinho, enquanto o direto já pagou o peso por tipo
+      // de nota. Por isso este caso é a regra e não a exceção.
+      expect(merged!.score).toBeCloseTo(GRAPH_DAMPING * sourceScore, 12);
+      expect(merged!.score).toBeGreaterThan(directHit.score);
+      // E continua marcado como DIRETO: casou a query sozinho e estaria aqui com a expansão
+      // desligada. Reetiquetá-lo de vizinho mente para quem lê o resultado.
+      expect(merged!.viaGraph).toBe(false);
+    }
+  });
+
+  it('o vizinho herda o MAIOR score entre as origens diretas que o alcançam', () => {
+    const retriever = diskRetriever();
+    const { results } = retriever.search({ query: 'potentia', limit: 20 });
+
+    // `nestjs-moc.md` não casa `potentia` em termo nenhum — só chega pelo grafo — e chega por
+    // duas origens diretas de scores diferentes: `auth-guard.md` e `bullmq-worker.md`, que a
+    // linkam. O que ela herda tem de ser fatia da maior das duas.
+    const authMax = Math.max(
+      ...results.filter((r) => r.chunk.path === AUTH_GUARD && !r.viaGraph).map((r) => r.score),
+    );
+    const bullmqMax = Math.max(
+      ...results.filter((r) => r.chunk.path === BULLMQ && !r.viaGraph).map((r) => r.score),
+    );
+    // Sem esta diferença as duas origens dariam o mesmo valor e o teste não distinguiria nada.
+    expect(authMax).toBeGreaterThan(bullmqMax);
+
+    const inherited = results.filter((result) => result.chunk.path === NESTJS_MOC);
+    expect(inherited.length).toBeGreaterThan(0);
+    for (const result of inherited) {
+      expect(result.viaGraph).toBe(true);
+      expect(result.score).toBeCloseTo(GRAPH_DAMPING * authMax, 12);
+      expect(result.score).toBeGreaterThan(GRAPH_DAMPING * bullmqMax);
+    }
   });
 });
 
@@ -314,6 +366,34 @@ describe('Retriever.search — filtros', () => {
     expect(results).toEqual([]);
   });
 
+  it('`folder` normaliza barra final e trata vazio como ausência de filtro', () => {
+    const retriever = diskRetriever();
+    const canonical = retriever.search({ query: 'multi-stage', folder: '02-wiki/docker', limit: 20 });
+    const unfiltered = retriever.search({ query: 'multi-stage', limit: 20 });
+
+    expect(retriever.search({ query: 'multi-stage', folder: '02-wiki/docker/', limit: 20 })).toEqual(
+      canonical,
+    );
+    expect(retriever.search({ query: 'multi-stage', folder: '', limit: 20 })).toEqual(unfiltered);
+    // As duas asserções acima só valem alguma coisa porque filtrar de fato muda o resultado.
+    expect(canonical.results.length).toBeGreaterThan(0);
+    expect(unfiltered.results.length).toBeGreaterThan(canonical.results.length);
+  });
+
+  it('`tipo` não-string no frontmatter não vaza para o chunk', () => {
+    const { retriever, fs } = memoryRetriever();
+    fs.write(
+      '02-wiki/nestjs/tipo-numerico.md',
+      ['---', 'tipo: 123', 'tags: [nestjs]', '---', '', '# Tipo numerico', '', 'Termo: tiponumericoexclusivo.', ''].join('\n'),
+    );
+
+    const { results } = retriever.search({ query: 'tiponumericoexclusivo', limit: 5 });
+    expect(results.length).toBeGreaterThan(0);
+    // `Chunk.tipo` é declarado `string | undefined`; um número vindo do YAML tem de virar
+    // `undefined`, não atravessar o tipo até o filtro e o peso por tipo de nota.
+    for (const result of results) expect(result.chunk.tipo).toBeUndefined();
+  });
+
   it('filtro restritivo não é engolido pelo corte em BM25_TOP_K', () => {
     const { retriever, fs } = memoryRetriever();
 
@@ -361,6 +441,24 @@ describe('Retriever.search — sem resultado', () => {
     expect(suggestions).toContain('bullmq');
   });
 
+  it('não sugere correção quando foi o filtro, e não a query, que esvaziou o resultado', () => {
+    const retriever = diskRetriever();
+    // A query casa de sobra sem filtro: o vazio abaixo é escolha de quem chamou, não erro de
+    // digitação. Sugerir `jwt` para quem escreveu `jwt` lê como defeito.
+    expect(retriever.search({ query: 'jwt', limit: 20 }).results.length).toBeGreaterThan(0);
+
+    const narrowed: SearchOptions[] = [
+      { query: 'jwt', tipo: 'inexistente' },
+      { query: 'multi-stage', folder: '02-wiki/dock' },
+      { query: 'jwt', limit: 0 },
+    ];
+    for (const options of narrowed) {
+      const result = retriever.search(options);
+      expect(result.results).toEqual([]);
+      expect(result.suggestions).toBeUndefined();
+    }
+  });
+
   it('não devolve sugestões quando há resultado', () => {
     const retriever = diskRetriever();
     const found = retriever.search({ query: 'bullmq' });
@@ -375,14 +473,50 @@ describe('Retriever.search — orçamento', () => {
     expect(retriever.search({ query: 'jwt', limit: 3 }).results).toHaveLength(3);
   });
 
+  it('as constantes do orçamento são as do spec', () => {
+    // Escritas como literais de propósito: uma asserção em termos da própria constante anda
+    // junto com ela e não prende valor nenhum.
+    expect(BM25_TOP_K).toBe(8);
+    expect(GRAPH_DAMPING).toBe(0.4);
+    expect(DEFAULT_LIMIT).toBe(6);
+    expect(DEFAULT_CHAR_BUDGET).toBe(8000);
+  });
+
   it('usa DEFAULT_LIMIT quando `limit` não é passado', () => {
     const retriever = diskRetriever();
-    const { results } = retriever.search({ query: 'jwt' });
-    expect(results.length).toBeLessThanOrEqual(6);
-    expect(results.length).toBeGreaterThan(0);
-    expect(totalChars(results)).toBeLessThanOrEqual(
-      DEFAULT_CHAR_BUDGET + results[results.length - 1]!.chunk.text.length,
-    );
+    // `jwt` tem mais de seis candidatos e todos cabem no orçamento de caracteres, então o corte
+    // aqui é o do número de chunks e mais nada.
+    expect(retriever.search({ query: 'jwt' }).results).toHaveLength(6);
+    expect(retriever.search({ query: 'jwt', limit: 20 }).results.length).toBeGreaterThan(6);
+  });
+
+  it('`limit: 0` devolve vazio em vez de cair no padrão', () => {
+    const retriever = diskRetriever();
+    expect(retriever.search({ query: 'jwt', limit: 0 }).results).toEqual([]);
+  });
+
+  it('o orçamento de caracteres corta antes do limite de chunks', () => {
+    const { retriever, fs } = memoryRetriever();
+    // A fixture inteira cabe folgada em 8.000 caracteres, então o orçamento só se manifesta com
+    // notas grandes — escritas aqui na cópia em memória. Cada uma vira um chunk de ~2.870
+    // caracteres: dois cabem, o terceiro estoura.
+    const filler = 'orcamentoexclusivo '.repeat(150).trim();
+    for (let i = 0; i < 5; i++) {
+      fs.write(
+        `02-wiki/patterns/grande-${i}.md`,
+        ['---', 'tipo: wiki', '---', '', `# Grande ${i}`, '', filler, ''].join('\n'),
+      );
+    }
+
+    const { results } = retriever.search({ query: 'orcamentoexclusivo', limit: 50 });
+
+    expect(paths(results)).toEqual([
+      '02-wiki/patterns/grande-0.md',
+      '02-wiki/patterns/grande-1.md',
+    ]);
+    expect(totalChars(results)).toBeLessThanOrEqual(8000);
+    // O terceiro candidato existe e ficou de fora só por não caber.
+    expect(totalChars(results) + results[0]!.chunk.text.length).toBeGreaterThan(8000);
   });
 });
 
@@ -454,6 +588,48 @@ describe('Retriever.sync — reindexação incremental', () => {
     expect(paths(after.results)).not.toContain(CACHE_WRAPPER);
   });
 
+  it('reconstrói o grafo quando uma nota muda: a expansão enxerga o link novo', () => {
+    const { retriever, fs } = memoryRetriever();
+    const before = retriever.search({ query: 'jwt', limit: 20 });
+    expect(paths(before.results)).toContain(AUTH_GUARD);
+    expect(paths(before.results)).not.toContain(MULTI_STAGE);
+
+    fs.write(AUTH_GUARD, `${fs.read(AUTH_GUARD)}\nVer tambem [[multi-stage]].\n`);
+
+    // `multi-stage.md` não casa `jwt` em termo nenhum: só pode aparecer se a aresta nova entrou
+    // no grafo. Congelar o grafo depois da primeira montagem passa despercebido em qualquer
+    // teste que só remova notas, porque a nota removida some do índice de qualquer jeito.
+    const after = retriever.search({ query: 'jwt', limit: 20 });
+    expect(paths(after.results)).toContain(MULTI_STAGE);
+  });
+
+  it('reconstrói o grafo quando uma nota some, mesmo sem nenhuma nota alterada', () => {
+    const { retriever, fs } = memoryRetriever();
+    // Nenhuma das duas na pasta de `auth-guard.md`: um alvo ao lado do arquivo que linka resolve
+    // pelo caminho relativo antes de chegar na busca por basename, e não seria ambíguo.
+    const AMBIGUA_DOCKER = '02-wiki/docker/ambigua.md';
+    const AMBIGUA_PATTERNS = '02-wiki/patterns/ambigua.md';
+    const body = (marker: string): string =>
+      ['---', 'tipo: wiki', '---', '', '# Ambigua', '', `Nota de destino ${marker}.`, ''].join('\n');
+
+    fs.write(AMBIGUA_DOCKER, body('docker'));
+    fs.write(AMBIGUA_PATTERNS, body('patterns'));
+    fs.write(AUTH_GUARD, `${fs.read(AUTH_GUARD)}\nVer tambem [[ambigua]].\n`);
+
+    // Dois basenames iguais na mesma profundidade: `[[ambigua]]` fica ambíguo e não vira aresta.
+    const before = retriever.search({ query: 'jwt', limit: 20 });
+    expect(paths(before.results)).not.toContain(AMBIGUA_DOCKER);
+    expect(paths(before.results)).not.toContain(AMBIGUA_PATTERNS);
+
+    fs.remove(AMBIGUA_PATTERNS);
+
+    // Nenhuma nota foi reescrita neste passo — só uma sumiu —, e mesmo assim o link de OUTRA
+    // nota passou a resolver. Reconstruir o grafo só quando `changed` não está vazio deixa a
+    // aresta nova de fora.
+    const after = retriever.search({ query: 'jwt', limit: 20 });
+    expect(paths(after.results)).toContain(AMBIGUA_DOCKER);
+  });
+
   it('esquece uma nota removida e reconstrói o grafo sem as arestas dela', () => {
     const { retriever, fs } = memoryRetriever();
     expect(paths(retriever.search({ query: 'multi-stage', limit: 20 }).results)).toContain(DAILY);
@@ -481,6 +657,45 @@ function stubChunk(id: string, length: number): ScoredChunk {
   return { chunk, score: 1, viaGraph: false };
 }
 
+describe('Retriever.search — teto de termos da query', () => {
+  const repeated = (times: number): string => new Array(times).fill('jwt').join(' ');
+
+  it('ignora os termos além do 64º, e o 64º ainda conta', () => {
+    const retriever = diskRetriever();
+    const atCap = retriever.search({ query: repeated(64), limit: 12 });
+
+    // `autenticacao` na posição 65 é descartado: a saída é idêntica à da query sem ele. O termo
+    // é escolhido por casar chunks que ESTÃO no resultado (auth-guard, cache-wrapper, README),
+    // senão contá-lo ou não daria na mesma e o teste não distinguiria teto nenhum.
+    expect(retriever.search({ query: `${repeated(64)} autenticacao`, limit: 12 })).toEqual(atCap);
+    // E é descartado por ser o 65º, não por ser irrelevante: dentro do teto ele muda o score.
+    expect(retriever.search({ query: `${repeated(63)} autenticacao`, limit: 12 })).not.toEqual(atCap);
+  });
+
+  it('uma query enorme é cortada no teto, e não repassada inteira ao índice', () => {
+    const retriever = diskRetriever();
+
+    // O `search` de `src/index/bm25.ts` percorre a LISTA de tokens, não o conjunto, e varre a
+    // posting list inteira por ocorrência; a query é argumento de tool call num processo de
+    // event loop único, então o custo é atacável de fora (medido no vault real: 11,9s para uma
+    // palavra repetida 80.000 vezes, síncrono, travando toda outra chamada).
+    //
+    // A prova aqui é determinística, não cronometrada: 200.000 termos devolvem exatamente o que
+    // devolvem os 64 primeiros — mesmos chunks, mesmos scores —, o que só acontece se o índice
+    // tiver visto 64 termos. Um relógio não serviria: a fixture é pequena demais para que a
+    // diferença de trabalho apareça em milissegundos, e o teste passaria sem o teto.
+    expect(retriever.search({ query: repeated(200_000), limit: 12 })).toEqual(
+      retriever.search({ query: repeated(64), limit: 12 }),
+    );
+  });
+
+  it('o teto não muda o ranking de uma query normal', () => {
+    const retriever = diskRetriever();
+    const natural = 'guard de autenticação jwt no nestjs';
+    expect(retriever.search({ query: natural, limit: 12 }).results[0]!.chunk.path).toBe(AUTH_GUARD);
+  });
+});
+
 describe('applyBudget', () => {
   it('corta na contagem de chunks quando ela vem primeiro', () => {
     const scored = [stubChunk('a', 10), stubChunk('b', 10), stubChunk('c', 10)];
@@ -494,9 +709,27 @@ describe('applyBudget', () => {
     expect(applyBudget(scored, 10, 100).map((item) => item.chunk.id)).toEqual(['a']);
   });
 
+  it('não corta quando a soma bate exatamente no orçamento', () => {
+    const scored = [stubChunk('a', 60), stubChunk('b', 40)];
+    expect(applyBudget(scored, 10, 100).map((item) => item.chunk.id)).toEqual(['a', 'b']);
+  });
+
   it('devolve um único chunk maior que o orçamento inteiro em vez de devolver vazio', () => {
     const scored = [stubChunk('gigante', 500)];
     expect(applyBudget(scored, 10, 100)).toHaveLength(1);
+  });
+
+  it('trunca esse chunk único, com marcador, e não mexe no chunk indexado', () => {
+    const scored = [stubChunk('gigante', 500), stubChunk('depois', 10)];
+    const out = applyBudget(scored, 10, 100);
+
+    expect(out).toHaveLength(1);
+    expect(out[0]!.chunk.text.length).toBeLessThanOrEqual(100);
+    expect(out[0]!.chunk.text.endsWith(TRUNCATION_MARKER)).toBe(true);
+    expect(out[0]!.chunk.text.startsWith('xxx')).toBe(true);
+    // O chunk original é o que o índice guarda: alterá-lo corromperia toda busca posterior.
+    expect(scored[0]!.chunk.text).toHaveLength(500);
+    expect(scored[0]!.chunk.text).not.toContain(TRUNCATION_MARKER);
   });
 
   it('devolve vazio para entrada vazia', () => {
