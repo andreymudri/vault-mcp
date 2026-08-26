@@ -10,6 +10,7 @@ import type { Retriever } from '../retrieval/retrieval.js';
 import type { Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { LearnError, learn } from '../write/learn.js';
+import { INVISIBLE_CHARS } from '../write/paths.js';
 import { EditError, editNote, writeNote, type WriteResult } from '../write/writer.js';
 
 /**
@@ -44,22 +45,20 @@ export interface ToolDeps {
 }
 
 /**
- * Characters that are invisible, that break a line, or that reorder what follows them.
+ * Characters that are invisible, that break a line, or that reorder what follows them — the one
+ * definition, from `src/write/paths.ts`.
  *
- * A LOCAL COPY THAT SHOULD NOT SURVIVE. The same class already lives, byte-identical, in
- * `src/write/propagate.ts`, `src/write/learn.ts`, `src/write/writer.ts` and `src/write/diff.ts`,
- * and T19 is consolidating it into `src/write/paths.ts` as the one exported definition. The import
- * is not written here yet because that export does not exist at this branch's fork point — an
- * import of a symbol nobody exports does not compile, and `paths.ts` is outside this task's file
- * set, so this module cannot create it either.
+ * This module carried a byte-identical copy of the literal, written when that export did not yet
+ * exist. It does now, so the copy is gone: a character one surface escapes and another does not is
+ * a character that forges a line on exactly one of the surfaces the user reads, and this project
+ * has already paid for that shape once — the escape into `.git/` fixed in phase 4 existed because
+ * `propagate.ts` carried its own copy of a guard.
  *
- * WHEN `paths.ts` EXPORTS IT, DELETE THIS AND IMPORT IT. Until then the two must stay in step by
- * hand: a character one of them escapes and another does not is a character that forges a line on
- * exactly one of the surfaces the user reads.
+ * `paths.ts` exports it WITHOUT the `g` flag deliberately, so no two call sites share a
+ * `lastIndex`; the global form is derived here from `.source`, as `propagate.ts` and `learn.ts`
+ * already do.
  */
-// eslint-disable-next-line no-control-regex
-const INVISIBLE_CHARS_GLOBAL =
-  /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+const INVISIBLE_CHARS_GLOBAL = new RegExp(INVISIBLE_CHARS.source, 'g');
 
 /**
  * Renders a path, a heading trail, a query or a `reason` inside a STRUCTURED line without letting
