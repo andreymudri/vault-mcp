@@ -131,6 +131,13 @@ Convenção de diretórios:
 - `_templates/`: templates do Obsidian (ignoradas na indexação)
 - `99-archive/`: notas arquivadas (legíveis, não graváveis)
 
+## Limitações Conhecidas
+
+`docs/followups.md` lista o que está aberto e verificado: uma renderização de frontmatter com alias
+que trava o event loop por ~5 s, hard link indexado no caminho de leitura, a corrida de escrita
+entre processos, e ajustes menores no guard de tag. Cada item traz a medição e a forma da correção.
+Nada ali bloqueia o uso; tudo ali foi confirmado por execução.
+
 ## Desenvolvimento
 
 Depois de uma mudança no código:
