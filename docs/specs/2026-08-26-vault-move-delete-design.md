@@ -1,7 +1,7 @@
 ---
 tipo: spec
 projeto: vault-mcp
-status: aprovado
+status: implementado
 criado: 2026-08-26
 ---
 
@@ -179,3 +179,35 @@ intocado, e as cargas de backtracking do docblock de `links.ts` continuam linear
 Onde o teste fecha uma LACUNA DE COBERTURA e não reproduz um bug, o "visto falhando" é por mutação —
 apagar o guard, inverter a flag — e o teste novo tem de pegar essa mutação. É a regra que
 `docs/followups.md` já aplica.
+
+## Notas da implementação (2026-08-26)
+
+Três coisas que a spec previa diferente, e que a implementação mediu:
+
+1. **O exemplo do link relativo de saída estava errado.** A spec afirma que
+   `[[../../00-index/index-knowledge|índice de conhecimento]]`, escrito por `buildMoc`, "quebra na
+   mudança" quando a nota desce de diretório. Ele não quebra: os dois `..` de fato escapam da raiz
+   e os passos relativo e relativo-à-raiz falham os dois, mas o TERCEIRO passo de `resolveOne`
+   procura por basename, e existe uma `index-knowledge.md` só. O link continua resolvendo, e a
+   invariante — que pergunta para onde o alvo RESOLVE, não como ele está escrito — corretamente
+   não reescreve nada. O caso em que um link de saída estraga de verdade é outro: `../docker/x`
+   escrito de `02-wiki/nestjs/` passa a nomear `03-projects/docker/x.md` quando a nota vai para
+   `03-projects/` — resolve sem erro, para outra nota. Os dois estão fixados em
+   `test/rewrite-links.test.ts`.
+
+2. **O MOC do domínio não conta como backlink que quebra.** Todo MOC linka toda nota do seu
+   domínio, então contá-lo tornaria `confirm` obrigatório para QUALQUER nota de `02-wiki/` — e uma
+   flag sempre exigida é uma flag que o chamador aprende a passar no automático. Ele também não é
+   um link que quebra: o delete é justamente a operação que o remove. A isenção é MEDIDA e não
+   presumida: vale só quando o texto resultante do MOC não resolve mais para a nota, então um MOC
+   que a cita também fora de `## Notas` volta a exigir confirmação.
+
+3. **O comando de desfazer sai sem `-C <raiz>`.** A raiz absoluta soletra o nome de usuário do
+   sistema, e a camada de tools passa toda mensagem por `makeRedactor` — um comando com `<vault>`
+   no lugar do caminho é um comando que o usuário cola e vê falhar. Ele é relativo ao vault, e a
+   resposta diz onde rodá-lo.
+
+O refresh do scanner (passo 1 do fluxo) ficou na camada de tools, DENTRO do slot exclusivo da fila
+de escrita, em vez de dentro de `relocate.ts`: `refreshVault` já existe em `src/server/tools.ts` com
+a explicação de por que o delta do scanner pertence ao retriever, e uma segunda cópia dessa regra
+sutil é o que a spec pede para evitar em todo o resto.

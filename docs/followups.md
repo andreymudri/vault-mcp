@@ -6,8 +6,8 @@ item 12 (levantado sondando a recuperação contra o vault real). Este documento
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.044 testes em 17 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
-o handshake MCP com as sete tools.
+A suíte passa com 1.148 testes em 19 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+o handshake MCP com as nove tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
 pelo motivo certo, e só então a correção. Onde o defeito era uma LACUNA DE COBERTURA e não um bug de

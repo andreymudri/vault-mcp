@@ -7,7 +7,7 @@
 Memória de longo prazo para um agente de código: ele busca no seu vault Obsidian antes de
 responder, cita `caminho:linha`, e registra o que aprendeu sem perguntar onde salvar.
 
-Servidor MCP para busca, leitura e escrita em um vault de conhecimento Obsidian. Recuperação por BM25 lexical mais um salto de wiki-links; registro inteligente de aprendizados que decide entre criar nota nova ou anexar ao existente; propagação automática para o MOC do domínio e a nota diária, e para o índice de conhecimento quando o domínio é novo.
+Servidor MCP para busca, leitura e escrita em um vault de conhecimento Obsidian. Recuperação por BM25 lexical mais um salto de wiki-links; registro inteligente de aprendizados que decide entre criar nota nova ou anexar ao existente; propagação automática para o MOC do domínio e a nota diária, e para o índice de conhecimento quando o domínio é novo. Mover, renomear, promover, arquivar e apagar uma nota também passam pelo servidor, então os links e as entradas de MOC ficam certos em vez de apodrecer em silêncio.
 
 ## Exemplo
 
@@ -125,7 +125,7 @@ npm test
 - **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
   processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
   próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
-- A suíte tem 17 arquivos com 1.044 testes e leva ~10 segundos. `npm test` roda o typecheck
+- A suíte tem 19 arquivos com 1.148 testes e leva ~10 segundos. `npm test` roda o typecheck
   (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
 
 ## Configuração
@@ -162,7 +162,7 @@ flag o padrão é `local` (só o diretório atual). Confira com `claude mcp get 
 
 ### `VAULT_AUTO_PUSH`
 
-Toda escrita (`vault_write_note`, `vault_edit_note`, `vault_learn`) já commita no git do vault.
+Toda escrita (`vault_write_note`, `vault_edit_note`, `vault_learn`, `vault_move`, `vault_delete`) já commita no git do vault.
 `VAULT_AUTO_PUSH=1` acrescenta um `git push` depois do commit — sem isso o commit fica só na máquina,
 e um vault com remote guardado em mais de um lugar diverge em silêncio.
 
@@ -181,7 +181,7 @@ ligado:
   prompt de credencial, então um prompt seria um travamento. As credenciais precisam vir de um
   helper (por exemplo `gh auth git-credential`) ou de uma chave SSH
 
-## As Sete Tools
+## As Nove Tools
 
 | Tool | Entrada | Quando Chamar |
 |------|---------|---------------|
@@ -192,6 +192,8 @@ ligado:
 | `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
 | `vault_edit_note` | `path`, `old_text`, `new_text` (obrigatórios) | Substituir um trecho exato de uma nota. Falha se o trecho não existir ou aparecer mais de uma vez — nesse caso, inclua mais contexto em `old_text`. |
 | `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (obrigatórios); `projeto`, `tags`, `links`, `confirm_novo_dominio` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. **Se o domínio não existe em `02-wiki/`, a chamada falha; use `confirm_novo_dominio: true` para criar.** |
+| `vault_move` | `from`, `to` (obrigatórios); `confirm_novo_dominio` (opcional) | Mover, renomear, promover de `01-raw/` ou arquivar em `99-archive/` — as quatro são a mesma chamada, porque `to` é o caminho completo. Corrige sozinha todo link que passaria a apontar para outra nota, migra a entrada entre os MOCs de domínio preservando o `— resumo`, e commita tudo junto. `99-archive/` vale como origem **e** destino, o que dá arquivar e desarquivar. **MOC de destino inexistente exige `confirm_novo_dominio: true`.** A nota diária nunca é tocada. |
+| `vault_delete` | `path` (obrigatório); `confirm` (opcional) | Apagar uma nota e tirar a linha dela do MOC. **Recusa, sem apagar, se a nota não tiver versão commitada no `HEAD`** — aí não haveria como desfazer —, se for estrutural (MOC, nota diária, índice) ou se estiver em `99-archive/`. Notas apontadas por outras exigem `confirm: true`, e a recusa lista quem aponta. A resposta traz o comando exato que desfaz. |
 
 ## Como o `vault_learn` Decide
 

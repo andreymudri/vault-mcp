@@ -7,7 +7,7 @@
 Long-term memory for a coding agent: it searches your Obsidian vault before answering, cites
 `path:line`, and records what it learned without asking where to save it.
 
-MCP server for searching, reading and writing an Obsidian knowledge vault. Retrieval by lexical BM25 plus one wiki-link hop; intelligent capture of learnings that decides between creating a new note and appending to an existing one; automatic propagation to the domain MOC and the daily note, and to the knowledge index when the domain is new.
+MCP server for searching, reading and writing an Obsidian knowledge vault. Retrieval by lexical BM25 plus one wiki-link hop; intelligent capture of learnings that decides between creating a new note and appending to an existing one; automatic propagation to the domain MOC and the daily note, and to the knowledge index when the domain is new. Moving, renaming, promoting, archiving and deleting a note go through the server too, so the links and the MOC entries stay correct instead of silently rotting.
 
 ## Example
 
@@ -133,7 +133,7 @@ npm test
 - **Running the suite takes more than that:** `test/frontmatter.test.ts` executes the real
   `parseFile` in a child process pinned to a timezone, and that child is `node <file>.ts` — it
   depends on Node's own type stripping. CI pins 26, which is the version this is developed on
-- The suite has 17 files with 1,044 tests and takes ~10 s. `npm test` runs the typecheck
+- The suite has 19 files with 1,148 tests and takes ~10 s. `npm test` runs the typecheck
   (`pretest`) first and bounds the suite by the clock: a hung suite exits 124, never with no exit code
 
 ## Configuration
@@ -170,7 +170,7 @@ repository. Without the flag the default is `local` (the current directory only)
 
 ### `VAULT_AUTO_PUSH`
 
-Every write (`vault_write_note`, `vault_edit_note`, `vault_learn`) already commits to the vault's git.
+Every write (`vault_write_note`, `vault_edit_note`, `vault_learn`, `vault_move`, `vault_delete`) already commits to the vault's git.
 `VAULT_AUTO_PUSH=1` adds a `git push` after the commit — without it the commit stays on the machine
 only, and a vault with a remote kept in more than one place diverges silently.
 
@@ -189,7 +189,7 @@ turned on:
   credential prompt, so a prompt would be a hang. Credentials have to come from a helper (for example
   `gh auth git-credential`) or from an SSH key
 
-## The Seven Tools
+## The Nine Tools
 
 | Tool | Input | When to Call |
 |------|-------|--------------|
@@ -200,6 +200,8 @@ turned on:
 | `vault_write_note` | `path`, `content` (required); `frontmatter` (optional) | Create or replace a whole note. Frontmatter is guaranteed. Commits automatically. To change a passage, use `vault_edit_note`; to record a learning, use `vault_learn`. |
 | `vault_edit_note` | `path`, `old_text`, `new_text` (required) | Replace an exact passage of a note. Fails if the passage does not exist or appears more than once — in that case, include more context in `old_text`. |
 | `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (required); `projeto`, `tags`, `links`, `confirm_novo_dominio` (optional) | Record a learning during the session (architecture decision, pattern, gotcha, trap). Do not ask where to save — the server decides. Shows the diff to the user. **If the domain does not exist in `02-wiki/`, the call fails; use `confirm_novo_dominio: true` to create it.** |
+| `vault_move` | `from`, `to` (required); `confirm_novo_dominio` (optional) | Move, rename, promote out of `01-raw/` or archive into `99-archive/` — all four are the same call, because `to` is the full path. Corrects on its own every link that would start pointing at a different note, migrates the entry between domain MOCs preserving its `— resumo`, and commits the lot together. `99-archive/` counts as a source **and** a destination, which is what gives archive and unarchive. **A destination MOC that does not exist requires `confirm_novo_dominio: true`.** The daily note is never touched. |
+| `vault_delete` | `path` (required); `confirm` (optional) | Delete a note and drop its line from the MOC. **Refuses, without deleting, if the note has no committed version in `HEAD`** — there would be no way back —, if it is structural (MOC, daily note, index), or if it lives in `99-archive/`. Notes pointed at by others require `confirm: true`, and the refusal lists who points. The answer carries the exact command that undoes it. |
 
 ## How `vault_learn` Decides
 
