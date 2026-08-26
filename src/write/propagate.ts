@@ -177,6 +177,16 @@ function fencedLines(lines: string[]): boolean[] {
 }
 
 /** Compares two lines ignoring the trailing `\r` of a CRLF file and surrounding spaces. */
+/**
+ * Um parágrafo que declara, na convenção do próprio vault, que a seção ainda não tem nada:
+ * UMA linha inteiramente envolta em ênfase, ex.:
+ * `_Ainda sem notas. Adicione em \`02-wiki/docker/\` seguindo \`_templates/wiki.md\`._`
+ *
+ * O `.+` é ganancioso de propósito: o texto real carrega underscores internos
+ * (`_templates`), e um `[^_]*` não casaria a linha que este guard existe para reconhecer.
+ */
+const EMPTY_PLACEHOLDER_RE = /^(?:_.+_|\*.+\*)$/;
+
 function sameLine(a: string, b: string): boolean {
   return a.trim() === b.trim();
 }
@@ -293,6 +303,28 @@ export function insertUnderSection(content: string, heading: string, line: strin
   if (lastItem !== -1) {
     out.splice(lastItem + 1, 0, line + eolSuffix);
     return join(out);
+  }
+
+  // A seção não tem item nenhum, então ela pode carregar um PLACEHOLDER que a declara
+  // vazia — e essa declaração vira falsa no exato ato de inserir o primeiro item. Medido
+  // contra o vault real: `02-wiki/claude-code/claude-code-moc.md` ficou com a nota nova E
+  // a linha `_Ainda sem notas._` logo abaixo, enquanto `cpp-moc` e `tauri-moc`, que já
+  // tinham notas, não a carregam — o dono do vault vinha apagando à mão.
+  //
+  // Isto É apagar texto do usuário, o que `writer.ts`'s `dropAnsweredSections` recusa
+  // fazer por princípio, então a regra é estreita nos dois eixos que importam: só roda
+  // quando a seção NÃO TEM ITEM ALGUM (este ramo), e só sobre uma ÚNICA linha não vazia
+  // que seja inteiramente ênfase. Prosa comum sob a heading fica; uma linha em itálico
+  // numa seção que já lista notas fica; duas linhas de prosa ficam. O que sai é
+  // exatamente a frase que a inserção acabou de desmentir.
+  const bodyIdx: number[] = [];
+  for (let i = headingIdx + 1; i < sectionEnd; i += 1) {
+    if (inFence[i] === true) continue;
+    if ((lines[i] ?? '').trim() !== '') bodyIdx.push(i);
+  }
+  const only = bodyIdx.length === 1 ? bodyIdx[0] : undefined;
+  if (only !== undefined && EMPTY_PLACEHOLDER_RE.test((out[only] ?? '').trim())) {
+    out.splice(only, 1);
   }
 
   // Empty section: first item, keeping one blank line under the heading and one above

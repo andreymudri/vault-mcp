@@ -242,6 +242,71 @@ describe('insertUnderSection', () => {
     expect(after).toContain('- [[novo]] — resumo\n\n## Relacionados');
   });
 
+  it('drops a placeholder that says the section is empty when the first item lands', () => {
+    // Medido contra o vault real: `02-wiki/claude-code/claude-code-moc.md` ficou com a
+    // primeira nota E a linha "_Ainda sem notas._" logo abaixo dela. A linha passa a ser
+    // FALSA no exato ato de inserir, e os MOCs que já têm nota (cpp, tauri) não a carregam
+    // — o usuário vinha apagando à mão.
+    const before = [
+      '# T',
+      '',
+      '## Notas',
+      '',
+      '_Ainda sem notas. Adicione em `02-wiki/docker/` seguindo `_templates/wiki.md`._',
+      '',
+      '## Relacionados',
+      '',
+      '- [[../../00-index/index-knowledge|índice]]',
+      '',
+    ].join('\n');
+    const after = insertUnderSection(before, '## Notas', '- [[nova]] — resumo');
+
+    expect(after).toContain('- [[nova]] — resumo');
+    expect(after).not.toContain('Ainda sem notas');
+    // A seção seguinte e o conteúdo dela ficam intactos.
+    expect(after).toContain('## Relacionados');
+    expect(after).toContain('- [[../../00-index/index-knowledge|índice]]');
+    expect(after).toContain('- [[nova]] — resumo\n\n## Relacionados');
+  });
+
+  it('keeps prose that is not a self-contained placeholder', () => {
+    // O contrapeso, e é o que impede a regra de virar um apagador de prosa: só some um
+    // parágrafo de UMA linha inteiramente em ênfase. Texto comum sob a heading fica.
+    const before = ['# T', '', '## Notas', '', 'Este MOC cobre o domínio inteiro.', '', '## Fim', ''].join('\n');
+    const after = insertUnderSection(before, '## Notas', '- [[nova]] — resumo');
+
+    expect(after).toContain('Este MOC cobre o domínio inteiro.');
+    expect(after).toContain('- [[nova]] — resumo');
+  });
+
+  it('keeps the placeholder when it is not the only content of the section', () => {
+    // A guarda `bodyIdx.length === 1`. Uma seção com prosa ALÉM do placeholder é ambígua —
+    // não dá para saber se a frase em ênfase é placeholder ou parte do texto —, e o
+    // conservador é não apagar nada. Achado por mutação: sem este teste, alargar a regra
+    // para "a última linha de corpo" passava verde.
+    const before = [
+      '# T', '', '## Notas', '', 'Este MOC cobre o domínio inteiro.', '',
+      '_Ainda sem notas._', '', '## Fim', '',
+    ].join('\n');
+    const after = insertUnderSection(before, '## Notas', '- [[nova]] — resumo');
+
+    expect(after).toContain('Este MOC cobre o domínio inteiro.');
+    expect(after).toContain('_Ainda sem notas._');
+    expect(after).toContain('- [[nova]] — resumo');
+  });
+
+  it('keeps an emphasised line once the section already has items', () => {
+    // A regra só vale na transição vazia -> primeira entrada. Uma seção que já lista notas
+    // não tem placeholder para remover, e uma linha em itálico ali é texto do usuário.
+    const before = [
+      '# T', '', '## Notas', '', '- [[a]] — um', '', '_uma observação em itálico_', '', '## Fim', '',
+    ].join('\n');
+    const after = insertUnderSection(before, '## Notas', '- [[b]] — dois');
+
+    expect(after).toContain('_uma observação em itálico_');
+    expect(after).toContain('- [[b]] — dois');
+  });
+
   it('appends the whole section when it does not exist', () => {
     const before = '---\ntipo: daily\n---\n\n# 2026-08-20\n';
     const after = insertUnderSection(before, '## Capturas', '- 09:00 [[x]] (gotcha)');

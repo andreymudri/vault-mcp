@@ -6,7 +6,7 @@ item 12 (levantado sondando a recuperação contra o vault real). Este documento
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.039 testes em 17 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+A suíte passa com 1.043 testes em 17 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
 o handshake MCP com as sete tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
@@ -244,6 +244,40 @@ carrega a decisão no docblock e `test/tokenizer.test.ts` a fixa.
 
 **Não corrigido, de propósito:** stemming. `hexagonais` não acha `hexagonal`, e o suggester cobre.
 Stemming de português é exatamente o que quebraria `nestjs`, `bullmq` e `tenantId`.
+
+---
+
+## 13. MOC ficava com a primeira nota E o aviso de que estava vazia — CORRIGIDO
+
+Achado na saída REAL de um `vault_learn`, não em teste. `02-wiki/claude-code/claude-code-moc.md`
+terminou assim:
+
+```
+## Notas
+
+- [[shim-de-grep-do-claude-code...]] — O Claude Code embrulha `grep`...
+
+_Ainda sem notas. Adicione em `02-wiki/claude-code/` seguindo `_templates/wiki.md`._
+```
+
+A frase vira FALSA no exato ato de inserir. `insertUnderSection` localizava a seção, não achava
+item de lista nenhum, tomava o ramo "seção vazia" e inseria o primeiro item — deixando de pé a
+prosa que dizia não haver itens. `buildMoc` nunca escreve esse placeholder: ele é convenção do
+vault do usuário, e os MOCs que já tinham nota (`cpp-moc`, `tauri-moc`) não o carregam, porque
+ele vinha apagando à mão.
+
+**Correção:** no ramo de seção sem itens, um placeholder é removido junto com a inserção. Isto
+É apagar texto do usuário, o que `writer.ts`'s `dropAnsweredSections` recusa por princípio, então
+a regra é estreita nos dois eixos: só quando a seção **não tem item algum**, e só sobre uma
+**única** linha não vazia que seja **inteiramente ênfase** (`_..._` ou `*...*`). Prosa comum fica;
+itálico numa seção que já lista notas fica; placeholder acompanhado de outra prosa fica.
+
+**Fixado por:** `test/propagate.test.ts`, quatro casos — o defeito reproduzido, e os três
+contrapesos. Os dois últimos vieram de MUTAÇÃO: alargar a regra para "qualquer linha solta" é
+pego por "keeps prose that is not a self-contained placeholder", e alargar para "a última linha
+de corpo" é pego por "keeps the placeholder when it is not the only content of the section" — que
+só existe porque a primeira rodada de mutação passou verde e revelou que a guarda
+`bodyIdx.length === 1` não estava fixada por nada.
 
 ---
 
