@@ -280,10 +280,27 @@ Convenção de diretórios:
 
 ## Limitações Conhecidas
 
-Os nove follow-ups levantados na construção foram corrigidos — inclusive o frontmatter com alias que
+Três coisas que este servidor não faz, todas escolhidas e não esquecidas:
+
+- **Arquivar em `99-archive/` perde o `— resumo`** da entrada da nota no MOC de origem. O
+  `vault_move` tira a linha do MOC de origem e não tem MOC de destino em que reinseri-la, e o
+  arquivo morto é uma área em que nada se escreve — não há onde guardar o texto. Desarquivar recria
+  um `- [[slug]]` nu, e não a entrada de antes. As alternativas — guardar o resumo no frontmatter da
+  própria nota movida, ou num índice lateral — custam mais do que a perda. O que a operação nunca
+  faz é inventar um resumo: sem linha de origem, a entrada sai curta e verdadeira.
+- **Wiki-link que só existe no frontmatter não é reescrito** pelo `vault_move`. As notas candidatas
+  saem do corpo, que é também de onde o grafo de links é construído, então uma nota que este filtro
+  pula é uma nota cujas arestas o `vault_backlinks` também não tem. Alargar a reescrita sem alargar
+  o scanner criaria a assimetria pior: um link corrigido que nenhuma tool de leitura enxerga.
+- **`vault_get_note` devolve o corpo da nota cru.** Escapá-lo quebraria em silêncio o fluxo
+  ler-depois-editar exatamente nas notas que carregam um caractere de controle, já que o
+  `vault_edit_note` casa `old_text` como substring exata do arquivo. As superfícies que fazem
+  afirmação por linha — o trecho do `vault_search` e o diff — são sanitizadas.
+
+Os dezesseis follow-ups levantados até aqui foram corrigidos — inclusive o frontmatter com alias que
 travava o event loop por ~5 s, o hard link indexado no caminho de leitura e a corrida de escrita
 entre processos. `docs/followups.md` guarda o histórico: cada item com a medição que o caracterizava,
-a correção aplicada e o teste que a fixa, mais o que continua **aceito deliberadamente**.
+a correção aplicada e o teste que a fixa, mais o raciocínio inteiro por trás de cada aceitação acima.
 
 ## Desenvolvimento
 
@@ -293,6 +310,7 @@ Depois de uma mudança no código:
 npm run build     # Compila TypeScript (só src/, emite dist/)
 npm run typecheck # tsc sobre src/ E test/, sem emitir
 npm test          # Roda o typecheck (pretest) e depois os testes vitest
+npm run smoke     # Sobe o dist/ compilado e exige as nove tools por stdio
 npm run dev       # Watch mode (se necessário)
 ```
 
@@ -305,6 +323,13 @@ duração; todos eles abrem a ponta de escrita por conta própria (`withFifoWatc
 segundos em vez de dependerem do timeout do runner. `npm test` roda por `scripts/test.mjs`, que
 limita a suíte por relógio (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) e mata o grupo de processos: uma
 suíte travada vira exit 124, e não uma parada indefinida sem exit code nenhum.
+
+O `npm run smoke` é a checagem que a suíte não consegue ser: sobe o `dist/server/index.js` compilado
+como PROGRAMA contra um vault descartável, completa o handshake do MCP e exige que o `tools/list`
+responda exatamente as nove tools. Cobre o entrypoint que se acha biblioteca e não inicia nada — um
+exit 0 limpo para o shell, uma espera eterna para o cliente — e é o que torna `engines.node >= 20`
+uma afirmação verificada: o CI o roda no Node 20 além do 26 fixado, já que a suíte não roda no 20
+(`test/frontmatter.test.ts` depende do type stripping do runtime) e JavaScript compilado roda.
 
 ## Licença
 

@@ -288,10 +288,28 @@ Directory convention:
 
 ## Known Limitations
 
-The nine follow-ups raised during construction have been fixed — including the aliased frontmatter
-that blocked the event loop for ~5 s, the hard link indexed on the read path, and the cross-process
-write race. `docs/followups.md` keeps the record: each item with the measurement that characterised
-it, the fix applied and the test that pins it, plus what remains **deliberately accepted**.
+Three things this server does not do, each chosen rather than overlooked:
+
+- **Archiving to `99-archive/` loses the `— summary`** on the note's entry in its source MOC.
+  `vault_move` removes the line from the origin MOC and has no destination MOC to reinsert it into,
+  and the archive is a write-free area, so there is nowhere to park the text. Unarchiving recreates a
+  bare `- [[slug]]`, not the entry as it was. The alternatives — stashing the summary in the moved
+  note's own frontmatter, or in a side index — both cost more than the loss. What the operation never
+  does is invent a summary: with no origin line, the entry comes out short and true.
+- **A wiki-link that exists only in the frontmatter is not rewritten** by `vault_move`. Candidate
+  notes are selected from the body, which is also where the link graph is built from, so a note this
+  filter skips is a note whose edges `vault_backlinks` does not have either. Widening the rewrite
+  without widening the scanner would produce the worse asymmetry: a corrected link that no read tool
+  can see.
+- **`vault_get_note` returns the note body raw.** Escaping it would silently break read-then-edit for
+  exactly the notes that carry a control character, since `vault_edit_note` matches `old_text` as an
+  exact substring of the file. The surfaces that do make per-line claims — the `vault_search` snippet
+  and the diff — are sanitised.
+
+The sixteen follow-ups raised so far have been fixed — including the aliased frontmatter that blocked
+the event loop for ~5 s, the hard link indexed on the read path, and the cross-process write race.
+`docs/followups.md` keeps the record: each item with the measurement that characterised it, the fix
+applied and the test that pins it, plus the full reasoning behind each acceptance above.
 
 ## Development
 
@@ -301,6 +319,7 @@ After a change to the code:
 npm run build     # Compiles TypeScript (src/ only, emits dist/)
 npm run typecheck # tsc over src/ AND test/, without emitting
 npm test          # Runs the typecheck (pretest) and then the vitest suite
+npm run smoke     # Starts the built dist/ and demands the nine tools over stdio
 npm run dev       # Watch mode (if needed)
 ```
 
@@ -314,8 +333,18 @@ runner's timeout. `npm test` runs through `scripts/test.mjs`, which bounds the s
 (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) and kills the process group: a hung suite becomes exit 124,
 not an indefinite stall with no exit code at all.
 
-Code comments and docblocks are written in Portuguese (BR), as are commit messages and the server's
-own user-facing strings — the vault this serves is a Portuguese-language knowledge base.
+`npm run smoke` is the check the suite cannot be: it spawns the compiled `dist/server/index.js` as a
+program against a throwaway vault, completes the MCP handshake and requires `tools/list` to answer
+with exactly the nine tools. It covers the entrypoint deciding it is a library and starting nothing —
+a clean exit 0 to a shell, an eternal wait to a client — and it is what makes `engines.node >= 20` a
+verified claim: CI runs it on Node 20 as well as on the pinned 26, since the suite itself cannot run
+on 20 (`test/frontmatter.test.ts` depends on the runtime's type stripping) while compiled JavaScript
+can.
+
+Commit messages and the server's own user-facing strings — tool descriptions, error messages, the
+prose inside a diff — are written in Portuguese (BR): the vault this serves is a Portuguese-language
+knowledge base and its reader is a Portuguese-speaking model. Code comments and docblocks are in
+English, with `src/index/bm25.ts` left in Portuguese from the first pass.
 
 ## License
 
