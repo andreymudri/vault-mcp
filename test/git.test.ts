@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { commitFiles } from '../src/write/git.js';
+import { commitFiles, headBlobState, headSha } from '../src/write/git.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -622,5 +622,135 @@ describe('commitFiles — push', () => {
       if (antes === undefined) delete process.env.VAULT_AUTO_PUSH;
       else process.env.VAULT_AUTO_PUSH = antes;
     }
+  });
+});
+
+/**
+ * A pergunta que `vault_delete` faz ao git ANTES de destruir qualquer coisa.
+ *
+ * Apagar uma nota é a única operação deste servidor que não tem volta pelo próprio servidor,
+ * e o que a torna reversível não é nada que este código faça: é existir um blob no `HEAD`. Se
+ * não existe — o vault não é repositório, ou a nota foi criada e nunca commitada — a exclusão
+ * é irreversível de verdade, e a tool para e diz isso em vez de apagar e avisar depois.
+ *
+ * "Rastreada mas suja" é uma terceira resposta, e não uma recusa: a restauração existe, só que
+ * ela traz de volta a versão COMMITADA e não o que está no disco agora. O usuário decide com
+ * essa frase na mão.
+ */
+describe('headBlobState', () => {
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-head-test-'));
+    await initScratchRepo(repoRoot);
+    await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+    await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+  });
+
+  afterEach(async () => {
+    await removeTree(repoRoot);
+  });
+
+  it('reconhece uma nota commitada e limpa', async () => {
+    await fs.writeFile(path.join(repoRoot, 'nota.md'), '# Nota\n', 'utf8');
+    await git(repoRoot, ['add', 'nota.md']);
+    await git(repoRoot, ['commit', '-m', 'docs: nota']);
+
+    expect(await headBlobState(repoRoot, 'nota.md')).toEqual({ inHead: true, modified: false });
+  });
+
+  it('reconhece uma nota commitada com edição não commitada', async () => {
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+    await git(repoRoot, ['add', 'nota.md']);
+    await git(repoRoot, ['commit', '-m', 'docs: nota']);
+    await fs.writeFile(absPath, '# Nota editada\n', 'utf8');
+
+    expect(await headBlobState(repoRoot, 'nota.md')).toEqual({ inHead: true, modified: true });
+  });
+
+  it('conta como modificada a edição que está apenas no índice', async () => {
+    // `git add` sem commit não põe blob nenhum no HEAD. Comparar contra o índice em vez de
+    // contra o HEAD diria "limpa" aqui, e a restauração perderia a edição já staged sem avisar.
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+    await git(repoRoot, ['add', 'nota.md']);
+    await git(repoRoot, ['commit', '-m', 'docs: nota']);
+    await fs.writeFile(absPath, '# Nota editada\n', 'utf8');
+    await git(repoRoot, ['add', 'nota.md']);
+
+    expect(await headBlobState(repoRoot, 'nota.md')).toEqual({ inHead: true, modified: true });
+  });
+
+  it('recusa uma nota nunca commitada', async () => {
+    await fs.writeFile(path.join(repoRoot, 'nota.md'), '# Nota\n', 'utf8');
+    await git(repoRoot, ['add', 'nota.md']);
+    await git(repoRoot, ['commit', '-m', 'docs: nota']);
+    await fs.writeFile(path.join(repoRoot, 'nova.md'), '# Nova\n', 'utf8');
+
+    const state = await headBlobState(repoRoot, 'nova.md');
+    expect(state.inHead).toBe(false);
+    expect(state.reason).toBeDefined();
+  });
+
+  it('recusa quando o repositório não tem commit nenhum', async () => {
+    await fs.writeFile(path.join(repoRoot, 'nota.md'), '# Nota\n', 'utf8');
+
+    const state = await headBlobState(repoRoot, 'nota.md');
+    expect(state.inHead).toBe(false);
+  });
+
+  it('recusa quando o diretório não é um repositório git', async () => {
+    // O vault do usuário pode simplesmente não ser um repositório. Nesse caso NADA aqui é
+    // reversível, e essa é justamente a informação que a recusa carrega.
+    const semGit = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-sem-git-'));
+    try {
+      await fs.writeFile(path.join(semGit, 'nota.md'), '# Nota\n', 'utf8');
+      const state = await headBlobState(semGit, 'nota.md');
+      expect(state.inHead).toBe(false);
+      expect(state.reason).toBeDefined();
+    } finally {
+      await removeTree(semGit);
+    }
+  });
+
+  it('não confunde uma nota com outra de nome parecido', async () => {
+    await fs.mkdir(path.join(repoRoot, '02-wiki'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, '02-wiki', 'nota.md'), '# Nota\n', 'utf8');
+    await git(repoRoot, ['add', '.']);
+    await git(repoRoot, ['commit', '-m', 'docs: nota']);
+
+    expect((await headBlobState(repoRoot, '02-wiki/nota.md')).inHead).toBe(true);
+    expect((await headBlobState(repoRoot, 'nota.md')).inHead).toBe(false);
+  });
+});
+
+describe('headSha', () => {
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-sha-test-'));
+    await initScratchRepo(repoRoot);
+    await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+    await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+  });
+
+  afterEach(async () => {
+    await removeTree(repoRoot);
+  });
+
+  it('devolve o sha do commit no topo', async () => {
+    await fs.writeFile(path.join(repoRoot, 'nota.md'), '# Nota\n', 'utf8');
+    await git(repoRoot, ['add', 'nota.md']);
+    await git(repoRoot, ['commit', '-m', 'docs: nota']);
+
+    const sha = await headSha(repoRoot);
+    expect(sha).toBe(await git(repoRoot, ['rev-parse', 'HEAD']));
+  });
+
+  it('devolve undefined onde não há HEAD', async () => {
+    // Sem isso, a frase de desfazer que a tool devolve sairia com um `undefined` no meio, o
+    // que é pior do que não oferecer desfazer nenhum: é um comando que o usuário vai colar.
+    expect(await headSha(repoRoot)).toBeUndefined();
   });
 });

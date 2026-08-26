@@ -143,6 +143,90 @@ export async function commitFiles(
 }
 
 /**
+ * What git knows about `relPath`, asked BEFORE anything is destroyed.
+ *
+ * `vault_delete` is the one operation in this server that this server cannot undo, and what
+ * makes it undoable at all is not anything the code does: it is a blob existing in `HEAD`. So
+ * the deletion is gated on that fact rather than on a `confirm` flag alone — a flag confirms
+ * intent, and intent is not the same question as recoverability.
+ *
+ * The three answers are genuinely different and each drives a different behaviour:
+ *
+ * - `inHead: true, modified: false` — delete freely, `git checkout <sha>^ -- <path>` brings it
+ *   back exactly.
+ * - `inHead: true, modified: true` — deletion is still recoverable, but what comes back is the
+ *   COMMITTED version and not what is on disk right now. That is a warning the user reads
+ *   before deciding, never a refusal: it is their edit and their call.
+ * - `inHead: false` — the vault is not a repository, or the note was written and never
+ *   committed. Nothing brings it back, and `vault_delete` stops there.
+ *
+ * `rev-parse --verify HEAD:<path>` is the whole question in one command: it fails on a
+ * repository with no commits, on a directory that is not a repository, and on a path that is
+ * not in the tree, and every one of those is `inHead: false` for the same reason.
+ *
+ * `modified` is measured against `HEAD` and NOT against the index. A note that was edited and
+ * `git add`ed has no blob of that edit anywhere in a commit, so comparing against the index
+ * would report it clean and the restore would silently drop the staged work.
+ */
+export interface HeadBlobState {
+  /** True when `HEAD:<relPath>` names a blob — i.e. a delete is recoverable from git. */
+  inHead: boolean;
+  /** True when the working tree differs from that blob. Meaningless when `inHead` is false. */
+  modified: boolean;
+  /** Git's own diagnostic, when it is what answered `inHead: false`. */
+  reason?: string;
+}
+
+export async function headBlobState(repoRoot: string, relPath: string): Promise<HeadBlobState> {
+  try {
+    await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--verify', `HEAD:${relPath}`]);
+  } catch (err) {
+    return { inHead: false, modified: false, reason: errorMessage(err) };
+  }
+
+  try {
+    await execFileAsync('git', [
+      '-C',
+      repoRoot,
+      '--literal-pathspecs',
+      'diff',
+      '--quiet',
+      'HEAD',
+      '--',
+      relPath,
+    ]);
+    return { inHead: true, modified: false };
+  } catch (err) {
+    // Exit 1 is `--quiet`'s "there are differences". Anything else is git failing to answer,
+    // and an unanswered question about the user's own edits is reported as "modified": the
+    // warning it produces is the cautious direction, and the blob is in `HEAD` either way.
+    return exitCode(err) === 1
+      ? { inHead: true, modified: true }
+      : { inHead: true, modified: true, reason: errorMessage(err) };
+  }
+}
+
+/**
+ * The sha at `HEAD`, or `undefined` where there is none.
+ *
+ * `vault_delete` names the exact command that undoes it, and the command has to carry a sha
+ * rather than `HEAD^`: the user may commit again before they read the answer, and by then
+ * `HEAD^` names something else entirely. `undefined` rather than a placeholder, because a
+ * command with `undefined` spliced into it is worse than offering no undo at all — it is a
+ * line the user will paste.
+ */
+export async function headSha(repoRoot: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', repoRoot, 'rev-parse', 'HEAD']);
+    const sha = stdout.trim();
+    return sha === '' ? undefined : sha;
+  } catch {
+    // No commits, or not a repository. Both mean there is no sha to name.
+    return undefined;
+  }
+}
+
+/**
  * Pushes the current branch, reporting failure as a WARNING and never as a rollback.
  *
  * The commit already happened and the note is already on disk. Undoing either because the network
