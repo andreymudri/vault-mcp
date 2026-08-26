@@ -11,7 +11,7 @@ npm test
 ```
 
 - **Node >= 20** é obrigatório
-- A suíte de testes contém 16 arquivos com 913 testes e deve levar menos de um minuto
+- A suíte de testes contém 17 arquivos com 1.014 testes e leva ~10 segundos (o `npm test` roda o typecheck antes, via `pretest`)
 
 ## Configuração
 
@@ -30,11 +30,19 @@ Substitua `/caminho/absoluto/do/vault` pela raiz do seu vault e `/caminho/absolu
 Adicione o MCP com:
 
 ```bash
-claude mcp add vault --env VAULT_PATH="/home/user/Knowledge/Vault" -- \
-  node /home/user/projetos/vault-mcp/dist/server/index.js
+claude mcp add vault --scope user \
+  -e "VAULT_PATH=/caminho/absoluto/do/vault" -- \
+  node /caminho/absoluto/do/vault-mcp/dist/server/index.js
 ```
 
-Substitua `/home/user/Knowledge/Vault` pelo caminho **absoluto** da raiz do seu vault e `/home/user/projetos/vault-mcp` pelo caminho absoluto do diretório do projeto. Note que a variável `VAULT_PATH` é expandida pelo shell no comando acima, mas não seria em arquivos de configuração JSON (não há expansão de variáveis no JSON — sempre use caminhos absolutos).
+Os dois caminhos são **absolutos**, e o do vault entra em `-e` como um par `CHAVE=valor` único — com
+aspas em volta do par inteiro, que é o que faz um vault cujo caminho tem espaço funcionar. Não há
+expansão de variável em JSON, então um caminho relativo aqui vira um servidor que não sobe.
+
+`--scope user` registra em `~/.claude.json` e deixa as tools disponíveis em **todo** projeto, que é o
+ponto: o vault responde sobre decisões e patterns enquanto você trabalha em outro repositório. Sem a
+flag o padrão é `local` (só o diretório atual). Confira com `claude mcp get vault`; para remover,
+`claude mcp remove vault -s user`.
 
 ## As Sete Tools
 
