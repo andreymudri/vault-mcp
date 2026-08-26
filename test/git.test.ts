@@ -14,18 +14,42 @@ async function git(repoRoot: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * `git init` with the background writer turned OFF.
+ *
+ * `gc --auto` is dispatched by git after ordinary commands and OUTLIVES the command this test
+ * awaited, so a throwaway repository can still be growing objects while the teardown removes it.
+ * Nothing here needs packing — the repositories live for one test.
+ */
+async function initScratchRepo(repoRoot: string): Promise<void> {
+  await git(repoRoot, ['init']);
+  await git(repoRoot, ['config', 'gc.auto', '0']);
+}
+
+/**
+ * Teardown that tolerates a transient writer inside a throwaway repository.
+ *
+ * A plain `fs.rm` raced git and failed once in the gate with `ENOTEMPTY: rmdir '.../vault/.git'`.
+ * The retries are `fs.rm`'s own answer to exactly that, and `gc.auto 0` above removes the writer.
+ * The same pair `test/writer.test.ts` and `test/learn.test.ts` already carry — a test that fails by
+ * accident is worse than a slow one.
+ */
+async function removeTree(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
 describe('commitFiles', () => {
   let repoRoot: string;
 
   beforeEach(async () => {
     repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-git-test-'));
-    await git(repoRoot, ['init']);
+    await initScratchRepo(repoRoot);
     await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
     await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
   });
 
   afterEach(async () => {
-    await fs.rm(repoRoot, { recursive: true, force: true });
+    await removeTree(repoRoot);
   });
 
   it('commits a single new file with the given message', async () => {
@@ -74,7 +98,7 @@ describe('commitFiles', () => {
       expect(result.committed).toBe(false);
       expect(result.warning).toBeTruthy();
     } finally {
-      await fs.rm(notARepo, { recursive: true, force: true });
+      await removeTree(notARepo);
     }
   });
 
@@ -263,7 +287,7 @@ describe('commitFiles', () => {
     // (here: no git identity configured) behind a false "nothing to commit".
     const nadaRepoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-nada-repo-'));
     try {
-      await git(nadaRepoRoot, ['init']);
+      await initScratchRepo(nadaRepoRoot);
       await git(nadaRepoRoot, ['config', 'user.name', 'Vault MCP Test']);
       await git(nadaRepoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
 
@@ -290,7 +314,7 @@ describe('commitFiles', () => {
       // silently swallowed behind the fixed "nothing to commit" message.
       expect(result.warning).toContain('recusado pelo hook de pre-commit');
     } finally {
-      await fs.rm(nadaRepoRoot, { recursive: true, force: true });
+      await removeTree(nadaRepoRoot);
     }
   });
 
