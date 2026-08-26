@@ -740,8 +740,11 @@ const MAX_TAG_LENGTH = 128;
  *
  *   `3.10`→`3.1`  `007`→`7`  `0x10`→`16`  `0b101`→`5`  `1e3`→`1000`  `1_000`→`1000`  `1.`→`1`
  *   `+7`→`7`  `.Inf`/`.INF`/`.inf`→`Infinity`  `.NaN`/`.nan`→`NaN`
- *   `1:30`→`90`  `12:00`→`720`  `1:30:00`→`5400`   (YAML 1.1 sexagesimal)
+ *   `1:30`→`90`  `12:00`→`720`  `1:30:00`→`5400`   (YAML 1.1 sexagesimal integer)
+ *   `1:30.5`→`90.5`  `1:30.`→`90`  `0:30.5`→`30.5`  `59:59.999`→`3599.999`   (…and float)
+ *   `017`→`15`  `0x1f`→`31`  `0b11`→`3`   (radix, and the reason the message reads the radix too)
  *   `2026-02-30`→`2026-03-02`  `2026-13-01`→`2027-01-01`  `0000-00-00`→`1899-11-30`
+ *   `2026-01-10T00:00:00Z`→`2026-01-10`  `2026-01-10 00:00:00`→`2026-01-10`   (full timestamp)
  *
  * And, just as importantly, what MEASURED FINE and is therefore NOT refused: `type:adr`, `lang:pt`,
  * `c++:stl`, `a:b`, `v1:2` — a colon is only special when both sides are digits — plus `1:60` and
@@ -751,19 +754,68 @@ const MAX_TAG_LENGTH = 128;
  * blocked ordinary namespaced tags that work — with advice ("use a tag with a letter") that a tag
  * made only of letters cannot follow.
  *
+ * Four more shapes belong to that second list and were being refused wrongly, all because this
+ * pattern was WIDER than js-yaml's own resolvers: `009`/`018`/`09` (a leading zero means octal, and
+ * 8 and 9 are not octal digits — a zero-padded ticket id is the realistic case), `1_`/`007_` (a
+ * numeric may not end in an underscore), `0X1F`/`0B11` (the radix prefixes are lowercase-only), and
+ * `+.0`/`+.1`/`+.9` (js-yaml's bare-dot float carries no sign).
+ *
  * The break is in the serializer, which is outside this task's file set, so the decision here is to
  * REFUSE what will not survive rather than write a tag that never comes back. Refusing beats
  * coercing because a tag is an identifier: `3.10` silently stored as `3.1` is not the tag anyone
  * asked for. Each refusal NAMES THE VALUE THAT WOULD COME BACK, so a retry has something to act on.
  */
-const NUMERIC_LIKE_RE =
-  /^[+]?(?:0[bB][01_]+|0[xX][0-9a-fA-F_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?|\.[0-9_]+(?:[eE][-+]?[0-9]+)?|\.(?:inf|nan))$/i;
+const NUMERIC_LIKE_RE = new RegExp(
+  '^(?:' +
+    // INTEGERS, YAML 1.1. The radix prefixes are LOWERCASE-ONLY: `0X1F` and `0B11` are read by
+    // nobody and come back as themselves. A leading zero means OCTAL, which is why `009`, `018`
+    // and `09` survive — 8 and 9 are not octal digits, so js-yaml leaves them as text — while
+    // `007` and `017` do not. The decimal branch is `0` ALONE or a non-zero lead, never `0[0-9]+`.
+    '[+]?0b[01_]+' +
+    '|[+]?0x[0-9a-fA-F_]+' +
+    '|[+]?0[0-7_]+' +
+    '|[+]?(?:0|[1-9][0-9_]*)' +
+    // FLOATS, YAML 1.1. Same `0`-alone rule in the integer part. The bare-dot form carries NO
+    // sign in js-yaml's own pattern, which is the whole reason `.5` is read as 0.5 while `+.5`,
+    // `+.0` and `+.9` are ordinary text. `.nan` takes no sign either; `.inf` does.
+    '|[+]?(?:0|[1-9][0-9_]*)(?:\\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?' +
+    '|\\.[0-9_]+(?:[eE][-+]?[0-9]+)?' +
+    '|[+]?\\.(?:inf|Inf|INF)' +
+    '|\\.(?:nan|NaN|NAN)' +
+  ')$',
+);
 
-/** js-yaml's YAML 1.1 sexagesimal integer: the leading group may not start with a zero. */
-const SEXAGESIMAL_RE = /^[+]?[1-9][0-9_]*(?::[0-5]?[0-9])+$/;
+/** js-yaml's YAML 1.1 sexagesimal INTEGER: the leading group may not start with a zero. */
+const SEXAGESIMAL_INT_RE = /^[+]?[1-9][0-9_]*(?::[0-5]?[0-9])+$/;
 
-/** js-yaml's short timestamp form, the only date shape that resolves to a `Date`. */
+/**
+ * js-yaml's YAML 1.1 sexagesimal FLOAT, which is a SEPARATE resolver and a different shape.
+ *
+ * Two differences from the integer above, and both are measured: the leading group may start with
+ * a zero (`0:30.5` → 30.5, while `0:30` survives), and it ends in a dot whose digits are optional
+ * (`1:30.` → 90). Covering only the integer form let every one of `1:30.5`, `12:00.25`,
+ * `1:30:00.5` and `59:59.999` through as a tag that comes back a number.
+ */
+const SEXAGESIMAL_FLOAT_RE = /^[+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*$/;
+
+/**
+ * js-yaml's short timestamp form: a two-digit month AND day, and nothing after it.
+ *
+ * `2026-1-5` is deliberately NOT this shape — it survives as text, measured — which is why the
+ * one-or-two-digit form belongs to the timestamp regex below and not to this one.
+ */
 const YAML_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * js-yaml's FULL timestamp: the same date with a time part, which the short form above never
+ * matched — so `2026-01-10T00:00:00Z` sailed past the guard and came back as `2026-01-10`.
+ *
+ * The time part is what makes the one-or-two-digit month and day legal here: `2026-1-5` alone is
+ * text, `2026-1-5T01:02:03Z` is the fifth of January. The separator is `T`, `t`, or runs of blanks;
+ * the fraction and the zone are optional; the zone may be `Z` or an offset.
+ */
+const YAML_TIMESTAMP_RE =
+  /^(\d{4})-(\d\d?)-(\d\d?)(?:[Tt]|[ \t]+)(\d\d?):(\d\d):(\d\d)(?:\.(\d*))?(?:[ \t]*(?:Z|([-+])(\d\d?)(?::(\d\d))?))?$/;
 
 /** What `1:30` becomes: base-60 digits, most significant first. */
 function sexagesimalValue(tag: string): string {
@@ -782,6 +834,47 @@ function yamlDateDay(year: number, month: number, day: number): string {
   return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10);
 }
 
+/**
+ * The same, for the full timestamp form, assembled exactly as js-yaml assembles it: build the
+ * instant in UTC, then SUBTRACT the zone offset. An hour of 25 is not rejected, it rolls the day —
+ * measured, `2026-01-10T25:00:00Z` comes back as `2026-01-11`.
+ */
+function yamlTimestampDay(match: RegExpExecArray): string {
+  const [, year, month, day, hour, minute, second, fraction, sign, tzHour, tzMinute] = match;
+  // js-yaml pads the fraction to milliseconds: `.5` is 500 ms, not 5.
+  const ms = fraction === undefined ? 0 : Number(fraction.padEnd(3, '0').slice(0, 3));
+  let time = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    ms,
+  );
+  if (sign !== undefined) {
+    const offset = (Number(tzHour) * 60 + Number(tzMinute ?? 0)) * 60_000;
+    time -= sign === '-' ? -offset : offset;
+  }
+  return new Date(time).toISOString().slice(0, 10);
+}
+
+/**
+ * The number YAML reads a numeric-looking tag back as, BY RADIX.
+ *
+ * `Number('017')` is 17 and YAML 1.1 reads it as 15, so naming the value with `Number` alone
+ * produced a refusal that pointed at a number the parser never produces — which is the one thing
+ * these messages exist to get right, since the caller retries against what they are told.
+ * Underscores are stripped first: YAML ignores them inside a numeric, `Number` reads `NaN`.
+ */
+function yamlNumberText(tag: string): string {
+  const body = tag.replace(/^[+]/, '').replace(/_/g, '');
+  if (/^0x/.test(body)) return String(parseInt(body.slice(2), 16));
+  if (/^0b/.test(body)) return String(parseInt(body.slice(2), 2));
+  if (/^0[0-7]+$/.test(body)) return String(parseInt(body, 8));
+  return String(Number(body));
+}
+
 /** `undefined` when the tag survives the write/read round trip, or why it would not. */
 function tagRoundTripProblem(tag: string): string | undefined {
   // FIRST, because it makes every other question moot: a leading `-` is in `NEEDS_QUOTES_RE`'s
@@ -789,6 +882,20 @@ function tagRoundTripProblem(tag: string): string | undefined {
   // hands back the text unchanged — measured on `-5`, `-.inf` and `-1:30`, all of which survive.
   // `+` is not in that class, which is why `+7` still comes back as `7`.
   if (tag.startsWith('-')) return undefined;
+
+  // SECOND, and for the same reason: js-yaml's integer and float resolvers both refuse a numeric
+  // that ENDS in an underscore, whatever else it looks like. Measured on `1_`, `007_`, `0_`, `07_`,
+  // `1e3_` and `1:30.5_` — every one of them ordinary text, and a ticket id with a trailing
+  // separator is not an exotic tag.
+  if (tag.endsWith('_')) return undefined;
+
+  const timestamp = YAML_TIMESTAMP_RE.exec(tag);
+  if (timestamp !== null) {
+    return (
+      `seria lida como a data ${yamlTimestampDay(timestamp)}, porque o YAML lê a forma com hora ` +
+      `como um timestamp e o vault guarda só o dia`
+    );
+  }
 
   const date = YAML_DATE_RE.exec(tag);
   if (date !== null) {
@@ -798,7 +905,7 @@ function tagRoundTripProblem(tag: string): string | undefined {
       : `seria lida como a data ${day}, porque o YAML normaliza a data e essa não existe no calendário`;
   }
 
-  if (SEXAGESIMAL_RE.test(tag)) {
+  if (SEXAGESIMAL_INT_RE.test(tag) || SEXAGESIMAL_FLOAT_RE.test(tag)) {
     return (
       `seria lida como o número ${sexagesimalValue(tag)}, porque o YAML lê dígitos separados por ` +
       `':' como sexagesimal; troque o separador, ex.: '${tag.replace(/:/g, '-')}'`
@@ -813,14 +920,14 @@ function tagRoundTripProblem(tag: string): string | undefined {
   // Underscores are stripped first because YAML ignores them inside a numeric — `1_000` is the
   // number 1000 — while `Number` reads the same string as `NaN`, which would name the wrong value
   // in the message the caller is meant to act on.
-  const asNumber = Number(tag.replace(/_/g, ''));
-  if (String(asNumber) === tag) return undefined;
+  const asNumber = yamlNumberText(tag);
+  if (asNumber === tag) return undefined;
   // `.inf`/`.nan` are YAML spellings that `Number` does not know; name what YAML gives back.
   const readBack = /^[-+]?\.inf$/i.test(tag)
     ? `${tag.startsWith('-') ? '-' : ''}Infinity`
     : /^\.nan$/i.test(tag)
       ? 'NaN'
-      : String(asNumber);
+      : asNumber;
   return `seria lida como o número ${readBack}; acrescente uma letra, ex.: 'v${tag}'`;
 }
 
