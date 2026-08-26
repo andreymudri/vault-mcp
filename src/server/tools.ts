@@ -11,10 +11,11 @@ import type { Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { LearnError, learn } from '../write/learn.js';
 import { INVISIBLE_CHARS } from '../write/paths.js';
+import { deleteNote, moveNote, type DeleteResult, type MoveResult } from '../write/relocate.js';
 import { EditError, editNote, writeNote, type WriteResult } from '../write/writer.js';
 
 /**
- * The seven tools the MCP server exposes, as plain objects: a name, a description written for an
+ * The nine tools the MCP server exposes, as plain objects: a name, a description written for an
  * agent to route on, a zod schema and a handler that answers with TEXT.
  *
  * Nothing here talks to a transport. `createTools` is handed the same `VaultScanner` the
@@ -730,6 +731,46 @@ function renderWrite(
 }
 
 /**
+ * Shared tail of `vault_move` and `vault_delete`.
+ *
+ * Every list is rendered even when empty, spelled `(nada)`. An absent line reads as "this did not
+ * apply"; `Reescritos: (nada)` reads as "no other note needed changing", which is a claim the
+ * caller wants and is the usual, correct outcome of a move that only changed a directory.
+ */
+function renderRelocate(
+  headline: string,
+  result: MoveResult | DeleteResult,
+  redact: (text: string) => string,
+  queueWarning?: string,
+): string {
+  const lines = [headline];
+  if ('rewritten' in result) {
+    lines.push(
+      `Links corrigidos em: ${
+        result.rewritten.length === 0 ? '(nada)' : forMessage(result.rewritten.join(', '))
+      }`,
+    );
+  }
+  lines.push(
+    `MOC/índice atualizados: ${
+      result.propagated.length === 0 ? '(nada)' : forMessage(result.propagated.join(', '))
+    }`,
+    `Commit: ${result.committed ? 'sim' : 'não'}`,
+    ...(result.pushed === undefined ? [] : [`Push: ${result.pushed ? 'sim' : 'não'}`]),
+  );
+  if ('undo' in result && result.undo !== undefined) {
+    // Vault-relative on purpose (see `relocate.ts`): a command carrying the redactor's `<vault>`
+    // is a command the user pastes and watches fail, so the answer says where to run it instead.
+    lines.push(`Desfazer, de dentro do vault: ${forMessage(result.undo)}`);
+  }
+  for (const warning of [...result.warnings, queueWarning]) {
+    if (warning !== undefined) lines.push(`Aviso: ${forMessage(redact(warning))}`);
+  }
+  lines.push('', 'Diff (mostre ao usuário):', result.diff === '' ? '(vazio)' : relayDiff(result.diff));
+  return lines.join('\n');
+}
+
+/**
  * The caps `toTags` in `src/vault/frontmatter.ts` applies when it READS a note's tags back.
  *
  * Mirrored rather than imported because that function is not exported, and mirrored at all because
@@ -1129,6 +1170,21 @@ const LEARN_DESCRIPTION =
   'novo), tudo em um único commit. ' +
   'Mostre ao usuário o diff devolvido.';
 
+const MOVE_DESCRIPTION =
+  'Move, renomeia, promove ou arquiva uma nota, corrigindo sozinho todo link que passaria a ' +
+  'apontar para outro lugar, migrando a entrada dela entre os MOCs de domínio e commitando tudo ' +
+  'de uma vez. `to` é o caminho completo com `.md`, então as quatro operações são a mesma: ' +
+  '`01-raw/inbox/rascunho.md` → `02-wiki/nestjs/auth-guard.md` promove, renomeia e troca de ' +
+  'domínio junto. `99-archive/` vale como origem E destino, o que dá arquivar e desarquivar. ' +
+  'Um domínio de destino sem MOC exige confirm_novo_dominio. Mostre ao usuário o diff devolvido.';
+
+const DELETE_DESCRIPTION =
+  'Apaga uma nota e commita, tirando a linha dela do MOC do domínio. Recusa, sem apagar, se a ' +
+  'nota não tiver versão commitada no HEAD (aí não haveria como desfazer), se ela for estrutural ' +
+  '(MOC, nota diária, índice) ou se ela estiver em `99-archive/`. Notas apontadas por outras ' +
+  'exigem confirm, e a recusa lista quem aponta — os links delas ficarão quebrados. A resposta ' +
+  'traz o comando exato que desfaz.';
+
 export function createTools(deps: ToolDeps): ToolDefinition[] {
   const writes = new WriteQueue();
   const redact = makeRedactor(deps.vaultRoot);
@@ -1416,6 +1472,84 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
   );
 
+  /**
+   * `refreshVault` INSIDE the exclusive slot, and only for these two.
+   *
+   * Every other write tool answers a question about one path, and `guardedPath` plus
+   * `classifyNode` answer it from the filesystem. These two answer questions about the GRAPH —
+   * which notes link here, where does `[[slug]]` resolve — and those come out of the scanner. A
+   * stale scanner does not fail loudly here: it rewrites the wrong file, or reports a note as
+   * unlinked and deletes it. So the refresh runs, and it runs after the queue has granted the
+   * slot, so no write of this process can land between the refresh and the operation.
+   */
+  const refreshedWrite = <T>(run: () => Promise<T>): Promise<{ value: T; warning?: string }> =>
+    writes.runExclusive(() => {
+      refreshVault(deps);
+      return run();
+    });
+
+  const vaultMove = define(
+    redact,
+    'vault_move',
+    MOVE_DESCRIPTION,
+    {
+      from: z.string().min(1, 'caminho de origem não pode ser vazio').describe('Caminho atual da nota, relativo ao vault, com `.md`.'),
+      to: z
+        .string()
+        .min(1, 'caminho de destino não pode ser vazio')
+        .describe('Caminho completo de destino, relativo ao vault, com `.md`. Mover, renomear e promover são a mesma operação.'),
+      confirm_novo_dominio: z
+        .boolean()
+        .optional()
+        .describe('Confirma a criação do MOC de um domínio de destino que ainda não tem um.'),
+    },
+    async (input) => {
+      const { value: result, warning } = await refreshedWrite(() =>
+        moveNote({
+          vaultRoot: deps.vaultRoot,
+          scanner: deps.scanner,
+          from: input.from,
+          to: input.to,
+          ...(input.confirm_novo_dominio === undefined
+            ? {}
+            : { confirmNovoDominio: input.confirm_novo_dominio }),
+          now: new Date(),
+        }),
+      );
+      return renderRelocate(
+        `Nota movida: ${forMessage(result.from)} → ${forMessage(result.to)}`,
+        result,
+        redact,
+        warning,
+      );
+    },
+  );
+
+  const vaultDelete = define(
+    redact,
+    'vault_delete',
+    DELETE_DESCRIPTION,
+    {
+      path: z.string().min(1, 'caminho não pode ser vazio').describe('Caminho relativo ao vault, com `.md`.'),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe('Confirma apagar mesmo com outras notas apontando para esta; os links delas ficam quebrados.'),
+    },
+    async (input) => {
+      const { value: result, warning } = await refreshedWrite(() =>
+        deleteNote({
+          vaultRoot: deps.vaultRoot,
+          scanner: deps.scanner,
+          path: input.path,
+          ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+          now: new Date(),
+        }),
+      );
+      return renderRelocate(`Nota apagada: ${forMessage(result.path)}`, result, redact, warning);
+    },
+  );
+
   return [
     vaultSearch,
     vaultGetNote,
@@ -1424,5 +1558,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     vaultWriteNote,
     vaultEditNote,
     vaultLearn,
+    vaultMove,
+    vaultDelete,
   ];
 }

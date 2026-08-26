@@ -51,6 +51,8 @@ const TOOL_NAMES = [
   'vault_write_note',
   'vault_edit_note',
   'vault_learn',
+  'vault_move',
+  'vault_delete',
 ];
 
 const trash: string[] = [];
@@ -312,7 +314,7 @@ function jsonLines(text: string): Array<Record<string, unknown>> {
 }
 
 describe('createTools: catálogo', () => {
-  it('expõe exatamente as sete tools do spec', async () => {
+  it('expõe exatamente as nove tools do spec', async () => {
     const { tools } = makeTools(await makeVault());
     expect(tools.map((tool) => tool.name)).toEqual(TOOL_NAMES);
   });
@@ -1885,6 +1887,134 @@ describe('vault_learn', () => {
   }, 30_000);
 });
 
+/**
+ * A superfície que o agente vê de `vault_move` e `vault_delete`.
+ *
+ * O comportamento das duas está fixado em `test/relocate.test.ts`, contra o módulo. O que se
+ * testa AQUI é o que só esta camada faz: o schema, o refresh do scanner antes da operação, e o
+ * fato de uma RECUSA voltar como `isError` com a razão legível em vez de derrubar a chamada.
+ */
+describe('vault_move e vault_delete', () => {
+  it('move a nota e relata os arquivos que corrigiu', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+
+    const result = await call('vault_move', {
+      from: '02-wiki/nestjs/auth-guard.md',
+      to: '02-wiki/nestjs/guard-jwt.md',
+    });
+    const text = textOf(result);
+
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain('Nota movida: 02-wiki/nestjs/auth-guard.md → 02-wiki/nestjs/guard-jwt.md');
+    // Quatro notas da fixture citam `[[auth-guard]]`, e todas as quatro entram na linha.
+    expect(text).toMatch(/Links corrigidos em: .*02-wiki\/nestjs\/nestjs-moc\.md/);
+    expect(text).toMatch(/Links corrigidos em: .*03-projects\/potentia\/README\.md/);
+    expect(text).toContain('Commit: sim');
+    expect(text).toContain('Diff (mostre ao usuário):');
+    expect(
+      await fs.readFile(path.join(vaultRoot, '02-wiki/nestjs/nestjs-moc.md'), 'utf8'),
+    ).toContain('[[guard-jwt]]');
+  });
+
+  it('enxerga uma nota escrita na MESMA sessão, sem refresh manual', async () => {
+    // O refresh roda dentro do slot exclusivo da fila. Sem ele, o scanner ainda não conhece a
+    // nota que `vault_write_note` acabou de criar e o move a trataria como se ninguém a
+    // apontasse — corrigindo link nenhum e reportando sucesso.
+    const vaultRoot = await makeVault(true);
+    const { call, text } = makeTools(vaultRoot);
+
+    await call('vault_write_note', {
+      path: '02-wiki/nestjs/aponta.md',
+      content: 'Esta nota cita [[auth-guard]] e mais nada.',
+      frontmatter: { tipo: 'wiki' },
+    });
+    const saida = await text('vault_move', {
+      from: '02-wiki/nestjs/auth-guard.md',
+      to: '02-wiki/nestjs/guard-jwt.md',
+    });
+
+    expect(saida).toContain('02-wiki/nestjs/aponta.md');
+    expect(await fs.readFile(path.join(vaultRoot, '02-wiki/nestjs/aponta.md'), 'utf8')).toContain(
+      '[[guard-jwt]]',
+    );
+  });
+
+  it('devolve a recusa como isError, com a razão legível', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+
+    const result = await call('vault_move', {
+      from: '02-wiki/nestjs/auth-guard.md',
+      to: '02-wiki/nestjs/bullmq-worker.md',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('destino já existe');
+  });
+
+  it('não vaza a raiz absoluta do vault numa recusa', async () => {
+    // `PathGuardError` nomeia o caminho RESOLVIDO que recusou, e numa máquina pessoal isso
+    // soletra o nome de usuário do sistema. `makeRedactor` é a razão de a camada existir.
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+
+    const result = await call('vault_move', {
+      from: '02-wiki/nestjs/auth-guard.md',
+      to: '.git/refs/heads/pwn.md',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).not.toContain(vaultRoot);
+  });
+
+  it('recusa entrada malformada pelo schema, sem chegar ao módulo', async () => {
+    const { call } = makeTools(await makeVault(true));
+    const result = await call('vault_move', { from: '02-wiki/nestjs/auth-guard.md' });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('entrada inválida para vault_move');
+  });
+
+  it('apaga e devolve o comando que desfaz, relativo ao vault', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call, text } = makeTools(vaultRoot);
+
+    // Uma nota sem quem aponte para ela, commitada: toda nota da fixture é apontada por alguém.
+    await call('vault_write_note', {
+      path: '02-wiki/docker/descartavel.md',
+      content: 'Nota que não interessa a ninguém.',
+      frontmatter: { tipo: 'wiki' },
+    });
+    const saida = await text('vault_delete', { path: '02-wiki/docker/descartavel.md' });
+
+    expect(saida).toContain('Nota apagada: 02-wiki/docker/descartavel.md');
+    expect(saida).toContain('Desfazer, de dentro do vault: git checkout ');
+    // Sem `-C <raiz>`: o comando tem de ser colável, e o redator trocaria a raiz por `<vault>`.
+    expect(saida).not.toContain('<vault>');
+    expect(saida).not.toContain(vaultRoot);
+  });
+
+  it('recusa apagar uma nota apontada por outras, listando quem aponta', async () => {
+    const { call } = makeTools(await makeVault(true));
+    const result = await call('vault_delete', { path: '02-wiki/nestjs/bullmq-worker.md' });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('02-wiki/nestjs/auth-guard.md');
+    expect(textOf(result)).toContain('confirm');
+  });
+
+  it('recusa apagar uma nota estrutural', async () => {
+    const { call } = makeTools(await makeVault(true));
+    const result = await call('vault_delete', {
+      path: '02-wiki/nestjs/nestjs-moc.md',
+      confirm: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('estrutural');
+  });
+});
+
 describe('WriteQueue', () => {
   it('serializa tarefas na ordem em que entraram', async () => {
     const queue = new WriteQueue();
@@ -2118,7 +2248,7 @@ describe('entrypoint: o processo que o usuário inicia', () => {
 });
 
 describe('binário compilado (dist/server/index.js)', () => {
-  it('sobe pelo stdio e responde o handshake MCP com as sete tools', async () => {
+  it('sobe pelo stdio e responde o handshake MCP com as nove tools', async () => {
     const bin = await buildServer();
     const vaultRoot = await makeVault();
     const { stdout, stderr, code } = await runServer(bin, { VAULT_PATH: vaultRoot }, [
@@ -2225,7 +2355,7 @@ describe('servidor MCP', () => {
     expect(resolveVaultPath({ VAULT_PATH: vaultRoot })).toBe(path.resolve(vaultRoot));
   });
 
-  it('expõe as sete tools por cima do protocolo, com JSON Schema de entrada', async () => {
+  it('expõe as nove tools por cima do protocolo, com JSON Schema de entrada', async () => {
     const vaultRoot = await makeVault();
     const server = createVaultServer(vaultRoot);
     const client = new Client({ name: 'teste', version: '0.0.0' });
