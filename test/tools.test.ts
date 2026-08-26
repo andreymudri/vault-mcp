@@ -517,6 +517,32 @@ describe('vault_search', () => {
     30_000,
   );
 
+  /**
+   * A metade CRLF do `sanitizeQuoted` do snippet, que ficou sem teste: a versão do diff é a que
+   * MOSTRA o `\r` (lá ele é a mudança), e a do trecho é a que o COLAPSA. Sem isso, trocar o
+   * snippet para a variante do diff mantinha tudo verde enquanto toda linha de toda nota escrita no
+   * Windows ganhava um `\r` visível — ruído em cima do conteúdo que o trecho existe para mostrar.
+   */
+  it('o trecho de uma nota com CRLF não mostra \\r no fim de cada linha', async () => {
+    const vaultRoot = await makeVault();
+    await write(
+      vaultRoot,
+      '01-raw/inbox/janela.md',
+      '# Janela\r\n\r\nzzcrlfnojanela primeira linha.\r\nsegunda linha do clip.\r\n',
+    );
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_search', { query: 'zzcrlfnojanela', include_raw: true });
+
+    expect(headers(rendered).map((header) => header.path)).toContain('01-raw/inbox/janela.md');
+    expect(rendered).toContain('zzcrlfnojanela primeira linha.');
+    expect(rendered).not.toContain('\\r');
+    // E o colapso não custou a estrutura: cada linha do trecho continua prefixada, e são várias —
+    // um colapso que juntasse tudo numa linha só passaria na asserção acima.
+    const trecho = rendered.split('\n').filter((linha) => linha.includes('do clip') || linha.includes('primeira linha'));
+    expect(trecho.length).toBe(2);
+    for (const linha of trecho) expect(linha.startsWith('> ')).toBe(true);
+  });
+
   it('repassa os filtros tipo e folder para o retriever', async () => {
     const vaultRoot = await makeVault();
     const { text } = makeTools(vaultRoot);
@@ -928,6 +954,33 @@ describe('vault_get_note', () => {
     expect(rendered.length).toBeLessThan(5_000);
     expect(rendered).toContain('01-raw/inbox/campos.md');
     expect(rendered).toContain('[…cortado]');
+  }, 30_000);
+
+  /**
+   * O clamp de `tags` sozinho, que ficou sem teste: o caso acima é dominado pelo `tipo` e pelo
+   * `status` gigantes, então apagar o terceiro clamp mantinha os testes verdes. A nota aqui está no
+   * MÁXIMO que o próprio `frontmatter.ts` aceita — 64 tags de 128 caracteres —, ou seja, não é uma
+   * nota hostil: é o limite legal. Sem o clamp a linha sai com 8.380 caracteres contra 584, uma vez
+   * POR NOTA, multiplicando pelo tamanho do vault.
+   */
+  it('limita as tags na linha da listagem, mesmo no máximo que o frontmatter aceita', async () => {
+    const vaultRoot = await makeVault();
+    const tags = Array.from({ length: 64 }, (_, i) => `t${i}`.padEnd(128, 'x'));
+    await write(
+      vaultRoot,
+      '01-raw/inbox/so-tags.md',
+      `---\ntipo: wiki\ntags: [${tags.join(', ')}]\n---\n\n# Só Tags\n`,
+    );
+    const { text } = makeTools(vaultRoot);
+
+    const rendered = await text('vault_list', { folder: '01-raw' });
+    const linha = rendered.split('\n').find((l) => l.includes('01-raw/inbox/so-tags.md'));
+
+    expect(linha).toBeDefined();
+    // Pré-condição: as tags chegaram inteiras ao render — sem isso o clamp não teria o que cortar.
+    expect(linha).toContain('t0');
+    expect(linha!.length).toBeLessThan(1_000);
+    expect(linha).toContain('[…cortado]');
   }, 30_000);
 
   it('devolve a nota inteira quando ela cabe no limite', async () => {
@@ -1891,6 +1944,39 @@ describe('WriteQueue', () => {
     const depois = await queue.runExclusive(() => Promise.resolve('depois'));
     expect(depois.warning).toBeUndefined();
     expect(queue.hasOutstanding).toBe(false);
+  });
+
+  /**
+   * Uma chamada SOZINHA que passa do slot não perdeu exclusão nenhuma: o slot existe para liberar a
+   * FILA, e não havia ninguém atrás para entrar. Avisar aqui é dizer ao usuário que outra escrita
+   * pode ter corrido junto quando nenhuma existia — e o aviso, aparecendo onde não deveria, ensina
+   * a ignorá-lo onde deveria.
+   */
+  it('não avisa a chamada que estourou o slot estando sozinha na fila', async () => {
+    const queue = new WriteQueue(20);
+
+    const sozinha = await queue.runExclusive(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return 'sozinha';
+    });
+
+    expect(sozinha.value).toBe('sozinha');
+    expect(sozinha.warning).toBeUndefined();
+  });
+
+  it('avisa a chamada que estourou o slot COM alguém entrando atrás', async () => {
+    const queue = new WriteQueue(20);
+
+    // A segunda só existe porque a primeira estourou: é exatamente a exclusão perdida.
+    const primeira = queue.runExclusive(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return 'primeira';
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    const segunda = queue.runExclusive(() => Promise.resolve('segunda'));
+
+    expect((await primeira).warning).toBeDefined();
+    await segunda;
   });
 
   it('uma tarefa que estoura SÍNCRONO não trava a fila', async () => {

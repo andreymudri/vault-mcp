@@ -12,9 +12,16 @@ import { VaultScanner } from '../vault/scanner.js';
 import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
 
 /**
- * The process a user starts: `npx vault-mcp`, or the `bin` entry pointing at the compiled
- * `dist/server/index.js`. It wires a `VaultScanner`, a `Retriever` and the seven tools of
- * `tools.ts` onto an MCP server speaking over stdio.
+ * The process a user starts: `node <caminho-absoluto>/dist/server/index.js`. It wires a
+ * `VaultScanner`, a `Retriever` and the seven tools of `tools.ts` onto an MCP server speaking over
+ * stdio.
+ *
+ * NOT `npx vault-mcp`, which the README and this server's own `VAULT_PATH` error used to suggest
+ * and no longer do: that name belongs to a different package on npm (`vault-mcp@0.0.1`, 443 bytes,
+ * by another author), so the suggestion ran somebody else's code. `package.json` carries
+ * `"private": true` so an accidental publish fails here rather than in the registry. The `npx`/`npm`
+ * mentions further down are about how those tools install a `bin` as a SYMLINK, which is why
+ * `isDirectRun` compares through `realpathSync` — that part stays true and is a different subject.
  *
  * The shebang on the first line is load-bearing — `package.json`'s `bin` points at the COMPILED
  * file and `tsc` copies the line through verbatim.

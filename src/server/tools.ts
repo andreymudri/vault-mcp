@@ -186,6 +186,11 @@ export class WriteQueue {
   private outstanding = 0;
   /** Monotonic count of expired slots, so a call can tell whether one expired while it waited. */
   private expired = 0;
+  /**
+   * Monotonic count of tasks that actually STARTED — the only thing that can cost a caller its
+   * exclusion, and the counter `runExclusive` reads.
+   */
+  private started = 0;
 
   constructor(private readonly slotTimeoutMs: number = WRITE_SLOT_TIMEOUT_MS) {}
 
@@ -202,6 +207,7 @@ export class WriteQueue {
     });
 
     const begin = (): Promise<T> => {
+      this.started += 1;
       let result: Promise<T>;
       try {
         result = task();
@@ -226,27 +232,33 @@ export class WriteQueue {
    * `run`, plus whether the call actually had the queue to itself.
    *
    * Sampled when the task STARTS rather than when it was queued, which is what makes the answer
-   * exact. Three windows put another task alongside this one, and each shows up in one of the
-   * three terms: a slot abandoned BEFORE this task started and still outstanding (first term), a
-   * slot — this task's own — expiring WHILE it runs, which lets the next one in (second), and one
-   * abandoned earlier that is still running when this one finishes (third). Nothing else can
-   * execute concurrently, because every other path holds the tail.
+   * exact. Two windows put another task alongside this one, and each is one term: a slot abandoned
+   * BEFORE this task started and still outstanding (first), and any task that STARTED while this
+   * one ran (second) — which is what an expired slot lets happen, and the only way it costs
+   * anything. Nothing else can execute concurrently, because every other path holds the tail.
    *
-   * The previous version sampled `expired` at ENQUEUE and left a real overlap silent: a caller that
-   * started after the expiry and finished after the abandoned task settled saw an unchanged counter
-   * at both ends and reported success with no warning. That window is closed, not narrowed.
+   * An earlier version asked instead whether a slot had expired and whether anything was
+   * outstanding at the end, and both misfire for a call that was ALONE: its own slot expiring
+   * increments `expired` and `outstanding`, so a single write of more than 60 s reported a lost
+   * exclusion against nobody. Counting STARTS answers the question directly — a warning that
+   * appears where nothing overlapped teaches the reader to ignore it where something did.
+   *
+   * The version before that sampled `expired` at ENQUEUE and left a real overlap silent: a caller
+   * that started after the expiry and finished after the abandoned task settled saw an unchanged
+   * counter at both ends and reported success with no warning. That window stays closed: a task
+   * that starts after this one is counted whether or not it has finished.
    */
   async runExclusive<T>(task: () => Promise<T>): Promise<{ value: T; warning?: string }> {
     let outstandingAtStart = 0;
-    let expiredAtStart = 0;
+    let startedAtStart = 0;
     const value = await this.run(async () => {
       outstandingAtStart = this.outstanding;
-      expiredAtStart = this.expired;
+      // Includes this task's own increment, which `begin` has already applied.
+      startedAtStart = this.started;
       return task();
     });
 
-    const overlapped =
-      outstandingAtStart > 0 || this.expired > expiredAtStart || this.outstanding > 0;
+    const overlapped = outstandingAtStart > 0 || this.started > startedAtStart;
     return overlapped ? { value, warning: EXCLUSIVITY_WARNING } : { value };
   }
 
@@ -624,7 +636,14 @@ function escapeControl(ch: string): string {
  * with no visible difference. Escaping it there is what makes the diff honest.
  */
 function sanitizeQuoted(text: string, collapseCrlf: boolean): string {
-  const collapsed = collapseCrlf ? text.replace(/\r\n/g, '\n') : text;
+  // The trailing `\r` is the same noise as the rest, arriving by a different route: `chunker.ts`
+  // splits the body on `\n` and JOINS on `\n`, so the final line's own terminator is the
+  // separator that gets dropped and its `\r` is left orphaned at the end of the snippet. Every
+  // interior pair collapses and that last one did not, which put a visible `\r` on the last
+  // quoted line of every note written on Windows. Only at the very END, and only in the
+  // collapsing caller: a lone `\r` anywhere else is a break that can still rewrite a rendered
+  // line, and it stays escaped.
+  const collapsed = collapseCrlf ? text.replace(/\r\n/g, '\n').replace(/\r$/, '') : text;
   // Terminators first, as one pass over ONE set, so a terminator can never be handled by one half
   // and missed by the other: LF stays the break the quoter splits on, the rest becomes text.
   const broken = collapsed.replace(LINE_BREAKS_GLOBAL, (match) => {
