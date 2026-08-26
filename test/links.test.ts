@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { parseFile } from '../src/vault/frontmatter.js';
-import { extractLinkTargets, resolveLinks } from '../src/vault/links.js';
+import { extractLinkTargets, resolveLinks, resolveLinkTarget } from '../src/vault/links.js';
 
 const VAULT = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -191,5 +191,64 @@ describe('resolveLinks — ambiguidade de basename', () => {
 
     expect(links).toEqual([]);
     expect(brokenLinks).toEqual(['nota']);
+  });
+});
+
+/**
+ * A regra de resolução, exposta como UMA função — a que `write/relocate.ts` consulta.
+ *
+ * Mover uma nota corrige links pela invariante "um edge que resolvia antes resolve para a
+ * MESMA nota depois", e aplicá-la é re-resolver cada alvo bruto sob o índice de DEPOIS.
+ * Isso exige chamar a resolução com um índice que ainda não existe em disco, o que
+ * `resolveLinks` — que resolve uma lista inteira de uma nota só — não oferece.
+ *
+ * Exportada e reusada, jamais copiada. Uma segunda cópia da ordem "relativo à nota, depois
+ * relativo à raiz, depois basename mais raso" é exatamente como uma reescrita passa a
+ * apontar para outro lugar, e é o item 5 de `docs/followups.md` de novo.
+ */
+describe('resolveLinkTarget', () => {
+  const allPaths = new Set([
+    '02-wiki/nestjs/auth-guard.md',
+    '02-wiki/nestjs/bullmq-worker.md',
+    '02-wiki/docker/auth-guard.md',
+    'auth-guard.md',
+  ]);
+  const byBasename = new Map([
+    ['auth-guard', ['02-wiki/nestjs/auth-guard.md', '02-wiki/docker/auth-guard.md', 'auth-guard.md']],
+    ['bullmq-worker', ['02-wiki/nestjs/bullmq-worker.md']],
+  ]);
+
+  it('prefere o caminho relativo à nota que linka', () => {
+    expect(
+      resolveLinkTarget('auth-guard', '02-wiki/docker/multi-stage.md', byBasename, allPaths),
+    ).toBe('02-wiki/docker/auth-guard.md');
+  });
+
+  it('cai para o índice de basename, e desempata pela nota mais rasa', () => {
+    expect(resolveLinkTarget('bullmq-worker', '04-daily/2026-08-20.md', byBasename, allPaths)).toBe(
+      '02-wiki/nestjs/bullmq-worker.md',
+    );
+    // `auth-guard.md` na raiz é a mais rasa das três.
+    expect(resolveLinkTarget('auth-guard', '04-daily/2026-08-20.md', byBasename, allPaths)).toBe(
+      'auth-guard.md',
+    );
+  });
+
+  it('devolve undefined para um alvo que não existe', () => {
+    expect(resolveLinkTarget('inexistente', '02-wiki/nestjs/x.md', byBasename, allPaths)).toBe(
+      undefined,
+    );
+  });
+
+  it('resolve um alvo relativo com ..', () => {
+    expect(
+      resolveLinkTarget('../nestjs/bullmq-worker', '02-wiki/docker/multi-stage.md', byBasename, allPaths),
+    ).toBe('02-wiki/nestjs/bullmq-worker.md');
+  });
+
+  it('empate de profundidade não resolve para nenhuma', () => {
+    const empatadas = new Set(['02-wiki/a/x.md', '02-wiki/b/x.md']);
+    const idx = new Map([['x', ['02-wiki/a/x.md', '02-wiki/b/x.md']]]);
+    expect(resolveLinkTarget('x', '04-daily/hoje.md', idx, empatadas)).toBe(undefined);
   });
 });

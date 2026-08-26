@@ -31,7 +31,16 @@
  * ever end in `\r` if the match itself failed — i.e. never. (`match[1]?.trim()` in
  * `extractLinkTargets` would strip a stray `\r` anyway, belt-and-braces.)
  */
-const WIKI_LINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
+/*
+ * EXPORTED for `write/rewrite-links.ts`, which has to find the very same links this finds in
+ * order to rewrite them. A second pattern there would be a set of links extracted-but-never-
+ * rewritten (a move that silently breaks them) or rewritten-but-never-extracted (a rewrite the
+ * graph does not know about), and the backtracking analysis above would hold for only one of
+ * the two. Callers derive their own `RegExp` from `.source` rather than sharing this object:
+ * a `g` regex carries `lastIndex`, and two call sites sharing one skip matches at random —
+ * `paths.ts` exports `INVISIBLE_CHARS` under exactly this rule.
+ */
+export const WIKI_LINK = /\[\[([^[\]|#\n]+)(?:#[^[\]|\n]*)?(?:\|[^[\]\n]*)?\]\]/g;
 
 /** A ``` or ~~~ fence line, with its optional info string. */
 const FENCE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
@@ -115,7 +124,7 @@ export function resolveLinks(
   const links: string[] = [];
   const brokenLinks: string[] = [];
   for (const target of targets) {
-    const resolved = resolveOne(target, fromPath, byBasename, allPaths);
+    const resolved = resolveLinkTarget(target, fromPath, byBasename, allPaths);
     if (resolved === undefined) {
       if (!brokenLinks.includes(target)) brokenLinks.push(target);
     } else if (!links.includes(resolved)) {
@@ -125,7 +134,20 @@ export function resolveLinks(
   return { links, brokenLinks };
 }
 
-function resolveOne(
+/**
+ * The ONE resolution rule of this vault, as a function: relative to the linking note, then
+ * relative to the vault root, then the basename index with the shallowest note winning.
+ *
+ * Exported for `write/relocate.ts`, which applies the invariant "an edge that resolved
+ * before the operation resolves to the SAME note after it" by re-resolving each raw target
+ * under the index as it will look AFTERWARDS — an index that is not on disk yet, so
+ * `resolveLinks` (which answers for one note against the live vault) cannot serve it.
+ *
+ * REUSED and never copied. A second copy of this order is precisely how a link rewrite comes
+ * to point somewhere else than the resolver does, which is item 5 of `docs/followups.md`
+ * wearing a different hat.
+ */
+export function resolveLinkTarget(
   target: string,
   fromPath: string,
   byBasename: Map<string, string[]>,
