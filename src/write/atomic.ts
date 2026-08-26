@@ -54,6 +54,22 @@ function defaultMode(): number {
   }
 }
 
+export interface AtomicWriteOptions {
+  /**
+   * Publish only if the target does not exist, rejecting with `EEXIST` if it does.
+   *
+   * For the CREATION path, where the caller has already concluded the name is free. Without it
+   * the guarantee came from a check followed by a `rename`, and `rename` replaces its target
+   * unconditionally — so between the two fit Obsidian saving, a sync client, or a second instance
+   * of this server. Reproduced with two overlapping `learn()` calls: both answered
+   * `created`/`committed` and the first insight existed in no file and no blob.
+   *
+   * A caller that gets `EEXIST` here must go back and look for another free name — the point is
+   * that the guarantee now comes from the write itself, not from the check before it.
+   */
+  exclusive?: boolean;
+}
+
 /**
  * Writes `text` to `absPath` so that no reader ever observes a partial file.
  *
@@ -83,7 +99,11 @@ function defaultMode(): number {
  * write notes, and a second, subtly different copy of this dance is exactly how one of
  * them ends up non-atomic.
  */
-export async function atomicWrite(absPath: string, text: string): Promise<void> {
+export async function atomicWrite(
+  absPath: string,
+  text: string,
+  options: AtomicWriteOptions = {},
+): Promise<void> {
   const dir = dirname(absPath);
   await fs.mkdir(dir, { recursive: true });
 
@@ -137,6 +157,21 @@ export async function atomicWrite(absPath: string, text: string): Promise<void> 
       await handle.sync();
     } finally {
       await handle.close();
+    }
+    if (options.exclusive === true) {
+      // `link` is the exclusive counterpart of `rename`: one syscall publishes the finished
+      // bytes under the target name, and it FAILS with `EEXIST` if that name is taken — by
+      // anything, including a dangling symlink. It is preferred over reserving the name with
+      // `O_CREAT|O_EXCL` and renaming over the reservation because that variant has a window in
+      // which a reader sees an empty note, and "no reader observes a partial file" is the
+      // guarantee this whole module exists for.
+      await fs.link(tmpPath, absPath);
+      // The published note must come back to a single name. A note left at `nlink > 1` is one
+      // `classifyStat` refuses on both the write and the read path — it would be published and
+      // then not indexed. Retried, and never allowed to fail the call: the bytes are already
+      // under the target name, so reporting a failure here would be reporting a lie.
+      await fs.rm(tmpPath, { force: true, maxRetries: 3 }).catch(() => undefined);
+      return;
     }
     await fs.rename(tmpPath, absPath);
   } catch (err) {

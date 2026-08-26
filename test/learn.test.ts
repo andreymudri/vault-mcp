@@ -1522,6 +1522,39 @@ describe('learn - o insight nunca se perde', () => {
     expect(nome.startsWith('ab-ab-ab')).toBe(true);
   });
 
+  /**
+   * A corrida entre a busca por nome livre e a publicação. `freeNotePath` pergunta se o nome está
+   * livre e `atomicWrite` publicava com um `rename` puro, que substitui o alvo sem perguntar —
+   * entre os dois cabe outro escritor. Duas chamadas sobrepostas respondiam as duas
+   * `created`/`committed` e o primeiro insight não existia em arquivo nenhum.
+   *
+   * Nada aqui serializa: a fila de escrita vive na camada das tools, e `learn()` é chamada direta.
+   */
+  it('duas learn() sobrepostas no mesmo nome não perdem insight', async () => {
+    const retriever = { search: () => ({ results: [] }) } as unknown as Retriever;
+    const base = {
+      vaultRoot,
+      retriever,
+      titulo: 'Cache Wrapper TTL',
+      contexto: 'Revisando o wrapper de cache',
+      dominio: 'patterns',
+      tags: ['redis', 'cache'],
+      now: NOW,
+    };
+
+    const results = await Promise.all([
+      learn({ ...base, insight: 'PRIMEIRO insight sobre TTL configuravel no wrapper de cache' }),
+      learn({ ...base, insight: 'SEGUNDO insight sobre TTL configuravel no wrapper de cache' }),
+    ]);
+
+    // Nomes distintos: uma das duas teve de procurar outro nome livre.
+    expect(new Set(results.map((r) => r.path)).size).toBe(2);
+    // E os dois insights estão em arquivo, que é o que a corrida perdia.
+    const conteudos = await Promise.all(results.map((r) => read(vaultRoot, r.path)));
+    expect(conteudos.join('\n')).toContain('PRIMEIRO insight');
+    expect(conteudos.join('\n')).toContain('SEGUNDO insight');
+  });
+
   it('recusa em vez de escrever por cima quando não há nome livre', async () => {
     // The last-resort guard protecting the fix: without the throw, `writeNote` is handed an
     // OCCUPIED path and is create-OR-REPLACE. It takes 101 files to reach, which is why it is a

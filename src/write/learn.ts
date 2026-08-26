@@ -10,7 +10,7 @@ import { commitFiles } from './git.js';
 import { classifyStat, INVISIBLE_CHARS, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
-import { editNote, writeNote, type WriteResult } from './writer.js';
+import { WriteRaceError, editNote, writeNote, type WriteResult } from './writer.js';
 
 /**
  * `vault_learn`: one call that decides between appending to a note that already covers the
@@ -700,6 +700,15 @@ async function attemptAppend(
 }
 
 /**
+ * How many times a creation that lost the publish race looks for another free name.
+ *
+ * Two is already the interesting case and this is not a lock: a name taken again and again is a
+ * second writer working the same domain, and spinning would only make this call the one that
+ * never returns.
+ */
+const CREATE_RACE_ATTEMPTS = 8;
+
+/**
  * A path in the domain that NO file occupies, for the one case where the learning has nowhere
  * else to go: the note of this title exists and cannot be appended to.
  *
@@ -868,22 +877,39 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     // a blank placeholder standing here would cost the note its `# H1` and its sections. The
     // skeleton is therefore built HERE and handed over complete — the placeholder is written over,
     // never removed.
-    const state =
+    let state =
       newRelPath === firstRelPath ? collision : await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
-    const built =
-      state === 'blank'
-        ? await skeletonContent(opts, newRelPath, body)
-        : { content: body, warning: undefined };
-    templateWarning = built.warning;
 
-    write = await writeNote({
-      vaultRoot: opts.vaultRoot,
-      path: newRelPath,
-      content: built.content,
-      frontmatter: { tags },
-      tipo: 'wiki',
-      deferCommit: true,
-    });
+    // Every check above — the duplicate rule, the collision test, `freeNotePath` — asked the
+    // filesystem a question and then acted on the answer, and nothing outside this process is
+    // holding that answer still. `writeNote` now publishes a creation exclusively, so the loser
+    // of that race gets a `WriteRaceError` instead of quietly replacing the winner's note. The
+    // answer is the same one the occupied-and-unappendable branch above takes: another free
+    // name, which loses neither note. Bounded, because a name that keeps being taken by someone
+    // else is a vault under a second writer and not something to spin on.
+    for (let attempt = 0; ; attempt += 1) {
+      const built =
+        state === 'blank'
+          ? await skeletonContent(opts, newRelPath, body)
+          : { content: body, warning: undefined };
+      templateWarning = built.warning;
+
+      try {
+        write = await writeNote({
+          vaultRoot: opts.vaultRoot,
+          path: newRelPath,
+          content: built.content,
+          frontmatter: { tags },
+          tipo: 'wiki',
+          deferCommit: true,
+        });
+        break;
+      } catch (err) {
+        if (!(err instanceof WriteRaceError) || attempt >= CREATE_RACE_ATTEMPTS) throw err;
+        newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date);
+        state = await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
+      }
+    }
   }
 
   const appendFailure =

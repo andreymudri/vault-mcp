@@ -24,6 +24,22 @@ export class EditError extends Error {
   }
 }
 
+/**
+ * Thrown when a CREATION lost a race: the caller had established the name was free, and by the
+ * time the finished bytes were published something else had taken it.
+ *
+ * A distinct type because it is the one write failure with a sensible automatic answer — take
+ * another free name and try again, which is what `learn.ts` does. Reported rather than absorbed
+ * for `vault_write_note`, where the caller named the path and only they can decide what to do
+ * about a note that is suddenly not theirs.
+ */
+export class WriteRaceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WriteRaceError';
+  }
+}
+
 export interface WriteResult {
   path: string;
   absPath: string;
@@ -254,7 +270,20 @@ async function writeAndCommit(
   extraWarning?: string
 ): Promise<WriteResult> {
   const { diff, warning: diffWarning } = safeDiff(opts.before, opts.after, opts.relPath);
-  await atomicWrite(opts.absPath, opts.after);
+  try {
+    // `exclusive` exactly when the caller established there was no file here. `created` is read
+    // off the read above, so this is the same fact the whole call is built on — and publishing
+    // exclusively is what moves the guarantee from that check to the write itself. A replacement
+    // is a different intent and still publishes with `rename`.
+    await atomicWrite(opts.absPath, opts.after, { exclusive: opts.created });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new WriteRaceError(
+        `${opts.relPath} passou a existir enquanto a nota era escrita; nada foi sobrescrito`,
+      );
+    }
+    throw err;
+  }
 
   const base = {
     path: opts.relPath,

@@ -474,6 +474,52 @@ describe('atomicWrite', () => {
     await atomicWrite(target, 'segundo\n');
     expect(await fs.readFile(target, 'utf8')).toBe('segundo\n');
   });
+
+  /**
+   * `{ exclusive: true }` é para o caminho de CRIAÇÃO, onde o chamador já concluiu que o alvo não
+   * existe. Sem isso a garantia vinha de um teste seguido de um rename, e não da escrita: entre os
+   * dois cabe o Obsidian salvando, um cliente de sync, ou uma segunda instância do servidor.
+   */
+  describe('exclusive', () => {
+    it('recusa publicar sobre um alvo que passou a existir, sem tocar nos bytes dele', async () => {
+      const target = path.join(tmp, 'nota.md');
+      await fs.writeFile(target, 'do outro processo\n', 'utf8');
+
+      await expect(atomicWrite(target, 'meu\n', { exclusive: true })).rejects.toMatchObject({
+        code: 'EEXIST',
+      });
+
+      expect(await fs.readFile(target, 'utf8')).toBe('do outro processo\n');
+      // E sem lixo: o temporário recusado não pode ficar para o próximo `git add` estagiar.
+      expect(await fs.readdir(tmp)).toEqual(['nota.md']);
+    });
+
+    it('publica normalmente quando o alvo de fato não existe', async () => {
+      const target = path.join(tmp, 'a', 'nova.md');
+      await atomicWrite(target, 'conteudo\n', { exclusive: true });
+
+      expect(await fs.readFile(target, 'utf8')).toBe('conteudo\n');
+      // Um hard link é publicação atômica; o nome temporário tem de sair, senão a nota nasce com
+      // `nlink > 1` e o scanner — que aplica `classifyStat` na leitura — se recusa a indexá-la.
+      expect(await fs.readdir(path.join(tmp, 'a'))).toEqual(['nova.md']);
+      expect((await fs.stat(target)).nlink).toBe(1);
+    });
+
+    it('apenas uma de duas criações concorrentes do mesmo nome vence', async () => {
+      const target = path.join(tmp, 'nota.md');
+      const results = await Promise.allSettled([
+        atomicWrite(target, 'A\n', { exclusive: true }),
+        atomicWrite(target, 'B\n', { exclusive: true }),
+      ]);
+
+      // Exatamente uma vence. A outra REJEITA — que é a diferença entre perder o insight em
+      // silêncio e o chamador poder procurar outro nome.
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const perdida = results.find((r) => r.status === 'rejected');
+      expect((perdida as PromiseRejectedResult).reason).toMatchObject({ code: 'EEXIST' });
+      expect(await fs.readdir(tmp)).toEqual(['nota.md']);
+    });
+  });
 });
 
 describe('writeNote', () => {
