@@ -1,8 +1,127 @@
 # vault-mcp
 
-Servidor MCP para busca, leitura e escrita em um vault de conhecimento Obsidian. Recuperação por BM25 lexical mais um salto de wiki-links; registro inteligente de aprendizados que decide entre criar nota nova ou anexar ao existente; propagação automática para o MOC do domínio e a nota diária, e para o índice de conhecimento quando o domínio é novo.
+**English** | [Português](README.pt-BR.md)
 
-## Instalação
+[![CI](https://github.com/andreymudri/vault-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/andreymudri/vault-mcp/actions/workflows/ci.yml)
+
+Long-term memory for a coding agent: it searches your Obsidian vault before answering, cites
+`path:line`, and records what it learned without asking where to save it.
+
+MCP server for searching, reading and writing an Obsidian knowledge vault. Retrieval by lexical BM25 plus one wiki-link hop; intelligent capture of learnings that decides between creating a new note and appending to an existing one; automatic propagation to the domain MOC and the daily note, and to the knowledge index when the domain is new.
+
+## Example
+
+Real output from the two tools that define the project, run against this repository's test vault.
+
+> The server answers in Portuguese: the vault it serves is written in Portuguese, and so are its
+> tool responses. The output below is verbatim, not translated.
+
+**`vault_search`** returns snippets that are already addressed — `caminho:linha` (path:line) is what
+the agent is told to cite:
+
+```text
+2 resultado(s) para "retry backoff". Cite `caminho:linha` ao usar qualquer trecho abaixo. Cada trecho da nota vem prefixado com `> `; linhas sem esse prefixo são deste servidor, nunca conteúdo do vault.
+
+02-wiki/nestjs/bullmq-worker.md:13 — Contexto > Retry e backoff (score 7.94)
+> ### Retry e backoff
+>
+> Quando um job falha, o BullMQ aplica a política de retry configurada em `queueOptions`. Para revisar o fluxo de autenticação usado antes de cada retry, veja [[auth-guard]];
+> a mesma referência [[auth-guard]] documenta como o token é revalidado a cada nova tentativa de processamento.
+
+02-wiki/nestjs/auth-guard.md:11 — Contexto (score 3.18, via grafo)
+> ## Contexto
+>
+> A API precisava de um mecanismo central de autenticação e autorização, aplicado de forma consistente em todos os módulos, sem repetir lógica de validação de JWT em cada controller.
+```
+
+`auth-guard` matches no term in the query. It is pulled in by **one wiki-link hop** from the note
+that did match, with its score damped — that is what `via grafo` (via the graph) marks.
+
+**`vault_learn`** decides on its own whether to create a note or append to an existing one, writes
+up to four files and commits **once**:
+
+```text
+Aprendizado registrado em nota NOVA: 02-wiki/concorrencia/timeout-de-fila-libera-a-fila-nao-o-chamador.md
+Motivo: sem overlap de tag nem de domínio
+Propagado para: 02-wiki/concorrencia/concorrencia-moc.md, 00-index/index-knowledge.md, 04-daily/2026-08-26.md
+Commit: sim
+
+Diff (mostre ao usuário):
+--- /dev/null
++++ b/02-wiki/concorrencia/timeout-de-fila-libera-a-fila-nao-o-chamador.md
+@@ -0,0 +1,15 @@
++---
++tipo: wiki
++tags: [fila]
++criado: 2026-08-26
++---
++
++# Timeout de fila libera a fila, não o chamador
++
++Um slot que expira solta a PRÓXIMA escrita; a chamada original continua esperando o resultado real dela. Resolver a promessa do chamador no timeout reportaria um desfecho que ninguém observou.
++
++**Contexto:** Serializando as tools de escrita do vault-mcp contra si mesmas.
++
++## Solução
++
++## Exemplo
+--- /dev/null
++++ b/02-wiki/concorrencia/concorrencia-moc.md
+@@ -0,0 +1,16 @@
++---
++tipo: moc
++tags: [concorrencia]
++criado: 2026-08-26
++atualizado: 2026-08-26
++---
++
++# Concorrencia — Mapa de Conteúdo
++
++## Notas
++
++- [[timeout-de-fila-libera-a-fila-nao-o-chamador]] — Um slot que expira solta a PRÓXIMA escrita; a chamada original continua esperando o resultado real dela.
++
++## Relacionados
++
++- [[../../00-index/index-knowledge|índice de conhecimento]]
+--- a/00-index/index-knowledge.md
++++ b/00-index/index-knowledge.md
+@@ -1,6 +1,6 @@
+ ---
+ tipo: moc
+-atualizado: 2026-02-01
++atualizado: 2026-08-26
+ ---
+ 
+ # Índice de Conhecimento
+@@ -9,6 +9,7 @@
+ 
+ - [[../02-wiki/nestjs/nestjs-moc|nestjs]] — NestJS, providers, guards, filas
+ - [[../02-wiki/docker/docker-moc|docker]] — Dockerfiles, multi-stage, compose
++- [[../02-wiki/concorrencia/concorrencia-moc|concorrencia]] — Um slot que expira solta a PRÓXIMA escrita; a chamada original continua esperando o resultado real dela.
+ 
+ ## Convenções
+ 
+--- /dev/null
++++ b/04-daily/2026-08-26.md
+@@ -0,0 +1,10 @@
++---
++tipo: daily
++criado: 2026-08-26
++---
++
++# 2026-08-26
++
++## Capturas
++
++- 11:12 [[timeout-de-fila-libera-a-fila-nao-o-chamador]] (aprendizado)
+```
+
+Four files, one `docs(vault): {titulo}` commit — undoing the whole learning is `git revert` on it.
+The `concorrencia` domain did not exist, which is why the call carried `confirm_novo_dominio: true`,
+the MOC was built from scratch, and the knowledge index gained a line pointing at it.
+
+## Installation
 
 ```bash
 npm install
@@ -10,185 +129,192 @@ npm run build
 npm test
 ```
 
-- **Node >= 20** para RODAR o servidor (`dist/` é JavaScript comum)
-- **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
-  processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
-  próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
-- A suíte tem 17 arquivos com 1.027 testes e leva ~10 segundos. `npm test` roda o typecheck
-  (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
+- **Node >= 20** to RUN the server (`dist/` is plain JavaScript)
+- **Running the suite takes more than that:** `test/frontmatter.test.ts` executes the real
+  `parseFile` in a child process pinned to a timezone, and that child is `node <file>.ts` — it
+  depends on Node's own type stripping. CI pins 26, which is the version this is developed on
+- The suite has 17 files with 1,039 tests and takes ~40 s. `npm test` runs the typecheck
+  (`pretest`) first and bounds the suite by the clock: a hung suite exits 124, never with no exit code
 
-## Configuração
+## Configuration
 
-O vault é passado por variável de ambiente, e o servidor é executado via node diretamente:
+The vault is passed through an environment variable, and the server is run via node directly:
 
 ```bash
-VAULT_PATH="/caminho/absoluto/do/vault" node /caminho/absoluto/do/vault-mcp/dist/server/index.js
+VAULT_PATH="/absolute/path/to/vault" node /absolute/path/to/vault-mcp/dist/server/index.js
 ```
 
-Substitua `/caminho/absoluto/do/vault` pela raiz do seu vault e `/caminho/absoluto/do/vault-mcp` pelo caminho ao diretório do projeto. `VAULT_PATH` é **obrigatório**. Se não for definido ou não for um diretório, o servidor sai com código 1 e escreve o motivo em stderr.
+Replace `/absolute/path/to/vault` with the root of your vault and `/absolute/path/to/vault-mcp` with the path to the project directory. `VAULT_PATH` is **mandatory**. If it is not set, or is not a directory, the server exits with code 1 and writes the reason to stderr.
 
-**Nota:** não use `npx vault-mcp` — existe uma colisão com outro pacote no npm e o comando resolveria para o pacote errado quando executado de fora do diretório do projeto.
+**Note:** do not use `npx vault-mcp` — there is a collision with another package on npm, and the command would resolve to the wrong package when run from outside the project directory.
 
-## Registro no Claude Code
+## Registering with Claude Code
 
-Adicione o MCP com:
+Add the MCP with:
 
 ```bash
 claude mcp add vault --scope user \
-  -e "VAULT_PATH=/caminho/absoluto/do/vault" \
+  -e "VAULT_PATH=/absolute/path/to/vault" \
   -e "VAULT_AUTO_PUSH=1" -- \
-  node /caminho/absoluto/do/vault-mcp/dist/server/index.js
+  node /absolute/path/to/vault-mcp/dist/server/index.js
 ```
 
-Os dois caminhos são **absolutos**, e o do vault entra em `-e` como um par `CHAVE=valor` único — com
-aspas em volta do par inteiro, que é o que faz um vault cujo caminho tem espaço funcionar. Não há
-expansão de variável em JSON, então um caminho relativo aqui vira um servidor que não sobe.
+Both paths are **absolute**, and the vault's goes into `-e` as a single `KEY=value` pair — with
+quotes around the whole pair, which is what makes a vault whose path contains a space work. There is
+no variable expansion in JSON, so a relative path here becomes a server that does not start.
 
-`--scope user` registra em `~/.claude.json` e deixa as tools disponíveis em **todo** projeto, que é o
-ponto: o vault responde sobre decisões e patterns enquanto você trabalha em outro repositório. Sem a
-flag o padrão é `local` (só o diretório atual). Confira com `claude mcp get vault`; para remover,
-`claude mcp remove vault -s user`.
+`--scope user` registers in `~/.claude.json` and makes the tools available in **every** project,
+which is the point: the vault answers about decisions and patterns while you work in another
+repository. Without the flag the default is `local` (the current directory only). Check with
+`claude mcp get vault`; to remove it, `claude mcp remove vault -s user`.
 
 ### `VAULT_AUTO_PUSH`
 
-Toda escrita (`vault_write_note`, `vault_edit_note`, `vault_learn`) já commita no git do vault.
-`VAULT_AUTO_PUSH=1` acrescenta um `git push` depois do commit — sem isso o commit fica só na máquina,
-e um vault com remote guardado em mais de um lugar diverge em silêncio.
+Every write (`vault_write_note`, `vault_edit_note`, `vault_learn`) already commits to the vault's git.
+`VAULT_AUTO_PUSH=1` adds a `git push` after the commit — without it the commit stays on the machine
+only, and a vault with a remote kept in more than one place diverges silently.
 
-**Desligado por padrão**, porque é a única coisa que este servidor faz que sai da máquina. Quando
-ligado:
+**Off by default**, because it is the only thing this server does that leaves the machine. When
+turned on:
 
-- `git push` sem refspec, seguindo o upstream do branch: um repositório que não foi configurado diz
-  isso em vez de ter remote e branch adivinhados
-- **falha sempre como aviso, nunca como rollback.** A nota já está em disco e commitada; desfazer
-  isso porque a rede caiu seria o pior negócio disponível. A resposta da tool ganha uma linha
-  `Push: sim|não`, que só aparece quando um push foi de fato TENTADO
-- **um remote que andou na frente não é resolvido sozinho.** Pull, rebase e merge reescrevem a base
-  de conhecimento do usuário, e isso é decisão dele — não efeito colateral de gravar uma nota. O
-  aviso nomeia a situação e para
-- limitado a 30 s, com `GIT_TERMINAL_PROMPT=0`: um servidor stdio não tem terminal para responder um
-  prompt de credencial, então um prompt seria um travamento. As credenciais precisam vir de um
-  helper (por exemplo `gh auth git-credential`) ou de uma chave SSH
+- `git push` with no refspec, following the branch's upstream: a repository that has not been
+  configured says so instead of having a remote and a branch guessed for it
+- **it always fails as a warning, never as a rollback.** The note is already on disk and committed;
+  undoing that because the network went down would be the worst trade available. The tool's response
+  gains a `Push: sim|não` line, which only appears when a push was in fact ATTEMPTED
+- **a remote that moved ahead is not resolved on its own.** Pull, rebase and merge rewrite the user's
+  knowledge base, and that is their decision — not a side effect of saving one note. The warning
+  names the situation and stops
+- bounded to 30 s, with `GIT_TERMINAL_PROMPT=0`: a stdio server has no terminal on which to answer a
+  credential prompt, so a prompt would be a hang. Credentials have to come from a helper (for example
+  `gh auth git-credential`) or from an SSH key
 
-## As Sete Tools
+## The Seven Tools
 
-| Tool | Entrada | Quando Chamar |
-|------|---------|---------------|
-| `vault_search` | `query` (obrigatório); `limit`, `tipo`, `folder`, `include_raw` (opcionais) | Antes de responder sobre decisões, padrões, gotchas ou histórico do usuário. Resultado padrão: 6 trechos. Notas em `01-raw/` excluídas por padrão. |
-| `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota com frontmatter, links resolvidos e links quebrados. O corpo é limitado a 20.000 caracteres; notas maiores são marcadas com `[…nota cortada em 20000 caracteres]`. |
-| `vault_list` | `tipo`, `tags`, `status`, `folder` (todos opcionais) | Inventário de notas por metadado (ex.: "quais projetos ativos?", "quais notas têm a tag jwt?"). Não busca por conteúdo — use `vault_search` para isso. |
-| `vault_backlinks` | `path` (caminho relativo) | Medir conectividade de um assunto, achar o MOC que indexa uma nota, avaliar impacto de mudança. Deduplica links: uma nota que linka o alvo duas vezes conta como um backlink. |
-| `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
-| `vault_edit_note` | `path`, `old_text`, `new_text` (obrigatórios) | Substituir um trecho exato de uma nota. Falha se o trecho não existir ou aparecer mais de uma vez — nesse caso, inclua mais contexto em `old_text`. |
-| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (obrigatórios); `projeto`, `tags`, `links`, `confirm_novo_dominio` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. **Se o domínio não existe em `02-wiki/`, a chamada falha; use `confirm_novo_dominio: true` para criar.** |
+| Tool | Input | When to Call |
+|------|-------|--------------|
+| `vault_search` | `query` (required); `limit`, `tipo`, `folder`, `include_raw` (optional) | Before answering about the user's decisions, patterns, gotchas or history. Default result: 6 snippets. Notes in `01-raw/` excluded by default. |
+| `vault_get_note` | `path` (relative path, e.g. `02-wiki/nestjs/auth-guard.md`) | After `vault_search` when the snippet is not enough, or before editing a note. Returns the note with frontmatter, resolved links and broken links. The body is capped at 20,000 characters; larger notes are marked with `[…nota cortada em 20000 caracteres]`. |
+| `vault_list` | `tipo`, `tags`, `status`, `folder` (all optional) | Inventory of notes by metadata (e.g. "which projects are active?", "which notes carry the jwt tag?"). Does not search content — use `vault_search` for that. |
+| `vault_backlinks` | `path` (relative path) | Measure how connected a subject is, find the MOC that indexes a note, assess the impact of a change. Deduplicates links: a note that links the target twice counts as one backlink. |
+| `vault_write_note` | `path`, `content` (required); `frontmatter` (optional) | Create or replace a whole note. Frontmatter is guaranteed. Commits automatically. To change a passage, use `vault_edit_note`; to record a learning, use `vault_learn`. |
+| `vault_edit_note` | `path`, `old_text`, `new_text` (required) | Replace an exact passage of a note. Fails if the passage does not exist or appears more than once — in that case, include more context in `old_text`. |
+| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (required); `projeto`, `tags`, `links`, `confirm_novo_dominio` (optional) | Record a learning during the session (architecture decision, pattern, gotcha, trap). Do not ask where to save — the server decides. Shows the diff to the user. **If the domain does not exist in `02-wiki/`, the call fails; use `confirm_novo_dominio: true` to create it.** |
 
-## Como o `vault_learn` Decide
+## How `vault_learn` Decides
 
-`vault_learn` busca o assunto combinando título e insight. Apenas notas **já em `02-wiki/` e atingidas por BM25 direto** (não pela expansão de grafo) são candidatas a receber o aprendizado. Se encontrar tal candidata:
+`vault_learn` searches the subject by combining title and insight. Only notes **already in `02-wiki/` and reached by direct BM25** (not by graph expansion) are candidates to receive the learning. If such a candidate is found:
 
-1. **Razão de 1,8×**: o topo deve se destacar sobre o segundo colocado por fator de pelo menos 1,8. Sem isso, há dúvida e cria nota nova.
-2. **Overlap conjuntivo**: o topo deve compartilhar uma tag COM A ENTRADA, OU estar no mesmo domínio (`02-wiki/<dominio>/`). Sem overlap, cria nota nova mesmo que o score seja alto.
+1. **1.8× ratio**: the top hit must stand out over the runner-up by a factor of at least 1.8. Without that there is doubt, and it creates a new note.
+2. **Conjunctive overlap**: the top hit must share a tag WITH THE INPUT, OR be in the same domain (`02-wiki/<dominio>/`). With no overlap it creates a new note even when the score is high.
 
-Quando ambas as condições são atendidas, **anexa** à nota existente numa seção `## YYYY-MM-DD — Título`. Caso contrário, **cria** nota nova em `02-wiki/<dominio>/`.
+When both conditions hold, it **appends** to the existing note under a `## YYYY-MM-DD — Title` section. Otherwise it **creates** a new note in `02-wiki/<dominio>/`.
 
-O viés é deliberado: quando há dúvida, cria nota nova em vez de enterrar aprendizado num lugar errado. É sempre possível mesclar notas depois; é impossível recuperar aprendizado perdido.
+The bias is deliberate: when in doubt, create a new note rather than bury a learning in the wrong place. Merging notes later is always possible; recovering a lost learning is not.
 
 ### Escape hatches
 
-Três exceções podem mudar o destino final:
+Three exceptions can change the final destination:
 
-1. **Colisão de título**: a regra de duplicata recusa, mas um arquivo com aquele nome já existe (nota antiga com o mesmo slug). O servidor **anexa nela mesmo assim** e avisa `anexado em <path> por coincidência de título; a checagem de duplicata não indicou essa nota`. Isso traz uma nota perdida de volta para o fluxo de acúmulo.
+1. **Title collision**: the duplicate rule says no, but a file with that name already exists (an older note with the same slug). The server **appends to it anyway** and warns `anexado em <path> por coincidência de título; a checagem de duplicata não indicou essa nota`. This brings a lost note back into the accumulation flow.
 
-2. **Alvo da duplicata não recebe o texto**: o servidor decide anexar à nota candidata, mas ela não pode ser editada. O servidor **cria nota nova com um nome baseado no slug** (ex.: `multi-stage-cache-de-camadas.md` em vez de `multi-stage.md`) e avisa `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
+2. **The duplicate target cannot take the text**: the server decides to append to the candidate note, but it cannot be edited. The server **creates a new note under a name derived from the slug** (e.g. `multi-stage-cache-de-camadas.md` instead of `multi-stage.md`) and warns `não foi possível anexar em <path>; aprendizado gravado em <outro-path>`. The warning names the exact path where the learning was written.
 
-3. **Caminho da nota bloqueado por não-nota**: o caminho onde a nota seria criada (ex.: `02-wiki/docker/titulo.md`) está ocupado por um FIFO, symlink, diretório ou hard link (algo que não pode ser sobrescrito). O servidor **cria nota nova com sufixo de data** (ex.: `titulo-2026-08-25.md`) e avisa `<path> não é uma nota (link, diretório ou dispositivo); aprendizado gravado em <outro-path>`. O aviso nomeia o caminho exato onde o aprendizado foi gravado.
+3. **The note's path is blocked by a non-note**: the path where the note would be created (e.g. `02-wiki/docker/titulo.md`) is occupied by a FIFO, symlink, directory or hard link (something that cannot be overwritten). The server **creates a new note with a date suffix** (e.g. `titulo-2026-08-25.md`) and warns `<path> não é uma nota (link, diretório ou dispositivo); aprendizado gravado em <outro-path>`. The warning names the exact path where the learning was written.
 
-Em todos os casos, nenhum insight é perdido — a resposta diz exatamente onde o aprendizado foi a parar.
+In every case, no insight is lost — the response says exactly where the learning ended up.
 
-## O Que `vault_learn` Escreve
+## What `vault_learn` Writes
 
-Uma chamada a `vault_learn` pode tocar até 4 arquivos, todos em **um único commit** com mensagem `docs(vault): {titulo}`:
+One call to `vault_learn` can touch up to 4 files, all in **a single commit** with the message `docs(vault): {titulo}`:
 
-1. **A nota** (`02-wiki/<dominio>/<slug>.md`): criada ou com aprendizado anexado. Sempre escrita.
-2. **O MOC do domínio** (`02-wiki/<dominio>/<dominio>-moc.md`): criado se não existir. Atualizado com `atualizado:` em toda chamada; com uma linha `- [[<slug>]] — <resumo>` apenas se a nota for nova. Escrito **apenas se o conteúdo mudar**.
-3. **Índice de conhecimento** (`00-index/index-knowledge.md`): atualizado APENAS se o domínio não existia antes. Escrito **apenas se o conteúdo mudar**.
-4. **Nota diária** (`04-daily/YYYY-MM-DD.md`): criada se não existir. Atualizada com captura `- HH:MM [[<slug>]] (<tipo>, <projeto>)` apenas se a linha não existir. Escrito **apenas se o conteúdo mudar**.
+1. **The note** (`02-wiki/<dominio>/<slug>.md`): created, or with the learning appended. Always written.
+2. **The domain MOC** (`02-wiki/<dominio>/<dominio>-moc.md`): created if it does not exist. Updated with `atualizado:` on every call; with a `- [[<slug>]] — <resumo>` line only if the note is new. Written **only if the content changes**.
+3. **Knowledge index** (`00-index/index-knowledge.md`): updated ONLY if the domain did not exist before. Written **only if the content changes**.
+4. **Daily note** (`04-daily/YYYY-MM-DD.md`): created if it does not exist. Updated with the capture `- HH:MM [[<slug>]] (<tipo>, <projeto>)` only if the line is not already there. Written **only if the content changes**.
 
-Todos os arquivos são gravados atomicamente. Se a propagação falhar (ex.: sem espaço em disco), os arquivos permanecem em disco e a resposta inclui aviso nomeando o alvo que não foi atualizado. Se o commit git falhar (ex.: repositório não existe), os arquivos permanecem gravados em disco e a resposta inclui aviso.
+Every file is written atomically. If propagation fails (e.g. out of disk space), the files stay on disk and the response includes a warning naming the target that was not updated. If the git commit fails (e.g. the repository does not exist), the files stay written on disk and the response includes a warning.
 
-Reverter um aprendizado inteiro é:
+Undoing a whole learning is:
 ```bash
 git revert <commit-hash>
 ```
 
-## Ajustando o Ranking
+## Tuning the Ranking
 
-Qualquer mudança nos seguintes parâmetros precisa passar na suíte completa: `npm test`. Cada constante é pinada em um local específico:
+Any change to the following parameters has to pass the full suite: `npm test`. Each constant is pinned in a specific place:
 
-- **`FIELD_WEIGHTS`** (`src/index/inverted-index.ts`): `heading: 3.0, tags: 2.0, prose: 1.0, code: 0.5`. Peso na frequência de cada campo. Pinado em `test/bm25.test.ts`.
-- **`NOTE_TYPE_WEIGHTS`** (`src/index/inverted-index.ts`): `moc: 0.3, daily: 0.3`. Multiplica o score final de notas do tipo MOC ou daily. Existe porque essas notas repetem a query em chunks curtos — sem o fator, o MOC supera a nota apontada. Pinado em asserção literal em `test/bm25.test.ts:370-374`; `test/golden-queries.test.ts` e `test/retrieval.test.ts` falham apenas se removido, não se reajustado.
-- **`GRAPH_DAMPING`** (`src/retrieval/budget.ts`): `0.4`. Multiplica o score de vizinhos do grafo — notas linkadas. Um salto, não múltiplos. Pinado em `test/retrieval.test.ts:522`.
-- **`K1`** e **`B`** (`src/index/bm25.ts`): `1.2` e `0.75`. Parâmetros do BM25. Pinado em `test/bm25.test.ts:232-233`.
-- **`DUPLICATE_SCORE_RATIO`** (`src/write/learn.ts`): `1.8`. Razão mínima entre topo e segundo colocado para anexar. Pinado em `test/learn.test.ts:336`.
+- **`FIELD_WEIGHTS`** (`src/index/inverted-index.ts`): `heading: 3.0, tags: 2.0, prose: 1.0, code: 0.5`. Weight on each field's frequency. Pinned in `test/bm25.test.ts`.
+- **`NOTE_TYPE_WEIGHTS`** (`src/index/inverted-index.ts`): `moc: 0.3, daily: 0.3`. Multiplies the final score of MOC or daily notes. It exists because those notes repeat the query across short chunks — without the factor, the MOC beats the note it points at. Pinned by a literal assertion in `test/bm25.test.ts:370-374`; `test/golden-queries.test.ts` and `test/retrieval.test.ts` fail only if it is removed, not if it is re-tuned.
+- **`GRAPH_DAMPING`** (`src/retrieval/budget.ts`): `0.4`. Multiplies the score of graph neighbours — linked notes. One hop, not several. Pinned in `test/retrieval.test.ts:522`.
+- **`K1`** and **`B`** (`src/index/bm25.ts`): `1.2` and `0.75`. BM25 parameters. Pinned in `test/bm25.test.ts:232-233`.
+- **`DUPLICATE_SCORE_RATIO`** (`src/write/learn.ts`): `1.8`. Minimum ratio between top hit and runner-up for an append. Pinned in `test/learn.test.ts:336`.
 
-Rodar a suíte completa:
+Running the full suite:
 ```bash
 npm test
 ```
 
-## Garantias de Segurança
+## Security Guarantees
 
-Escritas são recusadas para:
-- Caminhos fora do vault
-- Caminhos em `.git/`, `.obsidian/`, `node_modules/`, `_templates/` e `99-archive/`
-- Symlinks (resolvidos antes de escrever)
+Writes are refused for:
+- Paths outside the vault
+- Paths in `.git/`, `.obsidian/`, `node_modules/`, `_templates/` and `99-archive/`
+- Symlinks (resolved before writing)
 - Hard links
 
-**Dentro de uma única instância do servidor**, dois `vault_learn` ou `vault_write_note` concorrentes não interleave inicialmente: cada escrita espera a anterior terminar. Se uma escrita ficar pendurada (ex.: git bloqueado), o timeout de 60 segundos **libera a fila para a próxima escrita**, não o chamador — a chamada anterior continua aguardando seu resultado real. Quando a próxima escrita inicia, ambas podem estar rodando — a chamada ganha um aviso dizendo que a exclusividade não foi garantida. Isto NÃO protege contra escritas simultâneas do Obsidian, de uma segunda instância do servidor, ou de um `git checkout` no vault.
+**Within a single server instance**, two concurrent `vault_learn` or `vault_write_note` calls do not interleave to begin with: each write waits for the previous one to finish. If a write hangs (e.g. git blocked), the 60-second timeout **frees the queue for the next write**, not the caller — the earlier call keeps waiting for its real result. Once the next write starts, both may be running — the call gains a warning saying exclusivity was not guaranteed. This does NOT protect against simultaneous writes from Obsidian, from a second server instance, or from a `git checkout` in the vault.
 
-## Busca e Recuperação
+## Search and Retrieval
 
-A busca roda BM25 sobre chunks de 2–3 níveis de heading, incluindo prosa, tags e cabeçalho com pesos diferentes. Se nenhum termo da query bater em nenhuma nota, tenta sugerir termos parecidos (distância de Levenshtein ≤ 2).
+Search runs BM25 over chunks of 2–3 heading levels, covering prose, tags and headings with different weights. If no term of the query hits any note, it tries to suggest similar terms (Levenshtein distance ≤ 2).
 
-Depois da busca BM25 pura, expande por um salto de wiki-links: vizinhos das notas que batiram herdam `GRAPH_DAMPING` vezes o score da fonte.
+After the pure BM25 search, it expands by one wiki-link hop: neighbours of the notes that hit inherit `GRAPH_DAMPING` times the source's score.
 
-Cada resultado cita `caminho:linha` — esse é o endereço real da nota. Trechos de notas são prefixados com `> ` em `vault_search` para distinguir conteúdo do vault de linhas do servidor.
+Every result cites `caminho:linha` (path:line) — that is the note's real address. Note snippets are prefixed with `> ` in `vault_search` to distinguish vault content from server lines.
 
-## Estrutura do Vault
+## Vault Structure
 
-Convenção de diretórios:
-- `00-index/`: índice de conhecimento e MOCs raiz
-- `01-raw/`: capturas cruas e clippings (excluídas de busca por padrão)
-- `02-wiki/`: conhecimento organizado por domínio (`nestjs/`, `docker/`, etc.)
-- `03-projects/`: notas de projeto
-- `04-daily/`: notas diárias (YYYY-MM-DD.md)
-- `_templates/`: templates do Obsidian (ignoradas na indexação)
-- `99-archive/`: notas arquivadas (legíveis, não graváveis)
+Directory convention:
+- `00-index/`: knowledge index and root MOCs
+- `01-raw/`: raw captures and clippings (excluded from search by default)
+- `02-wiki/`: knowledge organised by domain (`nestjs/`, `docker/`, etc.)
+- `03-projects/`: project notes
+- `04-daily/`: daily notes (YYYY-MM-DD.md)
+- `_templates/`: Obsidian templates (ignored by indexing)
+- `99-archive/`: archived notes (readable, not writable)
 
-## Limitações Conhecidas
+## Known Limitations
 
-Os nove follow-ups levantados na construção foram corrigidos — inclusive o frontmatter com alias que
-travava o event loop por ~5 s, o hard link indexado no caminho de leitura e a corrida de escrita
-entre processos. `docs/followups.md` guarda o histórico: cada item com a medição que o caracterizava,
-a correção aplicada e o teste que a fixa, mais o que continua **aceito deliberadamente**.
+The nine follow-ups raised during construction have been fixed — including the aliased frontmatter
+that blocked the event loop for ~5 s, the hard link indexed on the read path, and the cross-process
+write race. `docs/followups.md` keeps the record: each item with the measurement that characterised
+it, the fix applied and the test that pins it, plus what remains **deliberately accepted**.
 
-## Desenvolvimento
+## Development
 
-Depois de uma mudança no código:
+After a change to the code:
 
 ```bash
-npm run build     # Compila TypeScript (só src/, emite dist/)
-npm run typecheck # tsc sobre src/ E test/, sem emitir
-npm test          # Roda o typecheck (pretest) e depois os testes vitest
-npm run dev       # Watch mode (se necessário)
+npm run build     # Compiles TypeScript (src/ only, emits dist/)
+npm run typecheck # tsc over src/ AND test/, without emitting
+npm test          # Runs the typecheck (pretest) and then the vitest suite
+npm run dev       # Watch mode (if needed)
 ```
 
-O `tsconfig.json` de build cobre só `src/` — quem emite não compila teste. `tsconfig.test.json`
-cobre os dois com `noEmit`, e o `pretest` do npm o roda antes da suíte: um fake de teste que deixa de
-satisfazer a interface que declara `implements` falha no typecheck, e não em execução.
+The build `tsconfig.json` covers only `src/` — what emits does not compile tests. `tsconfig.test.json`
+covers both with `noEmit`, and npm's `pretest` runs it before the suite: a test fake that stops
+satisfying the interface it declares `implements` fails at typecheck, not at run time.
 
-A suíte completa leva ~10 segundos. Alguns testes usam FIFO para simular operações de longa
-duração; todos eles abrem a ponta de escrita por conta própria (`withFifoWatch`), então falham em
-segundos em vez de dependerem do timeout do runner. `npm test` roda por `scripts/test.mjs`, que
-limita a suíte por relógio (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) e mata o grupo de processos: uma
-suíte travada vira exit 124, e não uma parada indefinida sem exit code nenhum.
+The full suite takes ~40 s. Some tests use FIFOs to simulate long-running operations; all of them
+open the write end themselves (`withFifoWatch`), so they fail in seconds instead of relying on the
+runner's timeout. `npm test` runs through `scripts/test.mjs`, which bounds the suite by the clock
+(15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) and kills the process group: a hung suite becomes exit 124,
+not an indefinite stall with no exit code at all.
+
+Code comments and docblocks are written in Portuguese (BR), as are commit messages and the server's
+own user-facing strings — the vault this serves is a Portuguese-language knowledge base.
+
+## License
+
+[MIT](LICENSE) © 2026 Andrey Mudri
