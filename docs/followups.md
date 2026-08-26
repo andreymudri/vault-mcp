@@ -1,12 +1,13 @@
 # Follow-ups conhecidos
 
 **Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26), mais o item 10
-(levantado durante a própria correção), o item 11 (levantado pelo primeiro `vault_learn` real) e o
-item 12 (levantado sondando a recuperação contra o vault real). Este documento deixou
+(levantado durante a própria correção), o item 11 (levantado pelo primeiro `vault_learn` real), o
+item 12 (levantado sondando a recuperação contra o vault real) e os itens 15 e 16 (levantados
+rodando `vault_move` contra uma cópia do vault real). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.148 testes em 19 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+A suíte passa com 1.155 testes em 19 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
 o handshake MCP com as nove tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
@@ -307,6 +308,40 @@ marca com reticência um resumo que coube inteiro" — é o contrapeso, e foi ve
 acrescentar sempre a reticência passava verde sem ele.
 
 ---
+
+## 15. Reescrita de link achatava a FORMA que o autor escreveu — CORRIGIDO
+
+Achado rodando `vault_move` contra uma CÓPIA do vault real, não em teste. Renomear
+`database-connection-singleton` reescreveu oito arquivos, todos com o alvo certo — e todos
+achatados para o slug puro: `[[../nestjs/database-connection-singleton]]` virou
+`[[conexao-de-banco-singleton]]`, e `[[../../02-wiki/nestjs/database-connection-singleton]]`
+também.
+
+Resolvia certo. Estava errado assim mesmo. Três formas nomeiam uma nota — slug puro, caminho da
+raiz, caminho relativo à nota — e **qual delas aparece é escolha de quem escreveu**: os MOCs deste
+vault usam `[[../nestjs/x]]` e `[[../../00-index/y|índice]]` por convenção. Corrigir o ALVO é o que
+a invariante exige; reescrever o ESTILO não é, e infla o diff que o usuário tem de revisar com
+mudanças que ele não pediu.
+
+**Correção:** a forma do alvo ORIGINAL escolhe a ordem em que os candidatos são tentados — `..`
+presente pede a forma relativa à nota, outra `/` pede a da raiz, nenhuma `/` pede o slug. A
+preferência nunca passa por cima da correção: todo candidato continua verificado com
+`resolveLinkTarget`, e o preferido é descartado sem cerimônia quando deixa de resolver para a nota
+certa — que é exatamente o que acontece quando um move cria empate de basename.
+
+## 16. A reescrita criava um ALIAS mentiroso — CORRIGIDO
+
+Mesma rodada, e o defeito mais sério dos dois. No vault real existe
+`[[../../02-wiki/nestjs/database-connection-singleton|database-connection-singleton]]`: alvo e
+alias com o mesmo texto. A reescrita corrigia o alvo e deixava o alias intacto — ou seja, **o texto
+que o leitor VÊ passava a nomear uma nota que não existe mais com aquele nome**, apontando para uma
+chamada outra coisa. É a classe "lê como uma coisa, é outra" que este projeto persegue em
+`INVISIBLE_CHARS`, em `headerPath` e em `forMessage`, só que criada pela própria correção.
+
+**Correção:** um alias que REPETE o nome antigo — o alvo inteiro, ou o basename dele — acompanha a
+reescrita. A regra é estreita de propósito e não toca em alias que é prosa: `|o guard de JWT]]` é
+uma frase escrita para um leitor, e trocá-la seria a ferramenta editando texto que não é dela.
+Fixado nos dois sentidos em `test/rewrite-links.test.ts`.
 
 ## Aceito deliberadamente
 

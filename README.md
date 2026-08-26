@@ -133,7 +133,7 @@ npm test
 - **Running the suite takes more than that:** `test/frontmatter.test.ts` executes the real
   `parseFile` in a child process pinned to a timezone, and that child is `node <file>.ts` — it
   depends on Node's own type stripping. CI pins 26, which is the version this is developed on
-- The suite has 19 files with 1,148 tests and takes ~10 s. `npm test` runs the typecheck
+- The suite has 19 files with 1,155 tests and takes ~10 s. `npm test` runs the typecheck
   (`pretest`) first and bounds the suite by the clock: a hung suite exits 124, never with no exit code
 
 ## Configuration

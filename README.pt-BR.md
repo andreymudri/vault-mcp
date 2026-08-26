@@ -125,7 +125,7 @@ npm test
 - **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
   processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
   próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
-- A suíte tem 19 arquivos com 1.148 testes e leva ~10 segundos. `npm test` roda o typecheck
+- A suíte tem 19 arquivos com 1.155 testes e leva ~10 segundos. `npm test` roda o typecheck
   (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
 
 ## Configuração
