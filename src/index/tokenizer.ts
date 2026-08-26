@@ -22,6 +22,32 @@ const HYPHEN = 45;
  */
 export const MAX_TOKEN_LENGTH = 64;
 
+/**
+ * Terms whose meaning lives entirely in characters the split below throws away.
+ *
+ * `fold('C++')` is `c++`, the split keeps only `c`, and `c` is one character — under the minimum.
+ * So `C++` indexed nothing and searched for nothing: measured on the real vault, `vault_search
+ * "C++"` answered with zero results AND zero suggestions, a dead end for the `02-wiki/cpp/` domain,
+ * for the rustot server and for btbot, all of them C++. Worse, it failed in SILENCE inside a longer
+ * query — `servidor C++ TFS` answered normally, carried by `servidor` and `tfs`, so nothing
+ * revealed that the discriminating term had been discarded.
+ *
+ * Rewriting to the spelled-out form is what makes the two spellings ONE key: the vault already has
+ * a folder called `cpp`, and a reader who types either should land in the same place.
+ *
+ * The lookbehind is the whole safety of this table. Without it every identifier ending in `c`
+ * followed by `++` would be rewritten mid-word — `abc++` is not C++ — so a symbol only counts when
+ * nothing word-like precedes it. Applied inside `tokenize`, never inside `fold`, so folding stays
+ * the pure normalisation its other callers expect.
+ */
+const SYMBOL_ALIASES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(?<![a-z0-9+#.])c\+\+/g, 'cpp'],
+  [/(?<![a-z0-9+#.])c#(?![a-z0-9])/g, 'csharp'],
+  [/(?<![a-z0-9+#.])f#(?![a-z0-9])/g, 'fsharp'],
+  [/(?<![a-z0-9+#.])node\.js(?![a-z0-9])/g, 'nodejs'],
+  [/(?<![a-z0-9+#.])\.net(?![a-z0-9])/g, 'dotnet'],
+];
+
 /** Lowercase + accent folding, so `decisão` and `decisao` collapse to one term. */
 export function fold(input: string): string {
   return input.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -30,6 +56,18 @@ export function fold(input: string): string {
 /**
  * Splits on anything that is not a letter, digit or hyphen, then trims edge hyphens.
  * No stemming: technical vocabulary (`nestjs`, `bullmq`) must survive intact.
+ *
+ * A HYPHENATED COMPOUND STAYS ONE TERM, and that was re-decided rather than inherited. Splitting
+ * `multi-tenant` into its parts was built and measured, and it cost more than it bought: a note
+ * whose only mention of bullmq is a `[[bullmq-worker]]` link started scoring as a DIRECT hit for
+ * `bullmq`, which is the link relationship being counted twice — the graph hop already models it,
+ * deliberately damped and flagged `viaGraph`, and the decomposed form arrived undamped and
+ * unflagged. It also leaked `moc` out of `nestjs-moc` as a standalone term and offered synthetic
+ * keys like `bullmqworker` as spelling suggestions.
+ *
+ * The gap it was meant to close — searching `multitenant` for notes that say `multi-tenant` — is
+ * already covered, and better: the query finds nothing, and `suggestTerms` answers `multi-tenant`
+ * at edit distance 1. Measured on the real vault.
  *
  * The edge trim is a linear index scan on purpose. It used to be
  * `raw.replace(/^-+/, '').replace(/-+$/, '')`, and the second replace is quadratic on a token
@@ -45,7 +83,9 @@ export function fold(input: string): string {
  */
 export function tokenize(input: string): string[] {
   const out: string[] = [];
-  for (const raw of fold(input).split(/[^a-z0-9-]+/)) {
+  let folded = fold(input);
+  for (const [pattern, replacement] of SYMBOL_ALIASES) folded = folded.replace(pattern, replacement);
+  for (const raw of folded.split(/[^a-z0-9-]+/)) {
     let start = 0;
     let end = raw.length;
     while (start < end && raw.charCodeAt(start) === HYPHEN) start += 1;

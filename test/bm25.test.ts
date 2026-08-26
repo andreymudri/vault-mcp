@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { chunkNote } from '../src/index/chunker.js';
-import { FIELD_WEIGHTS, InvertedIndex, NOTE_TYPE_WEIGHTS } from '../src/index/inverted-index.js';
+import {
+  ARCHIVE_PATH_WEIGHT,
+  FIELD_WEIGHTS,
+  InvertedIndex,
+  NOTE_TYPE_WEIGHTS,
+} from '../src/index/inverted-index.js';
 import { B, idf, K1, search, suggestTerms } from '../src/index/bm25.js';
 import { MAX_TOKEN_LENGTH, tokenize } from '../src/index/tokenizer.js';
 import type { Chunk } from '../src/types.js';
@@ -346,6 +351,57 @@ describe('search — sanidade de integração', () => {
     for (const r of results) {
       expect(r.viaGraph).toBe(false);
     }
+  });
+});
+
+/**
+ * `99-archive/` é somente leitura para a escrita (`DENIED_PREFIXES` em `src/write/paths.ts`) e
+ * continuava rankeando IGUAL ao conteúdo vivo. Medido no vault real: enquanto seis projetos ainda
+ * estavam arquivados, a checagem de duplicata do `vault_learn` elegeu como TOPO uma decisão de
+ * projeto arquivado — conhecimento morto ganhando de conhecimento vivo.
+ *
+ * O peso demove, nunca esconde: a nota arquivada continua achável, porque a história de um projeto
+ * encerrado é história de verdade. Ela só deixa de competir de igual para igual.
+ */
+describe('ARCHIVE_PATH_WEIGHT — nota arquivada continua achável, mas não compete de igual', () => {
+  it('o mesmo texto pontua menos em 99-archive/ do que em 02-wiki/', () => {
+    const index = new InvertedIndex();
+    index.addChunk(makeChunk({ id: 'vivo#1', path: '02-wiki/nestjs/vivo.md', text: 'zzarquivotermo' }));
+    index.addChunk(makeChunk({ id: 'morto#1', path: '99-archive/03-projects/x/morto.md', text: 'zzarquivotermo' }));
+
+    const results = search(index, 'zzarquivotermo', 10);
+
+    expect(results).toHaveLength(2);
+    expect(results[0]?.chunk.path).toBe('02-wiki/nestjs/vivo.md');
+    expect(results[1]?.chunk.path).toBe('99-archive/03-projects/x/morto.md');
+    // Demovida, não escondida.
+    expect(results[1]?.score).toBeGreaterThan(0);
+    expect(results[1]?.score).toBeCloseTo((results[0]?.score ?? 0) * ARCHIVE_PATH_WEIGHT);
+  });
+
+  it('casa o prefixo em fronteira de segmento, não por começo de string', () => {
+    // `99-archive-notes/` é uma pasta comum e não pode ser demovida junto com `99-archive/`,
+    // exatamente como o guard de escrita distingue as duas.
+    const index = new InvertedIndex();
+    index.addChunk(makeChunk({ id: 'a#1', path: '02-wiki/x.md', text: 'zzfronteira' }));
+    index.addChunk(makeChunk({ id: 'b#1', path: '99-archive-notes/y.md', text: 'zzfronteira' }));
+
+    const results = search(index, 'zzfronteira', 10);
+    expect(results).toHaveLength(2);
+    expect(results[0]?.score).toBeCloseTo(results[1]?.score ?? 0);
+  });
+
+  it('o peso do tipo e o do caminho se multiplicam', () => {
+    const index = new InvertedIndex();
+    index.addChunk(makeChunk({ id: 'w#1', path: '02-wiki/a.md', text: 'zzcombinado', tipo: 'wiki' }));
+    index.addChunk(makeChunk({ id: 'm#1', path: '99-archive/b.md', text: 'zzcombinado', tipo: 'moc' }));
+
+    const results = search(index, 'zzcombinado', 10);
+    const vivo = results.find((r) => r.chunk.path === '02-wiki/a.md');
+    const arquivado = results.find((r) => r.chunk.path === '99-archive/b.md');
+    expect(arquivado?.score).toBeCloseTo(
+      (vivo?.score ?? 0) * NOTE_TYPE_WEIGHTS.moc! * ARCHIVE_PATH_WEIGHT,
+    );
   });
 });
 

@@ -1,5 +1,5 @@
 import type { Chunk, ScoredChunk } from '../types.js';
-import { noteTypeWeight, type InvertedIndex } from './inverted-index.js';
+import { noteTypeWeight, pathWeight, type InvertedIndex } from './inverted-index.js';
 import { MAX_TOKEN_LENGTH, tokenize } from './tokenizer.js';
 
 export const K1 = 1.2;
@@ -42,7 +42,10 @@ export function search(
   // Peso por tipo de nota aplicado UMA VEZ, sobre o score acumulado do chunk — não sobre as
   // frequências de termo, o que distorceria a saturação por termo do BM25.
   for (const [chunkId, score] of scores) {
-    scores.set(chunkId, score * noteTypeWeight(index.chunks.get(chunkId)?.tipo));
+    const chunk = index.chunks.get(chunkId);
+    // Two independent demotions, multiplied: WHAT the note is (a MOC restates its domain) and
+    // WHERE it lives (the archive is retired). A MOC inside the archive is both.
+    scores.set(chunkId, score * noteTypeWeight(chunk?.tipo) * pathWeight(chunk?.path));
   }
 
   // Filtra antes de fatiar: um `keep` restritivo aplicado depois do corte devolveria nada sempre

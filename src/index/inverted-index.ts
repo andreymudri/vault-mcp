@@ -27,6 +27,36 @@ export function noteTypeWeight(tipo: string | undefined): number {
   return (tipo ? NOTE_TYPE_WEIGHTS[tipo] : undefined) ?? 1.0;
 }
 
+/**
+ * The read-only areas of the vault, and how much a hit inside one is worth.
+ *
+ * `99-archive/` is already refused by every WRITE (`DENIED_PREFIXES` in `src/write/paths.ts`) and
+ * was still ranking identically to live content on the READ side. Measured on the real vault: with
+ * six projects sitting in the archive, `vault_learn`'s duplicate check picked a decision note from
+ * an ARCHIVED project as its top hit — dead knowledge outranking live knowledge, and the reason the
+ * learning was filed the way it was.
+ *
+ * Demoted, never hidden, and the difference is the whole point. A finished project's decisions are
+ * real history and stay findable; they simply stop competing on equal terms with what is still
+ * being worked on. `01-raw/` is the other special area and is handled elsewhere — `retrieval.ts`
+ * EXCLUDES it by default, because unvalidated capture is a different claim from retired knowledge.
+ */
+export const ARCHIVE_PATH_WEIGHT = 0.4;
+
+const ARCHIVE_PREFIX = '99-archive';
+
+/**
+ * Matched as a whole path SEGMENT, never as a string prefix — the same rule the write guard uses,
+ * and for the same reason: `99-archive-notes/` is an ordinary folder that must not be demoted
+ * alongside `99-archive/`.
+ */
+export function pathWeight(path: string | undefined): number {
+  if (path === undefined) return 1.0;
+  const slash = path.indexOf('/');
+  const first = slash === -1 ? path : path.slice(0, slash);
+  return first === ARCHIVE_PREFIX ? ARCHIVE_PATH_WEIGHT : 1.0;
+}
+
 const HEADING_LINE_RE = /^#{2,3}\s+.*$/;
 
 /**

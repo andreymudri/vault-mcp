@@ -1,7 +1,8 @@
 # Follow-ups conhecidos
 
 **Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26), mais o item 10
-(levantado durante a própria correção) e o item 11 (levantado pelo primeiro `vault_learn` real). Este documento deixou
+(levantado durante a própria correção), o item 11 (levantado pelo primeiro `vault_learn` real) e o
+item 12 (levantado sondando a recuperação contra o vault real). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
@@ -198,6 +199,51 @@ uma cópia só, exportada de `writer.ts`, e ela usa a varredura linear que estav
 **Não corrigido, e é limitação e não defeito:** a mensagem de commit do `vault_edit_note` também
 title-caseia o slug (`docs(vault): atualizar Check Then Act Nao E...`). Essa tool recebe só o
 CAMINHO — não existe título para usar.
+
+---
+
+## 12. Recuperação: `C++` não achava nada, e nota arquivada competia de igual — CORRIGIDO
+
+Levantado sondando o vault real, não lendo o código.
+
+**`vault_search "C++"` respondia zero resultados E zero sugestões** — beco sem saída para
+`02-wiki/cpp/`, para o servidor do rustot e para o btbot, todos C++. `fold('C++')` vira `c++`, o
+split derruba os `+` e sobra `c`, que é curto demais. E falhava em SILÊNCIO na consulta de várias
+palavras: `servidor C++ TFS` respondia normalmente, carregado por `servidor` e `tfs`, sem nada
+revelar que o termo discriminante tinha sido descartado.
+
+**Correção:** tabela `SYMBOL_ALIASES` no `tokenize` — `c++→cpp`, `c#→csharp`, `f#→fsharp`,
+`node.js→nodejs`, `.net→dotnet` —, aplicada depois do `fold` e antes do split, portanto nos DOIS
+lados por construção (índice e consulta passam pelo mesmo `tokenize`). O lookbehind é a segurança da
+tabela: `abc++` não é C++. Medido depois: `C++` devolve 3 resultados, liderados por
+`02-wiki/cpp/ot-server-tfs-patterns.md`.
+
+**`99-archive/` rankeava igual ao conteúdo vivo.** A escrita já recusava a pasta inteira; a leitura
+não distinguia. Medido: com seis projetos arquivados, a checagem de duplicata do `vault_learn`
+elegeu como topo uma decisão de projeto arquivado.
+
+**Correção:** `ARCHIVE_PATH_WEIGHT = 0.4`, casado em fronteira de SEGMENTO (`99-archive-notes/` é
+pasta comum e não é demovida), multiplicado pelo peso de tipo que já existia. Demove, não esconde: a
+história de um projeto encerrado continua achável, só para de competir de igual.
+
+### Decompor composto com hífen: construído, medido e DESCARTADO
+
+Faz parte do registro porque a tentação volta. `multi-tenant` aparece 26 vezes no vault e há 533
+termos com hífen, então indexar composto + partes + forma sólida parecia ganho óbvio. O custo,
+medido pela suíte:
+
+- uma nota cuja única menção a bullmq é o link `[[bullmq-worker]]` passou a pontuar como acerto
+  **direto** de `bullmq` — a relação de link contada duas vezes, sendo que o salto de grafo já a
+  modela amortecida e marcada `viaGraph`;
+- `moc` vazou de `nestjs-moc` como termo solto;
+- o `suggestTerms` passou a oferecer `bullmqworker`, chave que ninguém digita.
+
+E o buraco que fechava já estava coberto melhor: `multitenant` não acha nada e o suggester responde
+`multi-tenant` a distância 1. Três testes existentes falharam e estavam certos. `tokenizer.ts`
+carrega a decisão no docblock e `test/tokenizer.test.ts` a fixa.
+
+**Não corrigido, de propósito:** stemming. `hexagonais` não acha `hexagonal`, e o suggester cobre.
+Stemming de português é exatamente o que quebraria `nestjs`, `bullmq` e `tenantId`.
 
 ---
 

@@ -21,6 +21,56 @@ describe('tokenize', () => {
     expect(tokens).toContain('bullmq');
   });
 
+  /**
+   * Medido no vault real: `vault_search "C++"` devolvia **zero resultados e zero sugestões** — beco
+   * sem saída para o domínio `02-wiki/cpp/`, para o servidor do rustot e para o btbot, todos C++.
+   * A causa é o corte de tokens de 1 caractere: `fold('C++')` vira `c++`, o split derruba os `+` e
+   * sobra `c`, que é curto demais. Pior, falhava em SILÊNCIO em consulta de várias palavras —
+   * `servidor C++ TFS` respondia normalmente, carregado por `servidor` e `tfs`, e ninguém percebia
+   * que o termo discriminante tinha sido jogado fora.
+   *
+   * A tabela vale nos DOIS lados por construção: índice e consulta passam pelo mesmo `tokenize`.
+   */
+  describe('termos que carregam símbolo', () => {
+    it.each([
+      ['C++', 'cpp'],
+      ['c++', 'cpp'],
+      ['C#', 'csharp'],
+      ['F#', 'fsharp'],
+      ['.NET', 'dotnet'],
+      ['node.js', 'nodejs'],
+    ])('%s é indexável como %s', (entrada, esperado) => {
+      expect(tokenize(entrada)).toContain(esperado);
+    });
+
+    it('une a forma com símbolo e a forma escrita por extenso', () => {
+      // O vault já tem a pasta `02-wiki/cpp/`: as duas grafias têm de cair na MESMA chave.
+      expect(tokenize('C++')).toEqual(tokenize('cpp'));
+    });
+
+    it('não reescreve quando o símbolo está colado em outra palavra', () => {
+      // `abc++` não é C++; um alias guloso transformaria o sufixo de qualquer identificador.
+      expect(tokenize('abc++')).toEqual(['abc']);
+      expect(tokenize('objc#tag')).not.toContain('csharp');
+    });
+  });
+
+  /**
+   * Decompor composto com hífen foi CONSTRUÍDO, MEDIDO E DESCARTADO — este teste existe para que
+   * não volte por engano. `multi-tenant` aparece 26 vezes no vault e há 533 termos com hífen, então
+   * a tentação é real; o custo é que uma nota cuja única menção a bullmq é o link
+   * `[[bullmq-worker]]` passa a pontuar como acerto DIRETO de `bullmq`, contando a relação de link
+   * duas vezes — o salto de grafo já a modela, amortecida e marcada `viaGraph`.
+   *
+   * O buraco que a decomposição fechava já está coberto: `multitenant` não acha nada e o
+   * `suggestTerms` responde `multi-tenant` a distância 1.
+   */
+  it('mantém o composto com hífen como UMA chave, sem decompor', () => {
+    expect(tokenize('multi-tenant')).toEqual(['multi-tenant']);
+    expect(tokenize('bullmq-worker')).toEqual(['bullmq-worker']);
+    expect(tokenize('nestjs-moc')).toEqual(['nestjs-moc']);
+  });
+
   it('keeps hyphenated compounds and alphanumeric tokens as single terms', () => {
     const tokens = tokenize('build multi-stage v6');
     expect(tokens).toContain('multi-stage');
