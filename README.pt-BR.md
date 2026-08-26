@@ -125,7 +125,7 @@ npm test
 - **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
   processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
   próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
-- A suíte tem 17 arquivos com 1.039 testes e leva ~40 s. `npm test` roda o typecheck
+- A suíte tem 17 arquivos com 1.039 testes e leva ~10 segundos. `npm test` roda o typecheck
   (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
 
 ## Configuração
@@ -298,7 +298,7 @@ O `tsconfig.json` de build cobre só `src/` — quem emite não compila teste. `
 cobre os dois com `noEmit`, e o `pretest` do npm o roda antes da suíte: um fake de teste que deixa de
 satisfazer a interface que declara `implements` falha no typecheck, e não em execução.
 
-A suíte completa leva ~40 s. Alguns testes usam FIFO para simular operações de longa
+A suíte completa leva ~10 segundos. Alguns testes usam FIFO para simular operações de longa
 duração; todos eles abrem a ponta de escrita por conta própria (`withFifoWatch`), então falham em
 segundos em vez de dependerem do timeout do runner. `npm test` roda por `scripts/test.mjs`, que
 limita a suíte por relógio (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) e mata o grupo de processos: uma

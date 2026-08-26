@@ -133,7 +133,7 @@ npm test
 - **Running the suite takes more than that:** `test/frontmatter.test.ts` executes the real
   `parseFile` in a child process pinned to a timezone, and that child is `node <file>.ts` — it
   depends on Node's own type stripping. CI pins 26, which is the version this is developed on
-- The suite has 17 files with 1,039 tests and takes ~40 s. `npm test` runs the typecheck
+- The suite has 17 files with 1,039 tests and takes ~10 s. `npm test` runs the typecheck
   (`pretest`) first and bounds the suite by the clock: a hung suite exits 124, never with no exit code
 
 ## Configuration
@@ -306,7 +306,7 @@ The build `tsconfig.json` covers only `src/` — what emits does not compile tes
 covers both with `noEmit`, and npm's `pretest` runs it before the suite: a test fake that stops
 satisfying the interface it declares `implements` fails at typecheck, not at run time.
 
-The full suite takes ~40 s. Some tests use FIFOs to simulate long-running operations; all of them
+The full suite takes ~10 s. Some tests use FIFOs to simulate long-running operations; all of them
 open the write end themselves (`withFifoWatch`), so they fail in seconds instead of relying on the
 runner's timeout. `npm test` runs through `scripts/test.mjs`, which bounds the suite by the clock
 (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) and kills the process group: a hung suite becomes exit 124,
