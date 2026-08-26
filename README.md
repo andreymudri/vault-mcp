@@ -1,6 +1,6 @@
 # vault-mcp
 
-Servidor MCP para busca, leitura e escrita em um vault de conhecimento Obsidian. Recuperação por BM25 lexical mais um salto de wiki-links; registro inteligente de aprendizados que decide entre criar nota nova ou anexar ao existente; propagação automática para MOC, índice de conhecimento e nota diária.
+Servidor MCP para busca, leitura e escrita em um vault de conhecimento Obsidian. Recuperação por BM25 lexical mais um salto de wiki-links; registro inteligente de aprendizados que decide entre criar nota nova ou anexar ao existente; propagação automática para o MOC do domínio e a nota diária, e para o índice de conhecimento quando o domínio é novo.
 
 ## Instalação
 
@@ -10,8 +10,12 @@ npm run build
 npm test
 ```
 
-- **Node >= 20** é obrigatório
-- A suíte de testes contém 17 arquivos com 1.014 testes e leva ~10 segundos (o `npm test` roda o typecheck antes, via `pretest`)
+- **Node >= 20** para RODAR o servidor (`dist/` é JavaScript comum)
+- **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
+  processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
+  próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
+- A suíte tem 17 arquivos com 1.027 testes e leva ~10 segundos. `npm test` roda o typecheck
+  (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
 
 ## Configuração
 

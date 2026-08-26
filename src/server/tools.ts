@@ -1125,7 +1125,8 @@ const LEARN_DESCRIPTION =
   'e reutilizável — uma decisão de arquitetura, um pattern, um gotcha, uma armadilha de ' +
   'configuração —, sem perguntar antes onde salvar: o servidor decide sozinho entre anexar à nota ' +
   'existente que já cobre o assunto e criar uma nota nova (o viés é criar), e propaga sozinho para ' +
-  'o MOC do domínio, para o índice de conhecimento e para a nota diária, tudo em um único commit. ' +
+  'o MOC do domínio e para a nota diária (e para o índice de conhecimento quando o domínio é ' +
+  'novo), tudo em um único commit. ' +
   'Mostre ao usuário o diff devolvido.';
 
 export function createTools(deps: ToolDeps): ToolDefinition[] {
