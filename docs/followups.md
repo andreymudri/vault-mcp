@@ -327,6 +327,32 @@ palavras no meio da prosa.
 
 Registrado aqui para não ser redescoberto como bug.
 
+**`src/write/relocate.ts` — arquivar uma nota perde o `— resumo` da entrada dela no MOC.**
+`vault_move` para `99-archive/` tira a linha do MOC de origem e não tem MOC de destino em que
+inseri-la, então o resumo que o usuário escreveu some com a linha. Desarquivar recria a entrada
+NUA, `- [[slug]]`, e não a de antes.
+
+A perda é inerente e não um descuido: o resumo é prosa do usuário que vive na linha do MOC, e
+`99-archive/` é uma área somente-leitura em que nada pode ser escrito — nem uma nota de rodapé
+guardando o texto para depois. As alternativas eram guardar o resumo no frontmatter da própria nota
+movida (escrever no corpo do usuário para conveniência da ferramenta) ou num arquivo lateral de
+estado (um índice paralelo que o vault não tem e que sairia de sincronia). Nenhuma das duas paga o
+preço.
+
+O que a operação NÃO faz é inventar um resumo, aqui ou na promoção de `01-raw/`: sem linha de
+origem a entrada sai `- [[slug]]`, curta e verdadeira. Fixado em `test/relocate.test.ts`.
+
+**`src/write/relocate.ts` — wiki-link que só existe no FRONTMATTER não entra na reescrita.**
+`candidates()` decide quais notas reconsiderar lendo `note.body`, que é o texto de que o grafo de
+links é construído; `rewriteLinks` opera sobre o arquivo INTEIRO. A assimetria é visível numa nota
+cujo único `[[link]]` esteja dentro do bloco YAML: ela não vira candidata, e o link não é corrigido.
+
+Mantido porque a candidatura concorda com o grafo por construção — uma nota que este filtro pula é
+uma nota cujas arestas o `vault_backlinks` também não tem, já que o scanner extrai links só do
+corpo. Alargar a reescrita sem alargar o scanner criaria a discordância oposta, que é pior: um link
+corrigido que nenhuma tool de leitura enxerga. Se um dia o scanner passar a indexar links de
+frontmatter, os dois lados mudam juntos.
+
 ---
 
 ## 10. Os testes não passavam pelo `tsc` — CORRIGIDO
