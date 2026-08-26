@@ -3,6 +3,7 @@
 **Português** | [English](README.md)
 
 [![CI](https://github.com/andreymudri/vault-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/andreymudri/vault-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@andreymudri/vault-mcp)](https://www.npmjs.com/package/@andreymudri/vault-mcp)
 
 Memória de longo prazo para um agente de código: ele busca no seu vault Obsidian antes de
 responder, cita `caminho:linha`, e registra o que aprendeu sem perguntar onde salvar.

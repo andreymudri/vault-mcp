@@ -3,6 +3,7 @@
 **English** | [Português](README.pt-BR.md)
 
 [![CI](https://github.com/andreymudri/vault-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/andreymudri/vault-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@andreymudri/vault-mcp)](https://www.npmjs.com/package/@andreymudri/vault-mcp)
 
 Long-term memory for a coding agent: it searches your Obsidian vault before answering, cites
 `path:line`, and records what it learned without asking where to save it.
