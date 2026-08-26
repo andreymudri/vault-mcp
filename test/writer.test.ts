@@ -1965,3 +1965,54 @@ describe('editNote occurrence counting', () => {
     expect(await fs.readFile(path.join(vaultRoot, rel), 'utf8')).toBe('inicio aaa fim\n');
   });
 });
+
+/**
+ * O cabeçalho de RENAME: `--- a/<origem>` e `+++ b/<destino>`.
+ *
+ * `vault_move` publica um arquivo sob um nome novo, e um diff cujos dois lados carregam o
+ * mesmo caminho descreve uma edição que não foi a que aconteceu. Um move puro — bytes
+ * idênticos, caminho diferente — é a forma em que isso mais dói: com um caminho só, o diff
+ * é a string vazia e o usuário não vê NADA sobre a operação que acabou de rodar.
+ *
+ * O quarto parâmetro é opcional e não altera nada de quem passa três: toda chamada existente
+ * neste projeto continua rendendo byte a byte o que rendia.
+ */
+describe('unifiedDiff com caminho de destino', () => {
+  it('rotula os dois lados com caminhos diferentes', () => {
+    const diff = unifiedDiff('um\n', 'dois\n', '01-raw/inbox/rascunho.md', '02-wiki/nestjs/nota.md');
+    expect(diff).toContain('--- a/01-raw/inbox/rascunho.md');
+    expect(diff).toContain('+++ b/02-wiki/nestjs/nota.md');
+    expect(diff).toContain('-um');
+    expect(diff).toContain('+dois');
+  });
+
+  it('rende só o cabeçalho quando o move não muda um byte', () => {
+    const diff = unifiedDiff('igual\n', 'igual\n', '01-raw/inbox/nota.md', '02-wiki/nestjs/nota.md');
+    expect(diff).toBe('--- a/01-raw/inbox/nota.md\n+++ b/02-wiki/nestjs/nota.md\n');
+  });
+
+  it('continua devolvendo string vazia quando nada muda e o caminho é o mesmo', () => {
+    expect(unifiedDiff('igual\n', 'igual\n', '02-wiki/nestjs/nota.md', '02-wiki/nestjs/nota.md')).toBe('');
+    expect(unifiedDiff('igual\n', 'igual\n', '02-wiki/nestjs/nota.md')).toBe('');
+  });
+
+  it('escapa o caminho de destino como escapa o de origem', () => {
+    // A metade que forja um relatório. Sem escape aqui, um destino carregando `\n` põe uma
+    // segunda linha renderizada no diff que o usuário lê — o mesmo defeito que `headerPath`
+    // fecha do lado da origem, reaberto pelo parâmetro novo.
+    const diff = unifiedDiff('um\n', 'dois\n', 'a.md', 'b\n+++ b/CLAUDE.md\n@@ -1 +1 @@.md');
+    // A propriedade é sobre LINHAS RENDERIZADAS, não sobre substrings: o texto forjado
+    // continua lá, escapado, dentro da única linha do cabeçalho — é isso que o escape faz.
+    // O que não pode existir é uma SEGUNDA linha que se leia como cabeçalho.
+    const lines = diff.split('\n');
+    expect(lines).not.toContain('+++ b/CLAUDE.md');
+    expect(lines.filter((line) => line.startsWith('+++ '))).toHaveLength(1);
+    expect(diff).toContain('\\n');
+  });
+
+  it('mantém o /dev/null de um arquivo que nasce, mesmo com destino informado', () => {
+    const diff = unifiedDiff('', 'novo\n', 'a.md', 'b.md');
+    expect(diff.startsWith('--- /dev/null\n')).toBe(true);
+    expect(diff).toContain('+++ b/b.md');
+  });
+});

@@ -406,14 +406,15 @@ function changedSpan(
  * nothing except how big their note is. "1 linha removida, 1 linha adicionada" tells them
  * the edit was small even though the detail could not be rendered.
  */
-function coarseSummary(before: string, after: string, path: string): string {
+function coarseSummary(before: string, after: string, path: string, toPath: string): string {
   const span = changedSpan(before, after);
   const removed = countLines(before, span.start, span.endBefore);
   const added = countLines(after, span.start, span.endAfter);
   const label = headerPath(path);
+  const toLabel = headerPath(toPath);
   return [
     before === '' ? '--- /dev/null' : `--- a/${label}`,
-    after === '' ? '+++ /dev/null' : `+++ b/${label}`,
+    after === '' ? '+++ /dev/null' : `+++ b/${toLabel}`,
     '@@ diff omitido @@',
     ` entrada de ${before.length + after.length} caracteres excede o limite de ` +
       `${MAX_DIFF_INPUT_CHARS}; ${lineCount(removed, 'removida')}, ${lineCount(added, 'adicionada')}`,
@@ -508,20 +509,36 @@ function groupChanges(ops: Op[]): void {
 }
 
 /**
- * A unified diff of `before` → `after`, labelled with `path`.
+ * A unified diff of `before` → `after`, labelled with `path` — and with `toPath` on the
+ * `+++` side when the file also MOVED.
  *
- * Returns `''` when the texts are identical — an empty diff is how a caller reports
- * "the write changed nothing", and a header with no hunks would read as a change.
- * A new file (`before` is `''`) is rendered against `/dev/null`, the way git does it.
+ * Returns `''` when the texts are identical AND the path did not change: an empty diff is
+ * how a caller reports "the write changed nothing", and a header with no hunks would read
+ * as a change. A RENAME is a change, though, and a pure one — identical bytes under a new
+ * name — is where that rule bites hardest: labelled with one path it renders as the empty
+ * string, and `vault_move`'s user is shown nothing at all about the operation that just
+ * ran. So a differing `toPath` renders the header alone, which is exactly the claim being
+ * made: this file is now that file, and no line of it changed.
+ *
+ * A new file (`before` is `''`) is rendered against `/dev/null`, the way git does it, and
+ * `toPath` still labels the `+++` side there.
+ *
+ * `toPath` is escaped by the same `headerPath` as `path`. It is a caller-supplied path
+ * reaching the same rendered surface, so leaving it raw would reopen — on the new
+ * parameter — the forged-hunk hole that escaping the first one closed.
  */
-export function unifiedDiff(before: string, after: string, path: string): string {
-  if (before === after) return '';
+export function unifiedDiff(before: string, after: string, path: string, toPath?: string): string {
+  const destination = toPath ?? path;
+  if (before === after) {
+    if (destination === path) return '';
+    return `--- a/${headerPath(path)}\n+++ b/${headerPath(destination)}\n`;
+  }
 
   // Checked BEFORE `toSides` splits anything: on a 6.5 MB note the split alone allocates
   // an array of every line, and the point of this bound is to not touch the input at all
   // once it is too big to handle inside one tick of a single-threaded server.
   if (before.length + after.length > MAX_DIFF_INPUT_CHARS) {
-    return coarseSummary(before, after, path);
+    return coarseSummary(before, after, path, destination);
   }
 
   const a = toSides(before);
@@ -535,9 +552,10 @@ export function unifiedDiff(before: string, after: string, path: string): string
   if (ranges.length === 0) return '';
 
   const label = headerPath(path);
+  const toLabel = headerPath(destination);
   const out: string[] = [
     before === '' ? '--- /dev/null' : `--- a/${label}`,
-    after === '' ? '+++ /dev/null' : `+++ b/${label}`,
+    after === '' ? '+++ /dev/null' : `+++ b/${toLabel}`,
   ];
 
   // Line numbers are 1-based and count only the lines present on each side.
