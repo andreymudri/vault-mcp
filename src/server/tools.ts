@@ -437,28 +437,68 @@ function clamp(text: string, max: number): string {
  * `vault_get_note` summarise a list `vault_list` printed in full, two tools disagreeing about the
  * same note.
  */
-function renderFrontmatterValue(value: unknown, depth = 1): string {
+function renderFrontmatterValue(value: unknown, depth = 1, memo: RenderMemo = new WeakMap()): string {
   if (value === null) return 'null';
   if (value === undefined) return '';
   if (value instanceof Date) return value.toISOString();
 
   if (Array.isArray(value)) {
     if (depth <= 0) return `[lista com ${value.length} item(ns)]`;
-    return clamp(joinBudgeted(value, (item) => renderFrontmatterValue(item, depth - 1), value.length), MAX_FRONTMATTER_VALUE_CHARS);
+    return remember(memo, value, depth, () =>
+      clamp(
+        joinBudgeted(value, (item) => renderFrontmatterValue(item, depth - 1, memo), value.length),
+        MAX_FRONTMATTER_VALUE_CHARS,
+      ),
+    );
   }
 
   if (typeof value === 'object') {
-    const entries = Object.entries(value);
-    if (depth <= 0) return `{objeto com ${entries.length} chave(s)}`;
-    const inner = joinBudgeted(
-      entries,
-      ([key, item]) => `${clamp(key, MAX_FRONTMATTER_VALUE_CHARS)}: ${renderFrontmatterValue(item, depth - 1)}`,
-      entries.length,
-    );
-    return clamp(`{${inner}}`, MAX_FRONTMATTER_VALUE_CHARS);
+    // The depth test comes FIRST, before any enumeration. `Object.entries` on the way to a
+    // summary that only needs the count builds one two-element array per key, and an alias makes
+    // that happen once per reference to the same object.
+    if (depth <= 0) {
+      return remember(memo, value, depth, () => `{objeto com ${Object.keys(value).length} chave(s)}`);
+    }
+    return remember(memo, value, depth, () => {
+      const entries = Object.entries(value);
+      const inner = joinBudgeted(
+        entries,
+        ([key, item]) => `${clamp(key, MAX_FRONTMATTER_VALUE_CHARS)}: ${renderFrontmatterValue(item, depth - 1, memo)}`,
+        entries.length,
+      );
+      return clamp(`{${inner}}`, MAX_FRONTMATTER_VALUE_CHARS);
+    });
   }
 
   return clamp(String(value), MAX_FRONTMATTER_VALUE_CHARS);
+}
+
+/**
+ * One rendering per (container, depth), for the whole block.
+ *
+ * A YAML alias makes the SAME object reachable by many paths, and the rendering of a container is
+ * a pure function of the container and the depth it is reached at — so the second path can only
+ * ever recompute an answer that is already known. Without this, a 60.000-key map under 40 keys of
+ * 25 aliases each was summarised ~640 times and cost 5,2 s of synchronous work on a server that
+ * answers nothing else meanwhile; with it, once.
+ *
+ * The map is created per `renderFrontmatterBlock` call and thrown away with it, deliberately: a
+ * module-level cache would key on objects the scanner holds across refreshes, and would answer
+ * from a stale rendering if any of them were ever mutated in place.
+ */
+type RenderMemo = WeakMap<object, Map<number, string>>;
+
+function remember(memo: RenderMemo, value: object, depth: number, compute: () => string): string {
+  let byDepth = memo.get(value);
+  if (byDepth === undefined) {
+    byDepth = new Map();
+    memo.set(value, byDepth);
+  }
+  const hit = byDepth.get(depth);
+  if (hit !== undefined) return hit;
+  const rendered = compute();
+  byDepth.set(depth, rendered);
+  return rendered;
 }
 
 /**
@@ -490,6 +530,7 @@ function joinBudgeted<T>(items: readonly T[], render: (item: T) => string, total
  */
 function renderFrontmatterBlock(frontmatter: Frontmatter): string {
   const entries = Object.entries(frontmatter);
+  const memo: RenderMemo = new WeakMap();
   const lines: string[] = [];
   let length = 0;
   let cut = entries.length > MAX_FRONTMATTER_KEYS;
@@ -497,7 +538,7 @@ function renderFrontmatterBlock(frontmatter: Frontmatter): string {
   for (const [key, value] of entries.slice(0, MAX_FRONTMATTER_KEYS)) {
     // Escaped PER KEY AND PER VALUE, then joined. Escaping the assembled block instead turns the
     // separators into the two literal characters `\` and `n`, which is every note with two keys.
-    const line = `  ${forMessage(clamp(key, MAX_FRONTMATTER_VALUE_CHARS))}: ${forMessage(renderFrontmatterValue(value))}`;
+    const line = `  ${forMessage(clamp(key, MAX_FRONTMATTER_VALUE_CHARS))}: ${forMessage(renderFrontmatterValue(value, 1, memo))}`;
     if (length + line.length > MAX_FRONTMATTER_CHARS) {
       cut = true;
       break;

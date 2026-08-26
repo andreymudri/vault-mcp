@@ -802,6 +802,42 @@ describe('vault_get_note', () => {
     expect(rendered).toContain('tipo: wiki');
   }, 30_000);
 
+  /**
+   * Forma DIFERENTE da bomba exponencial acima: um único mapa LARGO, referenciado muitas vezes por
+   * alias. A bomba exponencial já era limitada; esta não era, porque o descenso enumerava o objeto
+   * antes de testar `depth <= 0` e não memoizava nada — o mesmo mapa era resumido uma vez por
+   * REFERÊNCIA. Medido em 5,2 s de trabalho síncrono, durante os quais o servidor stdio não atende
+   * mais nada.
+   *
+   * A primeira chamada é descartada de propósito: ela paga o parse de ~840 KB de YAML, que não é o
+   * que está sendo medido. A segunda lê a nota já indexada, então o tempo é o do render.
+   */
+  it('um mapa largo referenciado por alias não trava o event loop', async () => {
+    const vaultRoot = await makeVault();
+    const largo = Array.from({ length: 60_000 }, (_, i) => `k${i}: ${i}`).join(', ');
+    const refs = Array.from({ length: 25 }, (_, i) => `k${i}: *w`).join(', ');
+    const topo = Array.from({ length: 40 }, (_, i) => `b${i}: {${refs}}`).join('\n');
+    await write(
+      vaultRoot,
+      '01-raw/inbox/mapa-largo.md',
+      `---\ntipo: wiki\nw: &w {${largo}}\n${topo}\n---\n\n# Largo\n\ncorpo curto.\n`,
+    );
+    const { text } = makeTools(vaultRoot);
+
+    await text('vault_get_note', { path: '01-raw/inbox/mapa-largo.md' });
+
+    const antes = performance.now();
+    const rendered = await text('vault_get_note', { path: '01-raw/inbox/mapa-largo.md' });
+    const decorrido = performance.now() - antes;
+
+    // Margem de 5x sobre o pior caso corrigido, e de 5x abaixo do valor medido com o defeito.
+    expect(decorrido).toBeLessThan(1_000);
+    expect(rendered.length).toBeLessThan(60_000);
+    // Resumido, nunca expandido — e o resumo continua contando as chaves de verdade.
+    expect(rendered).toContain('objeto com 60000 chave(s)');
+    expect(rendered).toContain('tipo: wiki');
+  }, 60_000);
+
   it('mostra um mapa aninhado pequeno em vez de resumi-lo', async () => {
     const vaultRoot = await makeVault();
     await write(
