@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,7 +75,7 @@ function tracker(): Tracker {
         readdirCalls.push(toRelative(dir));
         return readdirSync(dir, { withFileTypes: true });
       },
-      stat(path: string): { mtimeMs: number } {
+      stat(path: string) {
         statCalls.push(toRelative(path));
         return statSync(path);
       },
@@ -508,5 +508,56 @@ describe('VaultScanner: bodyStartLine', () => {
     // `quebrada.md` não passa pelo gray-matter e sim pelo caminho de recuperação de `parseFile`;
     // o deslocamento tem de sair certo nos dois.
     expect(scanner.getNote('quebrada.md')!.bodyStartLine).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * O guard de escrita (`classifyStat` em `src/write/paths.ts`) já reprova `nlink > 1`. A leitura
+ * precisa da MESMA regra: um hard link é um arquivo regular para `Dirent.isFile()`, então sem
+ * isso `fs.link(<segredo fora do vault>, <vault>/x.md)` faz o segredo virar nota indexada e
+ * `vault_get_note` devolve bytes que vivem fora da raiz.
+ */
+describe('VaultScanner: hard link', () => {
+  let outside: string;
+
+  beforeEach(() => {
+    outside = mkdtempSync(join(tmpdir(), 'vault-scanner-fora-'));
+  });
+
+  afterEach(() => {
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('não indexa hard link para arquivo de fora do vault, e reporta o motivo', () => {
+    const secret = join(outside, 'segredo.pem');
+    writeFileSync(secret, '-----BEGIN PRIVATE KEY-----\nnão pertence ao vault\n');
+    linkSync(secret, join(root, '02-wiki', 'vazamento.md'));
+
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/vazamento.md')).toBeUndefined();
+    expect(paths(scanner)).toEqual(ALL_PATHS);
+    expect(scanner.diagnostics.find((d) => d.path === '02-wiki/vazamento.md')?.message).toMatch(
+      /hard link/i,
+    );
+  });
+
+  /**
+   * Decisão deliberada: a regra é sobre `nlink`, não sobre onde o outro nome está — não existe
+   * como perguntar a um hard link onde vive sua contraparte sem varrer o filesystem inteiro. Um
+   * vault restaurado com `cp -al` fica portanto fora do índice, mas de forma RUIDOSA: um
+   * diagnostic por nota, nomeando a causa. Silenciar seria pior que recusar.
+   */
+  it('recusa também um hard link cujos dois nomes estão dentro do vault', () => {
+    linkSync(join(root, '02-wiki', 'nestjs', 'auth-guard.md'), join(root, '02-wiki', 'copia.md'));
+
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/copia.md')).toBeUndefined();
+    // O original compartilha o mesmo inode, então cai pela mesma regra.
+    expect(scanner.getNote('02-wiki/nestjs/auth-guard.md')).toBeUndefined();
+    expect(scanner.diagnostics.map((d) => d.path)).toContain('02-wiki/copia.md');
   });
 });

@@ -80,8 +80,10 @@ class MemoryFs implements FsOps {
     return out;
   }
 
-  stat(path: string): { mtimeMs: number } {
-    return { mtimeMs: this.file(path).mtimeMs };
+  stat(path: string) {
+    // `nlink: 1` and a real `isFile`: the scanner runs the write guard's `classifyStat` over
+    // this same object, so a fake that omits them is a fake of a node the scanner refuses.
+    return { mtimeMs: this.file(path).mtimeMs, nlink: 1, isFile: () => true };
   }
 
   readFile(path: string): string {

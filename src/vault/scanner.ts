@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { Diagnostic, Note } from '../types.js';
+import { classifyStat, type StatLike } from '../write/paths.js';
 import { parseFile } from './frontmatter.js';
 import { extractLinkTargets, resolveLinks } from './links.js';
 
@@ -23,7 +24,11 @@ export interface DirEntry {
  */
 export interface FsOps {
   readdir(dir: string): DirEntry[];
-  stat(path: string): { mtimeMs: number };
+  /**
+   * `nlink` and `isFile()` beyond the mtime: the same `Stats` that answers "is this stale"
+   * answers "is this a note", so the two can never describe different nodes.
+   */
+  stat(path: string): StatLike & { mtimeMs: number };
   readFile(path: string): string;
 }
 
@@ -109,15 +114,34 @@ export class VaultScanner {
     for (const path of found) {
       const absolute = this.absolute(path);
 
-      let mtimeMs: number;
+      let stat: StatLike & { mtimeMs: number };
       try {
-        mtimeMs = this.fs.stat(absolute).mtimeMs;
+        stat = this.fs.stat(absolute);
       } catch (err) {
         // The file was listed a moment ago and is unreachable now — deleted mid-walk, or a
         // permission change. Treating it as absent lets the removal path clean up after it.
         walkDiagnostics.push({ path, message: `não foi possível ler metadados: ${message(err)}` });
         continue;
       }
+
+      // The same rule the write guard applies, from the same function. `Dirent.isFile()` is
+      // true for a hard link, so without this a link into the vault publishes bytes that live
+      // outside it — indexed, searchable, and returned in full by `vault_get_note`.
+      //
+      // Deliberately about `nlink` and not about where the other name lives: a hard link cannot
+      // be asked where its counterpart is without walking the whole filesystem. A vault restored
+      // with `cp -al` therefore drops out of the index — loudly, one diagnostic per note.
+      if (classifyStat(stat) === 'foreign') {
+        walkDiagnostics.push({
+          path,
+          message:
+            'ignorado: é um hard link (nlink > 1), e o conteúdo pode viver fora do vault. ' +
+            'Substitua por uma cópia real (`cp --reflink=never`) para indexar.',
+        });
+        continue;
+      }
+
+      const mtimeMs = stat.mtimeMs;
 
       if (this.notes.has(path) && this.mtimes.get(path) === mtimeMs) {
         seen.add(path);

@@ -295,8 +295,19 @@ export type NodeKind = 'missing' | 'file' | 'foreign';
  * Split out so that `learn.ts`, which needs the same `Stats` for the file's SIZE, applies the
  * identical rule without a second `lstat` — and therefore without a window in which the answer
  * to "is this a note" and the answer to "how big is it" describe different nodes.
+ *
+ * The parameter is `StatLike` and not `Stats` for one caller only: `vault/scanner.ts` runs the
+ * same rule on the READ path, through its injectable `FsOps`. A real `Stats` satisfies it. The
+ * read path matters as much as the write one — a hard link IS a regular file, so `isFile()`
+ * alone lets `fs.link(<file outside the vault>, <vault>/x.md)` publish foreign bytes into the
+ * index, which is the exact thing this guard exists to prevent.
  */
-export function classifyStat(stat: Stats): 'file' | 'foreign' {
+export interface StatLike {
+  isFile(): boolean;
+  readonly nlink: number;
+}
+
+export function classifyStat(stat: StatLike): 'file' | 'foreign' {
   if (!stat.isFile()) return 'foreign';
   if (stat.nlink > 1) return 'foreign';
   return 'file';
