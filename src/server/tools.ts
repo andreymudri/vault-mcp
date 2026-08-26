@@ -718,6 +718,9 @@ function renderWrite(
   const lines = [
     `${verb}: ${forMessage(result.path)}`,
     `Commit: ${result.committed ? 'sim' : 'não'}`,
+    // Only when a push was ATTEMPTED. With `VAULT_AUTO_PUSH` unset the server touches no network at
+    // all, and a `Push: não` line there would report on something nobody asked for.
+    ...(result.pushed === undefined ? [] : [`Push: ${result.pushed ? 'sim' : 'não'}`]),
   ];
   for (const warning of [result.warning, queueWarning]) {
     if (warning !== undefined) lines.push(`Aviso: ${forMessage(redact(warning))}`);
@@ -1401,6 +1404,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           result.propagated.length === 0 ? '(nada)' : forMessage(result.propagated.join(', '))
         }`,
         `Commit: ${result.committed ? 'sim' : 'não'}`,
+        // Same rule as `renderWrite`: the line exists only when a push was attempted.
+        ...(result.pushed === undefined ? [] : [`Push: ${result.pushed ? 'sim' : 'não'}`]),
       ];
       for (const aviso of [result.warning, queueWarning]) {
         if (aviso !== undefined) lines.push(`Aviso: ${forMessage(redact(aviso))}`);

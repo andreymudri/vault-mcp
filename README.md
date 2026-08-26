@@ -31,7 +31,8 @@ Adicione o MCP com:
 
 ```bash
 claude mcp add vault --scope user \
-  -e "VAULT_PATH=/caminho/absoluto/do/vault" -- \
+  -e "VAULT_PATH=/caminho/absoluto/do/vault" \
+  -e "VAULT_AUTO_PUSH=1" -- \
   node /caminho/absoluto/do/vault-mcp/dist/server/index.js
 ```
 
@@ -43,6 +44,27 @@ expansão de variável em JSON, então um caminho relativo aqui vira um servidor
 ponto: o vault responde sobre decisões e patterns enquanto você trabalha em outro repositório. Sem a
 flag o padrão é `local` (só o diretório atual). Confira com `claude mcp get vault`; para remover,
 `claude mcp remove vault -s user`.
+
+### `VAULT_AUTO_PUSH`
+
+Toda escrita (`vault_write_note`, `vault_edit_note`, `vault_learn`) já commita no git do vault.
+`VAULT_AUTO_PUSH=1` acrescenta um `git push` depois do commit — sem isso o commit fica só na máquina,
+e um vault com remote guardado em mais de um lugar diverge em silêncio.
+
+**Desligado por padrão**, porque é a única coisa que este servidor faz que sai da máquina. Quando
+ligado:
+
+- `git push` sem refspec, seguindo o upstream do branch: um repositório que não foi configurado diz
+  isso em vez de ter remote e branch adivinhados
+- **falha sempre como aviso, nunca como rollback.** A nota já está em disco e commitada; desfazer
+  isso porque a rede caiu seria o pior negócio disponível. A resposta da tool ganha uma linha
+  `Push: sim|não`, que só aparece quando um push foi de fato TENTADO
+- **um remote que andou na frente não é resolvido sozinho.** Pull, rebase e merge reescrevem a base
+  de conhecimento do usuário, e isso é decisão dele — não efeito colateral de gravar uma nota. O
+  aviso nomeia a situação e para
+- limitado a 30 s, com `GIT_TERMINAL_PROMPT=0`: um servidor stdio não tem terminal para responder um
+  prompt de credencial, então um prompt seria um travamento. As credenciais precisam vir de um
+  helper (por exemplo `gh auth git-credential`) ou de uma chave SSH
 
 ## As Sete Tools
 

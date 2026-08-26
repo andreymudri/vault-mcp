@@ -5,7 +5,41 @@ const execFileAsync = promisify(execFile);
 
 export interface CommitResult {
   committed: boolean;
+  /**
+   * Whether the commit reached the remote. `undefined` when no push was attempted — either it was
+   * not asked for, or there was no commit to push — which is deliberately distinct from `false`,
+   * "it was attempted and did not get there".
+   */
+  pushed?: boolean;
   warning?: string;
+}
+
+export interface CommitOptions {
+  /**
+   * Push the branch after a successful commit. Defaults to the `VAULT_AUTO_PUSH` environment
+   * variable, and therefore to OFF.
+   *
+   * Off by default because this is the only thing the server does that leaves the machine. A vault
+   * with a remote is a vault kept on more than one, though, and a commit that never leaves is not
+   * "the vault updated" — it is a copy diverging quietly, which is the failure the remote exists to
+   * prevent.
+   */
+  push?: boolean;
+}
+
+/**
+ * How long a push may take before it is killed.
+ *
+ * A push talks to the network from inside a single-threaded stdio server, so an unbounded one is a
+ * server that stops answering — the same wedge class as a blocking read. Generous enough for a slow
+ * link and a large pack, short enough that the caller gets an answer.
+ */
+const PUSH_TIMEOUT_MS = 30_000;
+
+/** `VAULT_AUTO_PUSH=1` (or `true`) turns the push on for every write. Anything else is off. */
+function autoPushEnabled(): boolean {
+  const raw = process.env.VAULT_AUTO_PUSH?.trim().toLowerCase();
+  return raw === '1' || raw === 'true';
 }
 
 /**
@@ -24,7 +58,8 @@ export interface CommitResult {
 export async function commitFiles(
   repoRoot: string,
   absPaths: string[],
-  message: string
+  message: string,
+  options: CommitOptions = {}
 ): Promise<CommitResult> {
   // With no paths, `git commit -m <msg> --` has no pathspec at all and commits
   // the entire index — including unrelated work already staged by the user.
@@ -103,7 +138,52 @@ export async function commitFiles(
     return { committed: false, warning: `falha ao commitar: ${errorMessage(err)}` };
   }
 
-  return { committed: true };
+  if (!(options.push ?? autoPushEnabled())) return { committed: true };
+  return { committed: true, ...(await pushBranch(repoRoot)) };
+}
+
+/**
+ * Pushes the current branch, reporting failure as a WARNING and never as a rollback.
+ *
+ * The commit already happened and the note is already on disk. Undoing either because the network
+ * was down, or because someone pushed first from another machine, would be the worst trade
+ * available — so every failure here comes back as text the caller shows, with git's own diagnostic
+ * inside it.
+ *
+ * `git push` with no refspec, deliberately: it follows the branch's configured upstream, so a
+ * repository that has not been told where to push says so instead of having a remote and a branch
+ * guessed for it.
+ *
+ * **A rejected push is NOT resolved automatically.** A vault whose remote moved ahead needs a pull,
+ * a rebase or a merge, and every one of those rewrites the user's knowledge base — a decision that
+ * is theirs and not a side effect of writing one note. The warning names the situation and stops.
+ */
+async function pushBranch(repoRoot: string): Promise<{ pushed: boolean; warning?: string }> {
+  try {
+    await execFileAsync('git', ['-C', repoRoot, 'push'], {
+      timeout: PUSH_TIMEOUT_MS,
+      // No credential prompt: a server started by an MCP client has no terminal to answer one on,
+      // so a prompt is a hang. Failing immediately turns that into a warning the user can read.
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    return { pushed: true };
+  } catch (err) {
+    const detail = timedOut(err)
+      ? `o push passou de ${PUSH_TIMEOUT_MS} ms e foi encerrado`
+      : errorMessage(err);
+    return {
+      pushed: false,
+      warning:
+        `commit feito, mas o push falhou: ${detail}. A nota está salva e commitada localmente; ` +
+        'nada foi desfeito e nenhum rebase foi tentado. Se o remote andou na frente, ' +
+        'resolva com um pull no vault antes do próximo push.',
+    };
+  }
+}
+
+/** True when the rejection is `execFile`'s own timeout kill, rather than git's exit status. */
+function timedOut(err: unknown): boolean {
+  return err instanceof Error && (err as Error & { killed?: boolean }).killed === true;
 }
 
 /**

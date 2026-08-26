@@ -1262,6 +1262,56 @@ describe('vault_write_note e vault_edit_note', () => {
     );
   });
 
+  /**
+   * O vault do usuário tem remote, e um commit que nunca sai da máquina não é o vault atualizado. A
+   * linha `Push:` só aparece quando um push foi TENTADO: sem `VAULT_AUTO_PUSH` o servidor não fala
+   * de rede nenhuma, e anunciar um push que não houve seria pior que não anunciar nada.
+   */
+  it('relata o push quando ele acontece, e cala quando não é pedido', async () => {
+    const vaultRoot = await makeVault(true);
+    const origin = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-origin-tools-'));
+    try {
+      await git(origin, ['init', '--bare', '--initial-branch=main', '.']);
+      await git(vaultRoot, ['branch', '-M', 'main']);
+      await git(vaultRoot, ['remote', 'add', 'origin', origin]);
+      await git(vaultRoot, ['push', '--set-upstream', 'origin', 'main']);
+
+      const semPush = await makeTools(vaultRoot).text('vault_write_note', {
+        path: '02-wiki/docker/sem-push.md',
+        content: '# Sem push\n',
+      });
+      expect(semPush).toContain('Commit: sim');
+      expect(semPush).not.toContain('Push:');
+      // Conferido AQUI, e não no fim: o push é de COMMITS, não de arquivos, então o push seguinte
+      // leva junto este commit também. O que se afirma é que sem `VAULT_AUTO_PUSH` nada saiu ainda.
+      expect(await git(origin, ['ls-tree', '-r', '--name-only', 'main'])).not.toContain(
+        '02-wiki/docker/sem-push.md',
+      );
+
+      const antes = process.env.VAULT_AUTO_PUSH;
+      process.env.VAULT_AUTO_PUSH = '1';
+      try {
+        const comPush = await makeTools(vaultRoot).text('vault_write_note', {
+          path: '02-wiki/docker/com-push.md',
+          content: '# Com push\n',
+        });
+        expect(comPush).toContain('Commit: sim');
+        expect(comPush).toContain('Push: sim');
+      } finally {
+        if (antes === undefined) delete process.env.VAULT_AUTO_PUSH;
+        else process.env.VAULT_AUTO_PUSH = antes;
+      }
+
+      // O que a linha `Push: sim` afirma é verdade: a nota está no remote de fato.
+      const noRemote = await git(origin, ['ls-tree', '-r', '--name-only', 'main']);
+      expect(noRemote).toContain('02-wiki/docker/com-push.md');
+      // E o commit que estava só local foi junto, que é como o git funciona.
+      expect(noRemote).toContain('02-wiki/docker/sem-push.md');
+    } finally {
+      await fs.rm(origin, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 30_000);
+
   it('recusa tags que não dá para coagir, sem gravar nada', async () => {
     const vaultRoot = await makeVault(true);
     const { call } = makeTools(vaultRoot);

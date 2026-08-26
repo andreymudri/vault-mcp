@@ -267,6 +267,8 @@ export interface LearnResult {
   /** Vault-relative paths of the propagation targets actually written. */
   propagated: string[];
   committed: boolean;
+  /** Whether the commit reached the remote, or `undefined` when no push was attempted. */
+  pushed?: boolean;
   warning?: string;
 }
 
@@ -968,6 +970,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     diff,
     propagated: prop.written.map((absPath) => toVaultRelative(opts.vaultRoot, absPath)),
     committed: commit.committed,
+    ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
   };
   return warning === undefined ? result : { ...result, warning };
 }

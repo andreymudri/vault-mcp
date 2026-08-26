@@ -494,3 +494,133 @@ describe('commitFiles', () => {
     expect(status).toBe('M  targetX.md');
   });
 });
+
+/**
+ * O vault do usuário é um repositório com remote: um commit local que nunca sai da máquina não é o
+ * vault "atualizado", é uma cópia divergindo em silêncio. O push é opt-in (`VAULT_AUTO_PUSH`) porque
+ * é a única coisa que este servidor faz que sai da máquina, e falha SEMPRE como aviso — a nota já
+ * está em disco e commitada, e desfazer isso porque a rede caiu seria o pior negócio possível.
+ */
+describe('commitFiles — push', () => {
+  let origin: string;
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    origin = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-origin-'));
+    await execFileAsync('git', ['init', '--bare', '--initial-branch=main', origin]);
+
+    repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-push-'));
+    await initScratchRepo(repoRoot);
+    // Nome do branch fixado nos dois lados: `init.defaultBranch` é config do usuário, e um teste
+    // que empurra `master` para um bare chamado `main` falha por causa da máquina, não do código.
+    await git(repoRoot, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+    await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+    await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+    await git(repoRoot, ['remote', 'add', 'origin', origin]);
+    await fs.writeFile(path.join(repoRoot, 'semente.md'), '# Semente\n', 'utf8');
+    await git(repoRoot, ['add', '--all']);
+    await git(repoRoot, ['commit', '-m', 'chore: semente']);
+    await git(repoRoot, ['push', '--set-upstream', 'origin', 'HEAD']);
+  });
+
+  afterEach(async () => {
+    await removeTree(repoRoot);
+    await removeTree(origin);
+  });
+
+  /** A mensagem do commit no topo do remote — a única prova de que o push aconteceu. */
+  async function remoteHead(): Promise<string> {
+    return git(origin, ['log', '--format=%s', '-1', 'main']);
+  }
+
+  it('leva o commit para o remote quando o push está ligado', async () => {
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota', { push: true });
+
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(true);
+    expect(result.warning).toBeUndefined();
+    expect(await remoteHead()).toBe('feat: adicionar nota');
+  });
+
+  it('não empurra nada quando o push não é pedido', async () => {
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota');
+
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBeUndefined();
+    // O commit é local, e o remote continua onde estava.
+    expect(await remoteHead()).toBe('chore: semente');
+  });
+
+  it('um push que falha vira AVISO, com o commit intacto', async () => {
+    await git(repoRoot, ['remote', 'set-url', 'origin', path.join(origin, 'nao-existe')]);
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota', { push: true });
+
+    // O que importa: o commit CONTINUA valendo. Um push que falhou não desfaz nada.
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(false);
+    expect(result.warning).toContain('push');
+    expect(await git(repoRoot, ['log', '--format=%s', '-1'])).toBe('feat: adicionar nota');
+  });
+
+  it('um remote que andou na frente falha como aviso, sem rebase automático', async () => {
+    // Outra máquina (o plugin do Obsidian, outro clone) commitou e empurrou primeiro.
+    const outro = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-outro-'));
+    try {
+      await execFileAsync('git', ['clone', origin, outro]);
+      await git(outro, ['config', 'user.name', 'Outra Maquina']);
+      await git(outro, ['config', 'user.email', 'outra@example.com']);
+      await fs.writeFile(path.join(outro, 'de-fora.md'), '# De fora\n', 'utf8');
+      await git(outro, ['add', '--all']);
+      await git(outro, ['commit', '-m', 'docs(vault): de outra maquina']);
+      await git(outro, ['push', 'origin', 'HEAD:main']);
+
+      const absPath = path.join(repoRoot, 'nota.md');
+      await fs.writeFile(absPath, '# Nota\n', 'utf8');
+      const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota', { push: true });
+
+      expect(result.committed).toBe(true);
+      expect(result.pushed).toBe(false);
+      expect(result.warning).toContain('push');
+      // NADA de rebase automático: o trabalho da outra máquina continua sendo o topo do remote.
+      expect(await remoteHead()).toBe('docs(vault): de outra maquina');
+    } finally {
+      await removeTree(outro);
+    }
+  });
+
+  it('não tenta empurrar quando não houve commit', async () => {
+    const absPath = path.join(repoRoot, 'semente.md');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: nada mudou', { push: true });
+
+    expect(result.committed).toBe(false);
+    expect(result.pushed).toBeUndefined();
+    expect(await remoteHead()).toBe('chore: semente');
+  });
+
+  it('VAULT_AUTO_PUSH=1 liga o push sem o chamador pedir', async () => {
+    const antes = process.env.VAULT_AUTO_PUSH;
+    process.env.VAULT_AUTO_PUSH = '1';
+    try {
+      const absPath = path.join(repoRoot, 'nota.md');
+      await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+      const result = await commitFiles(repoRoot, [absPath], 'feat: adicionar nota');
+
+      expect(result.pushed).toBe(true);
+      expect(await remoteHead()).toBe('feat: adicionar nota');
+    } finally {
+      if (antes === undefined) delete process.env.VAULT_AUTO_PUSH;
+      else process.env.VAULT_AUTO_PUSH = antes;
+    }
+  });
+});

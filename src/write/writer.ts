@@ -45,6 +45,12 @@ export interface WriteResult {
   absPath: string;
   created: boolean;
   committed: boolean;
+  /**
+   * Whether the commit reached the remote, or `undefined` when no push was attempted. Carried
+   * through unchanged from `commitFiles`: "not asked for" and "asked for and failed" are different
+   * answers, and only the caller can render them differently.
+   */
+  pushed?: boolean;
   warning?: string;
   diff: string;
 }
@@ -301,9 +307,8 @@ async function writeAndCommit(
 
   const commit = await commitFiles(opts.vaultRoot, [opts.absPath], opts.message);
   const warning = joinWarnings([extraWarning, diffWarning, commit.warning]);
-  return warning === undefined
-    ? { ...base, committed: commit.committed }
-    : { ...base, committed: commit.committed, warning };
+  const committed = { ...base, committed: commit.committed, ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }) };
+  return warning === undefined ? committed : { ...committed, warning };
 }
 
 /**
