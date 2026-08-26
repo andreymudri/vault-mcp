@@ -1,3 +1,7 @@
+> **Documento histórico.** Este é o plano de implementação ORIGINAL do vault-mcp, executado e
+> encerrado — as caixas `- [ ]` são o texto do plano como foi escrito, não trabalho pendente. O
+> estado real do projeto está em [`docs/followups.md`](../followups.md).
+
 # Plano de implementação — vault-mcp
 
 Spec: `docs/specs/2026-08-24-vault-mcp-rag-design.md`
@@ -887,7 +891,7 @@ vault_learn:       { titulo: string; insight: string; contexto: string; dominio:
 - [ ] **Step 2:** Documentar o registro no Claude Code com o comando exato e o bloco de configuração equivalente:
 
 ```
-claude mcp add vault --env VAULT_PATH="$HOME/Work/Knowledge Vault" -- node /home/andreymudri/Work/projetos/vault-mcp/dist/server/index.js
+claude mcp add vault --env VAULT_PATH="$HOME/Work/Knowledge Vault" -- node /caminho/absoluto/do/vault-mcp/dist/server/index.js
 ```
 
 - [ ] **Step 3:** Documentar as sete tools numa tabela com nome, entrada e quando o agente deve chamá-las, e incluir uma seção "Como o `vault_learn` decide" explicando a regra conjuntiva (razão de 1.8× sobre o segundo colocado de outra nota, mais overlap de tag ou domínio) e o viés deliberado a favor de criar nota nova.
