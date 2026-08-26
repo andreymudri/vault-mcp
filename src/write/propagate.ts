@@ -146,7 +146,7 @@ function fenceOn(line: string): { marker: string; length: number; info: string }
  * carries no info string. A backtick fence whose info string contains a backtick is not a
  * fence at all, which is CommonMark's rule and keeps an inline `` `a` `` from opening one.
  */
-function fencedLines(lines: string[]): boolean[] {
+export function fencedLines(lines: string[]): boolean[] {
   const inFence: boolean[] = new Array<boolean>(lines.length).fill(false);
   let open: OpenFence | undefined;
   for (let i = 0; i < lines.length; i += 1) {
@@ -339,6 +339,116 @@ export function insertUnderSection(content: string, heading: string, line: strin
   if (at < out.length && (out[at] ?? '').trim() !== '') toInsert.push(eolSuffix);
   out.splice(at, 0, ...toInsert);
   return join(out);
+}
+
+/** The trailing `\r` of a CRLF file, off the line a caller is handed back. */
+function withoutCR(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
+}
+
+/**
+ * Removes the first item of `heading`'s section that `matches`, and hands the line back.
+ *
+ * The counterpart of `insertUnderSection`, and it exists for the same reason that function
+ * does: moving a note between domains is taking a line out of one MOC and putting it into
+ * another, and only the putting-in half had been written. The taking-out half done anywhere
+ * else would be this project's FOURTH fence parser — and a parser that disagreed with the
+ * three would delete the wrong line in exactly the MOCs that document the entry format
+ * inside a ```md block, which is the defect `insertUnderSection` already paid for once.
+ *
+ * It returns the REMOVED LINE and not merely the new content, because the caller moving a
+ * note needs the `— resumo` that was in it to write the entry in the destination MOC.
+ * Finding the line and removing it is one scan; splitting that into two functions would be
+ * scanning twice and inviting the two to disagree about which line they found.
+ *
+ * The rules mirror the insert side exactly, which is what makes the pair invertible:
+ *
+ * - The section is located by an EXACT heading line outside a fence, and ends at the next
+ *   heading or at the end of the file. Only lines INSIDE it are candidates — a predicate
+ *   that would match the `[[../../00-index/index-knowledge]]` under `## Relacionados` must
+ *   not reach it from `## Notas`.
+ * - Only a LIST ITEM outside a fence can match, and the FIRST one wins.
+ * - The item's indented continuation lines — and an indented fenced block belonging to it —
+ *   come out with it. Leaving them behind would re-parent them to the previous entry.
+ * - Nothing matched, or no such section: the content comes back BYTE-IDENTICAL and
+ *   `removed` is `undefined`, so the caller can skip the write the way `propagate` does.
+ *
+ * What it deliberately does NOT do is put a `_Ainda sem notas._` placeholder back when the
+ * last item leaves. `insertUnderSection` removes one because the insertion makes the
+ * sentence false; the reverse is not symmetric — an empty section is not a section that
+ * claims anything — and writing prose into the user's MOC on their behalf is a bigger step
+ * than deleting a sentence that just became a lie.
+ */
+export function removeFromSection(
+  content: string,
+  heading: string,
+  matches: (line: string) => boolean,
+): { content: string; removed?: string } {
+  const hadTrailingNewline = content.endsWith('\n');
+  const lines = content.split('\n');
+  if (hadTrailingNewline) lines.pop();
+
+  const inFence = fencedLines(lines);
+
+  let headingIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (inFence[i] === true) continue;
+    if (sameLine(lines[i] ?? '', heading)) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx === -1) return { content };
+
+  let sectionEnd = lines.length;
+  for (let i = headingIdx + 1; i < lines.length; i += 1) {
+    if (inFence[i] === true) continue;
+    if (HEADING_RE.test(lines[i] ?? '')) {
+      sectionEnd = i;
+      break;
+    }
+  }
+
+  let hit = -1;
+  for (let i = headingIdx + 1; i < sectionEnd; i += 1) {
+    if (inFence[i] === true) continue;
+    const raw = lines[i] ?? '';
+    if (!ITEM_RE.test(raw)) continue;
+    if (matches(withoutCR(raw))) {
+      hit = i;
+      break;
+    }
+  }
+  if (hit === -1) return { content };
+
+  // The item's own tail: indented continuations, and an indented fenced block under it.
+  // The scan stops at the next item, at a blank line and at unindented prose — the same
+  // bounds `insertUnderSection` uses to decide where the last item ENDS.
+  let end = hit;
+  for (let i = hit + 1; i < sectionEnd; i += 1) {
+    const raw = lines[i] ?? '';
+    if (inFence[i] === true) {
+      if (/^\s+\S/.test(raw)) {
+        end = i;
+        continue;
+      }
+      break;
+    }
+    if (ITEM_RE.test(raw)) break;
+    if (raw.trim() === '') break;
+    if (/^\s+\S/.test(raw)) {
+      end = i;
+      continue;
+    }
+    break;
+  }
+
+  const out = [...lines];
+  out.splice(hit, end - hit + 1);
+  return {
+    content: out.join('\n') + (hadTrailingNewline ? '\n' : ''),
+    removed: withoutCR(lines[hit] ?? ''),
+  };
 }
 
 /** The domain with its initial letter capitalised, for the MOC title. */

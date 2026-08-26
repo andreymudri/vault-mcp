@@ -14,7 +14,9 @@ import {
   insertUnderSection,
   buildMoc,
   buildDaily,
+  fencedLines,
   propagate,
+  removeFromSection,
 } from '../src/write/propagate.js';
 import { formatLocal } from '../src/write/template.js';
 
@@ -1539,5 +1541,172 @@ describe('propagate', () => {
     expect(moc.startsWith('---\ntipo: moc\n')).toBe(true);
     expect(moc).toContain(`atualizado: ${NOW_DATE}`);
     expect(moc).toContain('- [[nova-nota]] — resumo qualquer');
+  });
+});
+
+/**
+ * A contraparte que faltava de `insertUnderSection`, e por que ela precisa existir AQUI.
+ *
+ * Mover uma nota entre domínios é tirar a linha de um MOC e pôr no outro, e a metade que
+ * TIRA é a que não existia. Escrita fora deste módulo, ela seria o quarto parser de cerca
+ * do projeto — e um que discordasse dos outros três apagaria a linha errada exatamente nos
+ * MOCs que documentam o formato de entrada dentro de um bloco ```md, que é a forma do
+ * defeito que `insertUnderSection` já pagou uma vez.
+ *
+ * Ela devolve a linha removida, e não só o conteúdo novo, porque quem move precisa do
+ * `— resumo` que estava lá para reescrevê-lo no MOC de destino. Achar a linha e removê-la
+ * são a mesma varredura; separá-las em duas funções seria varrer duas vezes e admitir que
+ * as duas discordem.
+ */
+describe('removeFromSection', () => {
+  const moc = [
+    '---',
+    'tipo: moc',
+    '---',
+    '',
+    '# Nestjs — Mapa de Conteúdo',
+    '',
+    '## Notas',
+    '',
+    '- [[auth-guard]] — guard de JWT que roda antes do interceptor',
+    '- [[bullmq-worker]] — worker com concorrência 5',
+    '',
+    '## Relacionados',
+    '',
+    '- [[../../00-index/index-knowledge|índice de conhecimento]]',
+    '',
+  ].join('\n');
+
+  const linkTo = (slug: string) => (line: string) => line.includes(`[[${slug}]]`);
+
+  it('remove a linha e devolve ela inteira, com o resumo', () => {
+    const { content, removed } = removeFromSection(moc, '## Notas', linkTo('auth-guard'));
+    expect(removed).toBe('- [[auth-guard]] — guard de JWT que roda antes do interceptor');
+    expect(content).not.toContain('auth-guard');
+    // A outra entrada e as duas headings ficam exatamente onde estavam.
+    expect(content).toContain('- [[bullmq-worker]] — worker com concorrência 5');
+    expect(content).toContain('## Notas');
+    expect(content).toContain('## Relacionados');
+  });
+
+  it('não muda um byte quando nada casa', () => {
+    const { content, removed } = removeFromSection(moc, '## Notas', linkTo('inexistente'));
+    expect(removed).toBeUndefined();
+    expect(content).toBe(moc);
+  });
+
+  it('não muda um byte quando a seção não existe', () => {
+    const { content, removed } = removeFromSection(moc, '## Capturas', () => true);
+    expect(removed).toBeUndefined();
+    expect(content).toBe(moc);
+  });
+
+  it('só olha DENTRO da seção pedida', () => {
+    // `## Relacionados` tem uma entrada, e um predicado que casaria com ela não pode
+    // alcançá-la a partir de `## Notas`. Uma busca no arquivo inteiro apagaria o link para
+    // o índice de conhecimento de todo MOC que passasse por aqui.
+    const { content, removed } = removeFromSection(moc, '## Notas', (line) =>
+      line.includes('index-knowledge'),
+    );
+    expect(removed).toBeUndefined();
+    expect(content).toBe(moc);
+  });
+
+  it('ignora uma linha idêntica dentro de cerca de código', () => {
+    const comExemplo = [
+      '## Notas',
+      '',
+      '```md',
+      '- [[auth-guard]] — exemplo do formato',
+      '```',
+      '',
+      '- [[bullmq-worker]] — worker com concorrência 5',
+      '',
+    ].join('\n');
+    const { content, removed } = removeFromSection(comExemplo, '## Notas', linkTo('auth-guard'));
+    expect(removed).toBeUndefined();
+    expect(content).toBe(comExemplo);
+  });
+
+  it('ignora uma HEADING dentro de cerca de código ao delimitar a seção', () => {
+    const comHeadingCercada = [
+      '## Notas',
+      '',
+      '````md',
+      '## Notas',
+      '- [[falso]] — dentro do exemplo',
+      '````',
+      '',
+      '- [[auth-guard]] — a real',
+      '',
+    ].join('\n');
+    const { content, removed } = removeFromSection(
+      comHeadingCercada,
+      '## Notas',
+      linkTo('auth-guard'),
+    );
+    expect(removed).toBe('- [[auth-guard]] — a real');
+    expect(content).toContain('- [[falso]] — dentro do exemplo');
+  });
+
+  it('leva junto as linhas de continuação indentadas do item', () => {
+    const comContinuacao = [
+      '## Notas',
+      '',
+      '- [[auth-guard]] — guard de JWT',
+      '  contexto extra da entrada',
+      '- [[bullmq-worker]] — worker',
+      '',
+    ].join('\n');
+    const { content } = removeFromSection(comContinuacao, '## Notas', linkTo('auth-guard'));
+    expect(content).not.toContain('contexto extra da entrada');
+    expect(content).toContain('- [[bullmq-worker]] — worker');
+  });
+
+  it('remove o único item sem levar a heading nem a seção seguinte', () => {
+    const umItem = ['## Notas', '', '- [[auth-guard]] — só ela', '', '## Relacionados', ''].join(
+      '\n',
+    );
+    const { content, removed } = removeFromSection(umItem, '## Notas', linkTo('auth-guard'));
+    expect(removed).toBe('- [[auth-guard]] — só ela');
+    expect(content).toBe(['## Notas', '', '', '## Relacionados', ''].join('\n'));
+  });
+
+  it('preserva o CRLF do arquivo', () => {
+    const crlf = ['## Notas', '', '- [[a]] — um', '- [[b]] — dois', ''].join('\r\n');
+    const { content } = removeFromSection(crlf, '## Notas', linkTo('a'));
+    expect(content).toBe(['## Notas', '', '- [[b]] — dois', ''].join('\r\n'));
+  });
+
+  it('preserva a ausência de newline no fim do arquivo', () => {
+    const semNewline = ['## Notas', '', '- [[a]] — um', '- [[b]] — dois'].join('\n');
+    const { content } = removeFromSection(semNewline, '## Notas', linkTo('a'));
+    expect(content).toBe(['## Notas', '', '- [[b]] — dois'].join('\n'));
+    expect(content.endsWith('\n')).toBe(false);
+  });
+
+  it('é a inversa de insertUnderSection para a linha que ela mesma inseriu', () => {
+    // A propriedade que importa: o que uma põe, a outra tira, e o arquivo volta ao que era.
+    const linha = '- [[nova-nota]] — resumo qualquer';
+    const depois = insertUnderSection(moc, '## Notas', linha);
+    expect(depois).not.toBe(moc);
+    const { content, removed } = removeFromSection(depois, '## Notas', linkTo('nova-nota'));
+    expect(removed).toBe(linha);
+    expect(content).toBe(moc);
+  });
+});
+
+describe('fencedLines exportada', () => {
+  it('marca o delimitador e o interior, e nada fora', () => {
+    // Exportada para `write/rewrite-links.ts`, que precisa da MESMA máscara para não
+    // reescrever um `[[link]]` que é exemplo de código. Um quarto parser de cerca no
+    // projeto é o item 5 dos follow-ups acontecendo de novo.
+    const mask = fencedLines(['antes', '```md', '- [[a]]', '```', 'depois']);
+    expect(mask).toEqual([false, true, true, true, false]);
+  });
+
+  it('não deixa a cerca interna de um bloco ````md fechar o externo', () => {
+    const mask = fencedLines(['````md', '```ts', 'código', '```', '````', 'fora']);
+    expect(mask).toEqual([true, true, true, true, true, false]);
   });
 });
