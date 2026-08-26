@@ -51,3 +51,29 @@ jobs:
       # Depois dos testes: o `dist/` é o que o servidor MCP registrado realmente executa, então um
       # build quebrado é um servidor quebrado mesmo com a suíte verde.
       - run: npm run build
+
+      # E um build que compila ainda pode não SERVIR: o entrypoint que se acha biblioteca sai 0 sem
+      # imprimir nada. O smoke sobe o `dist/` de verdade contra um vault descartável e exige as nove
+      # tools no `tools/list`.
+      - run: npm run smoke
+
+  # O job que torna `engines.node >= 20` uma afirmação verificada em vez de uma promessa.
+  #
+  # A suíte não pode rodar aqui — `test/frontmatter.test.ts` depende do type stripping do runtime —
+  # mas o que a gente PUBLICA é `dist/`, JavaScript compilado, e isso roda. Se o piso subir um dia,
+  # é este job que falha primeiro, e a `engines` desce junto.
+  compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run smoke

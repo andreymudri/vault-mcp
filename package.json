@@ -25,6 +25,7 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "pretest": "npm run typecheck",
     "test": "node scripts/test.mjs",
+    "smoke": "node scripts/smoke.mjs",
     "dev": "tsc --watch"
   },
   "dependencies": {
