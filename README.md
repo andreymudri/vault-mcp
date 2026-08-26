@@ -143,10 +143,15 @@ a correção aplicada e o teste que a fixa, mais o que continua **aceito deliber
 Depois de uma mudança no código:
 
 ```bash
-npm run build    # Compila TypeScript
-npm test         # Roda testes vitest
-npm run dev      # Watch mode (se necessário)
+npm run build     # Compila TypeScript (só src/, emite dist/)
+npm run typecheck # tsc sobre src/ E test/, sem emitir
+npm test          # Roda o typecheck (pretest) e depois os testes vitest
+npm run dev       # Watch mode (se necessário)
 ```
+
+O `tsconfig.json` de build cobre só `src/` — quem emite não compila teste. `tsconfig.test.json`
+cobre os dois com `noEmit`, e o `pretest` do npm o roda antes da suíte: um fake de teste que deixa de
+satisfazer a interface que declara `implements` falha no typecheck, e não em execução.
 
 A suíte completa leva ~10 segundos. Alguns testes usam FIFO para simular operações de longa
 duração; todos eles abrem a ponta de escrita por conta própria (`withFifoWatch`), então falham em

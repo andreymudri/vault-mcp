@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "pretest": "npm run typecheck",
     "test": "node scripts/test.mjs",
     "dev": "tsc --watch"
   },

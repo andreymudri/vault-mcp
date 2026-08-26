@@ -129,6 +129,8 @@ describe('LinkGraph.build', () => {
       body: '',
       links: ['02-wiki/docker/multi-stage.md'],
       brokenLinks: [],
+      // O corpo é vazio: a primeira linha dele é a primeira linha do arquivo.
+      bodyStartLine: 1,
       mtimeMs: 0,
     };
 

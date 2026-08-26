@@ -467,19 +467,26 @@ describe('ensureFrontmatter — `---` no início do CORPO', () => {
   });
 });
 
+/**
+ * `clearCache()` e `cache` são API pública do gray-matter em execução e NÃO estão no `@types` dele,
+ * então o acesso é declarado aqui em vez de silenciado com `any`: o que este teste observa é
+ * exatamente esse cache global, e o teste existe porque ele não pode encher.
+ */
+const matterInternals = matter as unknown as { clearCache(): void; cache: Record<string, unknown> };
+
 describe('ensureFrontmatter — parsing sem o cache global do gray-matter', () => {
   it('parseia o mesmo bloco malformado duas vezes sem popular matter.cache', () => {
     const required = { tipo: 'wiki', tags: ['nestjs', 'auth'], criado: '2026-08-24' };
     const malformed = '---\ntipo: "aberto\n---\n\ncorpo\n';
 
-    matter.clearCache();
+    matterInternals.clearCache();
     const first = ensureFrontmatter(malformed, required);
     const second = ensureFrontmatter(malformed, required);
 
     expect(second).toBe(first);
     // Sem o `{}`, o gray-matter guarda o conteúdo num cache global ilimitado e
     // devolve o objeto meio-parseado da chamada que lançou.
-    expect(Object.keys(matter.cache)).toHaveLength(0);
+    expect(Object.keys(matterInternals.cache)).toHaveLength(0);
   });
 });
 

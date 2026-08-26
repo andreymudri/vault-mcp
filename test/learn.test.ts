@@ -1410,7 +1410,10 @@ describe('learn - o insight nunca se perde', () => {
         insight: 'Wrapper de cache redis wrapper de cache com TTL configuravel',
         contexto: 'Revisando o wrapper de cache',
         dominio: 'patterns',
-        tags: ['redis', 'cache'],
+        // Anotado por dentro do `as const`: sem isso a tupla vira `readonly`, e `LearnOptions.tags`
+        // é `string[]`. O `as const` fica porque é ele que garante que os DOIS `learn()` abaixo
+        // recebem literalmente os mesmos valores.
+        tags: ['redis', 'cache'] as string[],
         now: NOW,
       } as const;
 

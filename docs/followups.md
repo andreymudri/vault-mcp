@@ -1,11 +1,12 @@
 # Follow-ups conhecidos
 
-**Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26). Este documento deixou
+**Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26), mais um décimo
+levantado durante a própria correção (item 10, abaixo). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.014 testes, o `tsc` está limpo e o binário responde o handshake MCP com as sete
-tools.
+A suíte passa com 1.014 testes, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+o handshake MCP com as sete tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
 pelo motivo certo, e só então a correção. Onde o defeito era uma LACUNA DE COBERTURA e não um bug de
@@ -189,10 +190,26 @@ Registrado aqui para não ser redescoberto como bug.
 
 ---
 
-## Aberto, novo
+## 10. Os testes não passavam pelo `tsc` — CORRIGIDO
 
-**`tsconfig.json` cobre só `src/`.** Os testes não passam pelo `tsc`, então um fake que não satisfaz
-mais a interface que declara `implements` só aparece quando o teste roda — foi o que aconteceu com o
-`MemoryFs` de `test/retrieval.test.ts` quando `FsOps.stat` ganhou `nlink`. A forma da correção é um
-`tsconfig` de testes (ou um `include` mais largo com `noEmit`) rodado junto do build. Não corrigido
-aqui: está fora dos nove e muda o pipeline, não o servidor.
+Levantado durante a correção dos nove: `tsconfig.json` cobre só `src/`, então um fake que deixasse de
+satisfazer a interface que declara `implements` só aparecia quando o teste rodasse — e podia não
+aparecer nunca, se nenhum caso exercitasse a parte que ficou de fora. Foi exatamente o que aconteceu
+com o `MemoryFs` de `test/retrieval.test.ts` quando `FsOps.stat` ganhou `nlink`: 14 testes quebraram
+em execução com um `TypeError`, e o `tsc` estava limpo.
+
+**Correção:** `tsconfig.test.json` estende o base com `noEmit` e inclui `src`, `test` e
+`vitest.config.ts` — o de build fica intocado, com seu `rootDir`/`outDir`/`declaration`, porque quem
+emite não pode compilar teste. `npm run typecheck` roda esse projeto, e o `pretest` do npm o roda
+antes de qualquer teste: a checagem está DENTRO do comando que o gate lê, e não ao lado dele.
+
+Verificado por mutação: com o fake estreito de volta, `npm test` para no `pretest` com
+`TS2416: Property 'stat' in type 'MemoryFs' is not assignable to the same property in base type
+'FsOps'` e sai 1, antes de rodar um teste sequer.
+
+**Cinco erros de tipo reais apareceram no primeiro `tsc` sobre `test/`,** todos corrigidos:
+um `Note` literal sem `bodyStartLine` (`graph.test.ts`), duas chamadas de `learn()` cujo `as const`
+congelava `tags` numa tupla `readonly` que `LearnOptions.tags: string[]` não aceita
+(`learn.test.ts`), e dois acessos a `matter.clearCache()`/`matter.cache` (`template.test.ts`) — API
+real do gray-matter em execução, ausente do `@types` dele, agora declarada num acessor tipado em vez
+de silenciada com `any`.
