@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,20 +13,35 @@ import { VaultScanner } from '../vault/scanner.js';
 import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
 
 /**
- * The process a user starts: `node <caminho-absoluto>/dist/server/index.js`. It wires a
- * `VaultScanner`, a `Retriever` and the nine tools of `tools.ts` onto an MCP server speaking over
- * stdio.
+ * The process a user starts: `npx @andreymudri/vault-mcp`, or `node
+ * <caminho-absoluto>/dist/server/index.js` from a clone. It wires a `VaultScanner`, a `Retriever`
+ * and the nine tools of `tools.ts` onto an MCP server speaking over stdio.
  *
- * NOT `npx vault-mcp`, which the README and this server's own `VAULT_PATH` error used to suggest
- * and no longer do: that name belongs to a different package on npm (`vault-mcp@0.0.1`, 443 bytes,
- * by another author), so the suggestion ran somebody else's code. `package.json` carries
- * `"private": true` so an accidental publish fails here rather than in the registry. The `npx`/`npm`
- * mentions further down are about how those tools install a `bin` as a SYMLINK, which is why
- * `isDirectRun` compares through `realpathSync` — that part stays true and is a different subject.
+ * The package is SCOPED for a concrete reason: the bare `vault-mcp` on npm belongs to somebody else
+ * (`vault-mcp@0.0.1`, 443 bytes, a namespace placeholder by another author), so a plain
+ * `npx vault-mcp` runs their code and not this. Under the scope there is no such collision, and the
+ * `bin` keeps the short name because `npx` resolves it inside the package.
+ *
+ * The `npx`/`npm` mentions further down are a different subject: they are about how those tools
+ * install a `bin` as a SYMLINK, which is why `isDirectRun` compares through `realpathSync`.
  *
  * The shebang on the first line is load-bearing — `package.json`'s `bin` points at the COMPILED
  * file and `tsc` copies the line through verbatim.
  */
+
+/**
+ * The version this server reports in `initialize`, read from the `package.json` that ships with it
+ * instead of written out here.
+ *
+ * Two copies of a version number are one copy plus a lie waiting to happen: the literal that used to
+ * sit in `createVaultServer` was already the published `0.1.0` by coincidence, with nothing to keep
+ * it that way through the first release. The relative path resolves to the package root from BOTH
+ * places this file runs — `src/server/` under vitest and `dist/server/` once compiled — and npm
+ * always puts `package.json` in the tarball, `files` notwithstanding.
+ */
+export const VERSION: string = (
+  createRequire(import.meta.url)('../../package.json') as { version: string }
+).version;
 
 /** The one fatal error of the system: no usable vault to serve. */
 export class VaultPathError extends Error {
@@ -46,7 +62,8 @@ export function resolveVaultPath(env: NodeJS.ProcessEnv): string {
   if (raw === undefined || raw.trim() === '') {
     throw new VaultPathError(
       'VAULT_PATH não definida: aponte-a para a pasta raiz do vault, ex.: ' +
-        'VAULT_PATH="/caminho/absoluto/do/vault" node /caminho/absoluto/do/vault-mcp/dist/server/index.js',
+        'VAULT_PATH="/caminho/absoluto/do/vault" npx @andreymudri/vault-mcp ' +
+        '(de um clone: node /caminho/absoluto/do/vault-mcp/dist/server/index.js)',
     );
   }
 
@@ -119,7 +136,7 @@ export function createVaultServer(vaultRoot: string): McpServer {
   const scanner = new VaultScanner({ vaultRoot });
   const retriever = new Retriever({ scanner });
   const server = new McpServer(
-    { name: 'vault-mcp', version: '0.1.0' },
+    { name: 'vault-mcp', version: VERSION },
     {
       capabilities: { tools: {} },
       instructions:

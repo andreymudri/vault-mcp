@@ -38,7 +38,16 @@ const EXPECTED = [
 
 const TIMEOUT_MS = Number(process.env.VAULT_MCP_SMOKE_TIMEOUT_MS ?? 30_000);
 
-const serverPath = resolve(fileURLToPath(new URL('../dist/server/index.js', import.meta.url)));
+/**
+ * O `dist/` desta árvore por padrão, ou o caminho passado como argumento.
+ *
+ * O argumento é o que permite fumaçar um pacote INSTALADO — `npm pack`, instala o tarball num
+ * prefixo descartável, aponta para o `bin` que saiu de lá — que é a única checagem que responde
+ * "o que eu publiquei sobe?" em vez de "o que eu compilei sobe?".
+ */
+const serverPath = process.argv[2]
+  ? resolve(process.argv[2])
+  : resolve(fileURLToPath(new URL('../dist/server/index.js', import.meta.url)));
 
 const vaultRoot = mkdtempSync(join(tmpdir(), 'vault-mcp-smoke-'));
 writeFileSync(join(vaultRoot, 'nota.md'), '---\ntipo: wiki\n---\n\n# Nota\n\nCorpo.\n');

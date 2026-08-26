@@ -115,13 +115,27 @@ Quatro arquivos, um commit `docs(vault): {titulo}` — desfazer o aprendizado in
 
 ## Instalação
 
+Publicado como **`@andreymudri/vault-mcp`**, então não é preciso clonar nada para rodar:
+
+```bash
+npx @andreymudri/vault-mcp        # sem instalar; o npm baixa e executa
+npm i -g @andreymudri/vault-mcp   # ou instale uma vez e chame `vault-mcp`
+```
+
+O escopo não é enfeite: o `vault-mcp` sem escopo no npm é um placeholder de namespace de 443 bytes,
+de outro autor, então `npx vault-mcp` roda o pacote DELE e não este. O comando dentro do escopo
+mantém o nome curto — `npx @andreymudri/vault-mcp` resolve o `bin` de dentro do pacote.
+
+De um clone, para desenvolver:
+
 ```bash
 npm install
 npm run build
 npm test
 ```
 
-- **Node >= 20** para RODAR o servidor (`dist/` é JavaScript comum)
+- **Node >= 20** para RODAR o servidor (`dist/` é JavaScript comum), verificado a cada push pelo job
+  `compat` do CI, que compila e sobe o servidor no 20
 - **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
   processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
   próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
@@ -130,15 +144,20 @@ npm test
 
 ## Configuração
 
-O vault é passado por variável de ambiente, e o servidor é executado via node diretamente:
+O vault é passado por variável de ambiente:
+
+```bash
+VAULT_PATH="/caminho/absoluto/do/vault" npx @andreymudri/vault-mcp
+```
+
+De um clone, a mesma coisa sem passar pelo registry:
 
 ```bash
 VAULT_PATH="/caminho/absoluto/do/vault" node /caminho/absoluto/do/vault-mcp/dist/server/index.js
 ```
 
-Substitua `/caminho/absoluto/do/vault` pela raiz do seu vault e `/caminho/absoluto/do/vault-mcp` pelo caminho ao diretório do projeto. `VAULT_PATH` é **obrigatório**. Se não for definido ou não for um diretório, o servidor sai com código 1 e escreve o motivo em stderr.
-
-**Nota:** não use `npx vault-mcp` — existe uma colisão com outro pacote no npm e o comando resolveria para o pacote errado quando executado de fora do diretório do projeto.
+Substitua `/caminho/absoluto/do/vault` pela raiz do seu vault. `VAULT_PATH` é **obrigatório**. Se não
+for definido ou não for um diretório, o servidor sai com código 1 e escreve o motivo em stderr.
 
 ## Registro no Claude Code
 
@@ -148,12 +167,16 @@ Adicione o MCP com:
 claude mcp add vault --scope user \
   -e "VAULT_PATH=/caminho/absoluto/do/vault" \
   -e "VAULT_AUTO_PUSH=1" -- \
-  node /caminho/absoluto/do/vault-mcp/dist/server/index.js
+  npx -y @andreymudri/vault-mcp
 ```
 
-Os dois caminhos são **absolutos**, e o do vault entra em `-e` como um par `CHAVE=valor` único — com
-aspas em volta do par inteiro, que é o que faz um vault cujo caminho tem espaço funcionar. Não há
-expansão de variável em JSON, então um caminho relativo aqui vira um servidor que não sobe.
+De um clone, ponha `node /caminho/absoluto/do/vault-mcp/dist/server/index.js` depois do `--`.
+
+O caminho do vault é **absoluto** e entra em `-e` como um par `CHAVE=valor` único — com aspas em
+volta do par inteiro, que é o que faz um vault cujo caminho tem espaço funcionar. Não há expansão de
+variável em JSON, então um caminho relativo aqui vira um servidor que não sobe. O `-y` do `npx`
+importa para um servidor stdio: sem ele, a primeira execução pode parar num prompt de instalação num
+terminal que ninguém está olhando.
 
 `--scope user` registra em `~/.claude.json` e deixa as tools disponíveis em **todo** projeto, que é o
 ponto: o vault responde sobre decisões e patterns enquanto você trabalha em outro repositório. Sem a

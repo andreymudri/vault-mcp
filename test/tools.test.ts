@@ -2339,11 +2339,15 @@ describe('servidor MCP', () => {
       const mensagem = String((err as Error).message);
       expect(mensagem).toContain('VAULT_PATH');
       // O exemplo é a linha que o usuário COPIA no primeiro start que falha, sentado no vault e
-      // não na raiz do projeto. `npx vault-mcp` só resolve para este bin a partir da raiz do
-      // projeto; de qualquer outro diretório vai ao registro, onde o nome pertence a outra pessoa
-      // — e o comando copiado rodaria código de terceiro com VAULT_PATH apontando para as notas.
-      // Por isso o exemplo é caminho absoluto para o entrypoint compilado, igual ao do README.
-      expect(mensagem).not.toContain('npx');
+      // não na raiz do projeto — então ele tem que funcionar DE QUALQUER DIRETÓRIO. `npx` sem
+      // escopo não funciona: fora da raiz do projeto ele vai ao registro, onde `vault-mcp`
+      // pertence a outra pessoa, e o comando copiado rodaria código de terceiro com VAULT_PATH
+      // apontando para as notas. Sob o escopo o nome é nosso, e aí a sugestão é segura.
+      //
+      // O guard segue existindo, virado para a forma: se a mensagem falar em npx, tem que ser a
+      // ESCOPADA. Um `npx vault-mcp` cru aqui é a regressão que isto pega.
+      expect(mensagem).not.toMatch(/npx\s+vault-mcp/);
+      expect(mensagem).toContain('npx @andreymudri/vault-mcp');
       expect(mensagem).toContain('node /caminho/absoluto/do/vault-mcp/dist/server/index.js');
     }
   });

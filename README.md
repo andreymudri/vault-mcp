@@ -123,13 +123,27 @@ the MOC was built from scratch, and the knowledge index gained a line pointing a
 
 ## Installation
 
+Published as **`@andreymudri/vault-mcp`**, so nothing needs to be cloned to run it:
+
+```bash
+npx @andreymudri/vault-mcp        # no install; npm fetches and runs it
+npm i -g @andreymudri/vault-mcp   # or install once, then `vault-mcp`
+```
+
+The scope is not decoration: the bare `vault-mcp` on npm is a 443-byte namespace placeholder by
+another author, so `npx vault-mcp` runs their package instead of this one. The command inside the
+scope keeps the short name — `npx @andreymudri/vault-mcp` resolves the `bin` from within the package.
+
+From a clone, to develop it:
+
 ```bash
 npm install
 npm run build
 npm test
 ```
 
-- **Node >= 20** to RUN the server (`dist/` is plain JavaScript)
+- **Node >= 20** to RUN the server (`dist/` is plain JavaScript), verified on every push by the
+  `compat` CI job, which builds and smoke-starts it on 20
 - **Running the suite takes more than that:** `test/frontmatter.test.ts` executes the real
   `parseFile` in a child process pinned to a timezone, and that child is `node <file>.ts` — it
   depends on Node's own type stripping. CI pins 26, which is the version this is developed on
@@ -138,15 +152,20 @@ npm test
 
 ## Configuration
 
-The vault is passed through an environment variable, and the server is run via node directly:
+The vault is passed through an environment variable:
+
+```bash
+VAULT_PATH="/absolute/path/to/vault" npx @andreymudri/vault-mcp
+```
+
+From a clone, the same thing without the registry:
 
 ```bash
 VAULT_PATH="/absolute/path/to/vault" node /absolute/path/to/vault-mcp/dist/server/index.js
 ```
 
-Replace `/absolute/path/to/vault` with the root of your vault and `/absolute/path/to/vault-mcp` with the path to the project directory. `VAULT_PATH` is **mandatory**. If it is not set, or is not a directory, the server exits with code 1 and writes the reason to stderr.
-
-**Note:** do not use `npx vault-mcp` — there is a collision with another package on npm, and the command would resolve to the wrong package when run from outside the project directory.
+Replace `/absolute/path/to/vault` with the root of your vault. `VAULT_PATH` is **mandatory**. If it
+is not set, or is not a directory, the server exits with code 1 and writes the reason to stderr.
 
 ## Registering with Claude Code
 
@@ -156,12 +175,16 @@ Add the MCP with:
 claude mcp add vault --scope user \
   -e "VAULT_PATH=/absolute/path/to/vault" \
   -e "VAULT_AUTO_PUSH=1" -- \
-  node /absolute/path/to/vault-mcp/dist/server/index.js
+  npx -y @andreymudri/vault-mcp
 ```
 
-Both paths are **absolute**, and the vault's goes into `-e` as a single `KEY=value` pair — with
-quotes around the whole pair, which is what makes a vault whose path contains a space work. There is
-no variable expansion in JSON, so a relative path here becomes a server that does not start.
+From a clone, put `node /absolute/path/to/vault-mcp/dist/server/index.js` after the `--` instead.
+
+The vault's path is **absolute** and goes into `-e` as a single `KEY=value` pair — with quotes around
+the whole pair, which is what makes a vault whose path contains a space work. There is no variable
+expansion in JSON, so a relative path here becomes a server that does not start. The `-y` on `npx`
+matters for a stdio server: without it, the first run can stop at an install prompt on a terminal
+that nobody is watching.
 
 `--scope user` registers in `~/.claude.json` and makes the tools available in **every** project,
 which is the point: the vault answers about decisions and patterns while you work in another

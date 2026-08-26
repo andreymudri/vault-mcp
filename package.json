@@ -1,5 +1,5 @@
 {
-  "name": "vault-mcp",
+  "name": "@andreymudri/vault-mcp",
   "version": "0.1.0",
   "description": "MCP server for searching, reading and writing an Obsidian knowledge vault: lexical BM25 retrieval plus one wiki-link hop, and learning capture that propagates to the domain MOC, the knowledge index and the daily note in a single commit.",
   "license": "MIT",
@@ -16,7 +16,12 @@
     "model-context-protocol"
   ],
   "type": "module",
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
   "bin": {
     "vault-mcp": "./dist/server/index.js"
   },
@@ -26,6 +31,7 @@
     "pretest": "npm run typecheck",
     "test": "node scripts/test.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "prepublishOnly": "npm run build && npm run smoke",
     "dev": "tsc --watch"
   },
   "dependencies": {
