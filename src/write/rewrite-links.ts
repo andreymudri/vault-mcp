@@ -118,7 +118,7 @@ export function rewriteLinks(options: RewriteLinksOptions): RewriteLinksResult {
       const nowAt = resolveLinkTarget(target, notePathAfter, after.byBasename, after.allPaths);
       if (nowAt === desired) return whole;
 
-      const replacement = shortestTargetFor(desired, notePathAfter, after);
+      const replacement = targetFor(desired, target, notePathAfter, after);
       if (replacement === undefined) {
         const warning =
           `[[${target}]] apontava para ${wasAt} e não pôde ser reescrito para ${desired}`;
@@ -126,12 +126,7 @@ export function rewriteLinks(options: RewriteLinksOptions): RewriteLinksResult {
         return whole;
       }
 
-      // Everything after the target — `#âncora`, `|alias`, the closing brackets — is carried
-      // over verbatim by slicing rather than by re-composing it: the pattern captures only the
-      // target, so re-composing would mean parsing the rest a second time in order to write it
-      // back the way it already was. Incidental spaces INSIDE the target (`[[ slug ]]`) do not
-      // survive, and only on a link that is being rewritten anyway.
-      return `[[${replacement}${whole.slice(2 + rawTarget.length)}`;
+      return `[[${replacement}${retail(whole.slice(2 + rawTarget.length), target, replacement)}`;
     });
   });
 
@@ -139,36 +134,88 @@ export function rewriteLinks(options: RewriteLinksOptions): RewriteLinksResult {
 }
 
 /**
- * The shortest link target, written in `fromPath`, that `resolveLinkTarget` answers `desired`
- * for — or `undefined` when no form does.
+ * The tail of a wiki-link — `#anchor`, `|alias`, `]]` — carried over, with a STALE ALIAS fixed.
  *
- * Candidates in the vault's order of preference, each one VERIFIED rather than assumed:
+ * The tail is normally copied verbatim: the pattern captures only the target, so re-composing the
+ * rest would mean parsing it a second time in order to write it back exactly as it already was.
  *
- * 1. the bare slug, which is the convention and what the user writes by hand;
- * 2. the path from the vault root, which is what disambiguates a shared basename;
- * 3. the path relative to the linking note, for the note whose own directory shadows the
- *    root-relative form.
+ * The one thing that cannot be copied verbatim is an alias that REPEATS the old name. Found on a
+ * copy of the real vault: `[[../../02-wiki/nestjs/database-connection-singleton|
+ * database-connection-singleton]]`. Correcting the target alone left the alias — which is the text
+ * the reader actually SEES — naming a note that no longer exists under that name. A link that
+ * displays one name and points at another is the "reads as one thing, is another" defect this
+ * project keeps closing, and here the rewrite itself would have created it.
  *
- * Checking instead of composing is the whole design, and candidate 3 is the proof that it has
- * to be. `resolveLinkTarget` tries the relative path FIRST, so a vault holding a directory
- * named `02-wiki` inside `02-wiki/` captures the perfectly reasonable-looking root-relative
- * target and hands it to a different note — absurd, legal, and covered by a test. A rewrite
- * that trusted its own arithmetic would write that target and report success. Here the answer
- * comes from the resolver that will actually read it.
+ * The rule is deliberately narrow: only an alias equal to the old target in full, or to its
+ * basename, is touched, because only those are the slug repeated rather than prose. A `|o guard de
+ * JWT]]` is a phrase the user wrote for a reader, and rewriting it would be the tool editing text
+ * that is not its own.
+ */
+function retail(tail: string, oldTarget: string, newTarget: string): string {
+  const match = /^(#[^[\]|\n]*)?\|([^[\]\n]*)\]\]$/.exec(tail);
+  if (match === null) return tail;
+  const anchor = match[1] ?? '';
+  const alias = match[2] ?? '';
+  if (alias.trim() === oldTarget.trim()) return `${anchor}|${newTarget}]]`;
+  if (alias.trim() === posix.basename(oldTarget, '.md')) {
+    return `${anchor}|${posix.basename(newTarget, '.md')}]]`;
+  }
+  return tail;
+}
+
+/**
+ * The link target, written in `fromPath`, that `resolveLinkTarget` answers `desired` for — in the
+ * SHAPE the author used — or `undefined` when no form does.
+ *
+ * Three forms can name a note: the bare slug, the path from the vault root, and the path relative
+ * to the linking note. All three are equally correct, and which one appears in a note is the
+ * author's choice: this vault's MOCs write `[[../nestjs/x]]` and `[[../../00-index/y|índice]]` on
+ * purpose. So the ORIGINAL target's shape picks the order they are tried in.
+ *
+ * That ordering was measured against a copy of the real vault, and it replaced "shortest that
+ * resolves". Shortest-first flattened every one of eight rewrites to a bare slug — every one
+ * resolving correctly, and every one silently restyling a link the author had written the long
+ * way, in a diff they then had to review. Correcting the TARGET is what the invariant demands;
+ * restyling is not, and a rewrite that touches more than it must is a rewrite that gets trusted
+ * less.
+ *
+ * Shape is a PREFERENCE and never a constraint. Every candidate is still verified with
+ * `resolveLinkTarget`, and the preferred one is dropped without ceremony when it no longer answers
+ * the right note — which is exactly what happens when a move creates a basename tie and the bare
+ * slug stops resolving.
+ *
+ * Checking instead of composing is the whole design, and the note-relative candidate is the proof
+ * it has to be. `resolveLinkTarget` tries the relative path FIRST, so a vault holding a directory
+ * named `02-wiki` inside `02-wiki/` captures the perfectly reasonable-looking root-relative target
+ * and hands it to a different note — absurd, legal, and covered by a test. A rewrite that trusted
+ * its own arithmetic would write that target and report success. Here the answer comes from the
+ * resolver that will actually read it.
  *
  * `undefined` is not reachable by any vault this server can produce, and it is still handled,
- * because the alternative to handling it is writing a broken link and calling the move a
- * success. The caller turns it into a warning naming the note.
+ * because the alternative to handling it is writing a broken link and calling the move a success.
+ * The caller turns it into a warning naming the note.
  */
-function shortestTargetFor(desired: string, fromPath: string, after: VaultIndex): string | undefined {
+function targetFor(
+  desired: string,
+  oldTarget: string,
+  fromPath: string,
+  after: VaultIndex,
+): string | undefined {
   const withoutExtension = desired.endsWith('.md') ? desired.slice(0, -'.md'.length) : desired;
   const fromDir = posix.dirname(fromPath);
-  const candidates = [
-    posix.basename(withoutExtension),
-    withoutExtension,
-    posix.relative(fromDir === '.' ? '' : fromDir, withoutExtension),
-  ];
-  for (const candidate of candidates) {
+  const slug = posix.basename(withoutExtension);
+  const rootRelative = withoutExtension;
+  const noteRelative = posix.relative(fromDir === '.' ? '' : fromDir, withoutExtension);
+
+  // `..` means the author wrote it relative to their own note; any other `/` means relative to the
+  // root; no `/` at all means the bare slug. Each keeps its own fallbacks, in the vault's order.
+  const ordered = oldTarget.includes('/')
+    ? oldTarget.split('/').includes('..')
+      ? [noteRelative, rootRelative, slug]
+      : [rootRelative, noteRelative, slug]
+    : [slug, rootRelative, noteRelative];
+
+  for (const candidate of ordered) {
     if (candidate === '') continue;
     if (resolveLinkTarget(candidate, fromPath, after.byBasename, after.allPaths) === desired) {
       return candidate;

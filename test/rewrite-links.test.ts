@@ -77,6 +77,57 @@ describe('rewriteLinks — renomeação', () => {
     );
   });
 
+  it('atualiza o ALIAS quando ele é o nome antigo repetido', () => {
+    // Achado na cópia do vault real: `[[../../02-wiki/nestjs/database-connection-singleton|
+    // database-connection-singleton]]`. O alvo era corrigido e o alias ficava com o nome ANTIGO —
+    // que é o texto que o leitor vê. Um link que EXIBE um nome e aponta para uma nota chamada
+    // outra coisa é a classe de defeito "lê como uma coisa, é outra" que este projeto persegue.
+    const { text } = rewriteIn(
+      'Ver [[02-wiki/nestjs/auth-guard|auth-guard]] e [[auth-guard|auth-guard]].\n',
+      '04-daily/2026-08-20.md',
+      VAULT,
+      '02-wiki/nestjs/auth-guard.md',
+      '02-wiki/nestjs/guard-jwt.md',
+    );
+    expect(text).toBe('Ver [[02-wiki/nestjs/guard-jwt|guard-jwt]] e [[guard-jwt|guard-jwt]].\n');
+  });
+
+  it('atualiza o alias que repete o ALVO antigo inteiro', () => {
+    const { text } = rewriteIn(
+      'Ver [[02-wiki/nestjs/auth-guard|02-wiki/nestjs/auth-guard]].\n',
+      '04-daily/2026-08-20.md',
+      VAULT,
+      '02-wiki/nestjs/auth-guard.md',
+      '02-wiki/nestjs/guard-jwt.md',
+    );
+    expect(text).toBe('Ver [[02-wiki/nestjs/guard-jwt|02-wiki/nestjs/guard-jwt]].\n');
+  });
+
+  it('NÃO toca num alias que é prosa', () => {
+    // A regra é estreita de propósito: um alias só é atualizado quando ele repete o nome antigo,
+    // que é slug e não prosa. `[[auth-guard|o guard de JWT]]` é uma frase que o usuário escreveu
+    // para o leitor, e trocá-la seria a ferramenta reescrevendo texto que não é dela.
+    const { text } = rewriteIn(
+      'Ver [[auth-guard|o guard de JWT]] e [[auth-guard#payload|o payload]].\n',
+      '04-daily/2026-08-20.md',
+      VAULT,
+      '02-wiki/nestjs/auth-guard.md',
+      '02-wiki/nestjs/guard-jwt.md',
+    );
+    expect(text).toBe('Ver [[guard-jwt|o guard de JWT]] e [[guard-jwt#payload|o payload]].\n');
+  });
+
+  it('atualiza o alias antigo preservando a âncora', () => {
+    const { text } = rewriteIn(
+      'Ver [[auth-guard#payload do jwt|auth-guard]].\n',
+      '04-daily/2026-08-20.md',
+      VAULT,
+      '02-wiki/nestjs/auth-guard.md',
+      '02-wiki/nestjs/guard-jwt.md',
+    );
+    expect(text).toBe('Ver [[guard-jwt#payload do jwt|guard-jwt]].\n');
+  });
+
   it('reescreve todas as ocorrências, não só a primeira', () => {
     const { text } = rewriteIn(
       '[[auth-guard]] e de novo [[auth-guard]].\n',
@@ -88,7 +139,7 @@ describe('rewriteLinks — renomeação', () => {
     expect(text).toBe('[[guard-jwt]] e de novo [[guard-jwt]].\n');
   });
 
-  it('reescreve um link escrito por caminho relativo à raiz', () => {
+  it('preserva a FORMA do link ao reescrever um caminho relativo à raiz', () => {
     const { text } = rewriteIn(
       'Ver [[02-wiki/nestjs/auth-guard]].\n',
       '04-daily/2026-08-20.md',
@@ -96,9 +147,56 @@ describe('rewriteLinks — renomeação', () => {
       '02-wiki/nestjs/auth-guard.md',
       '02-wiki/patterns/guard-jwt.md',
     );
-    // O basename é o primeiro candidato e resolve, então é ele que entra — a convenção do
-    // vault é o link curto, e um caminho longo só aparece quando o curto não desambigua.
+    // MEDIDO contra uma cópia do vault real: achatar para `[[guard-jwt]]` resolve certo e mesmo
+    // assim está errado. Quem escreveu `[[02-wiki/nestjs/...]]` escolheu a forma longa, e os MOCs
+    // deste vault a usam por convenção. Reescrever o ALVO é obrigação da invariante; reescrever o
+    // ESTILO de quem escreveu não é, e ainda infla o diff que o usuário tem de revisar.
+    expect(text).toBe('Ver [[02-wiki/patterns/guard-jwt]].\n');
+  });
+
+  it('preserva a forma relativa à nota, com os ../', () => {
+    const paths = [...VAULT, '02-wiki/patterns/cache-wrapper.md'];
+    const { text } = rewriteLinks({
+      text: 'Ver [[../nestjs/auth-guard]] aqui.\n',
+      notePathBefore: '02-wiki/docker/multi-stage.md',
+      notePathAfter: '02-wiki/docker/multi-stage.md',
+      ...indexes(
+        paths,
+        paths.map((p) => (p === '02-wiki/nestjs/auth-guard.md' ? '02-wiki/patterns/guard-jwt.md' : p)),
+      ),
+      renames: new Map([['02-wiki/nestjs/auth-guard.md', '02-wiki/patterns/guard-jwt.md']]),
+    });
+    expect(text).toBe('Ver [[../patterns/guard-jwt]] aqui.\n');
+  });
+
+  it('mantém o slug puro quando era slug puro', () => {
+    const { text } = rewriteIn(
+      'Ver [[auth-guard]].\n',
+      '04-daily/2026-08-20.md',
+      VAULT,
+      '02-wiki/nestjs/auth-guard.md',
+      '02-wiki/nestjs/guard-jwt.md',
+    );
     expect(text).toBe('Ver [[guard-jwt]].\n');
+  });
+
+  it('abandona a forma original quando ela não resolve mais', () => {
+    // A preferência é por FORMA, nunca acima da correção: se a forma preservada não resolve para a
+    // nota certa, ela é descartada e o candidato que resolve entra, seja qual for o formato.
+    const COLIDINDO = [
+      '00-index/index-knowledge.md',
+      'auth-guard.md',
+      '02-wiki/nestjs/auth-guard.md',
+      '04-daily/2026-08-20.md',
+    ];
+    const { text } = rewriteIn(
+      'Ver [[auth-guard]].\n',
+      '04-daily/2026-08-20.md',
+      COLIDINDO,
+      'auth-guard.md',
+      '02-wiki/patterns/auth-guard.md',
+    );
+    expect(text).toBe('Ver [[02-wiki/patterns/auth-guard]].\n');
   });
 
   it('deixa em paz um link que já não resolvia antes', () => {
@@ -213,7 +311,7 @@ describe('rewriteLinks — move sem renomear', () => {
       ),
       renames: new Map([['02-wiki/nestjs/nestjs-moc.md', '03-projects/nestjs-moc.md']]),
     });
-    expect(text).toBe('Ver [[02-wiki/docker/multi-stage|o multi-stage]].\n');
+    expect(text).toBe('Ver [[../02-wiki/docker/multi-stage|o multi-stage]].\n');
   });
 });
 
