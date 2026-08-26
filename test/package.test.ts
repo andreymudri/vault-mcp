@@ -48,10 +48,12 @@ describe('package.json', () => {
     });
   });
 
-  it('ainda declara o bin pelo nome curto', () => {
+  it('ainda declara o bin pelo nome curto, sem o `./` que o npm reescreveria', () => {
     // O escopo está no NOME DO PACOTE, não no comando: `npx @andreymudri/vault-mcp` resolve este
-    // `bin` de dentro do pacote, e um clone continua fazendo `npm link` do mesmo jeito.
-    expect(pkg.bin).toEqual({ 'vault-mcp': './dist/server/index.js' });
+    // `bin` de dentro do pacote, e um clone continua fazendo `npm link` do mesmo jeito. O caminho
+    // vai SEM `./` porque o `npm publish` normaliza o prefixo de qualquer jeito — escrito com ele,
+    // o package.json que chega no registro deixa de ser o que está aqui, e o publish avisa disso.
+    expect(pkg.bin).toEqual({ 'vault-mcp': 'dist/server/index.js' });
   });
 
   it('a versão que o servidor anuncia é a do package.json', () => {

@@ -23,7 +23,7 @@
     "dist"
   ],
   "bin": {
-    "vault-mcp": "./dist/server/index.js"
+    "vault-mcp": "dist/server/index.js"
   },
   "scripts": {
     "build": "tsc",
