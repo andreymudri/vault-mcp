@@ -10,7 +10,14 @@ import { commitFiles } from './git.js';
 import { classifyStat, INVISIBLE_CHARS, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
-import { WriteRaceError, editNote, writeNote, type WriteResult } from './writer.js';
+import {
+  WriteRaceError,
+  dropAnsweredSections,
+  editNote,
+  spliceBody,
+  writeNote,
+  type WriteResult,
+} from './writer.js';
 
 /**
  * `vault_learn`: one call that decides between appending to a note that already covers the
@@ -448,49 +455,13 @@ function titleFromPath(relPath: string): string {
     .join(' ');
 }
 
-/** Trailing newlines dropped by scanning, not by `/\n+$/`, which backtracks quadratically. */
-function stripTrailingNewlines(text: string): string {
-  let end = text.length;
-  while (end > 0 && text.charCodeAt(end - 1) === 10) end -= 1;
-  return text.slice(0, end);
-}
-
-function spliceIntoSkeleton(skeleton: string, body: string): string {
-  const content = body.trim();
-  if (content === '') return skeleton;
-
-  const lines = skeleton.split('\n');
-  // The search starts after the frontmatter block, so a `## ` inside a quoted YAML value cannot
-  // be mistaken for the first section.
-  let from = 0;
-  if ((lines[0] ?? '').trim() === '---') {
-    for (let i = 1; i < lines.length; i += 1) {
-      if ((lines[i] ?? '').trim() === '---') {
-        from = i + 1;
-        break;
-      }
-    }
-  }
-
-  let at = -1;
-  for (let i = from; i < lines.length; i += 1) {
-    if (/^##\s/.test(lines[i] ?? '')) {
-      at = i;
-      break;
-    }
-  }
-
-  if (at === -1) return `${stripTrailingNewlines(skeleton)}\n\n${content}\n`;
-  const head = stripTrailingNewlines(lines.slice(0, at).join('\n'));
-  const tail = lines.slice(at).join('\n');
-  return `${head}\n\n${content}\n\n${tail}`;
-}
-
 /** The complete note content for a path that already holds a blank placeholder. */
 async function skeletonContent(
   opts: LearnOptions,
   relPath: string,
   body: string,
+  titulo: string,
+  answered: readonly string[],
 ): Promise<{ content: string; warning?: string }> {
   const templatePath = join(opts.vaultRoot, '_templates', 'wiki.md');
   // Classified BEFORE it is opened, by the same `pathState` the note path goes through.
@@ -515,8 +486,8 @@ async function skeletonContent(
   }
   // `applyTemplate` throws on an unresolved Templater token, exactly as it does inside
   // `writeNote`: an unsubstituted `<% %>` written into the vault is the bug it exists to prevent.
-  const skeleton = applyTemplate(templateText, { title: titleFromPath(relPath), now: opts.now });
-  return { content: spliceIntoSkeleton(skeleton, body) };
+  const skeleton = applyTemplate(templateText, { title: titulo, now: opts.now });
+  return { content: spliceBody(dropAnsweredSections(skeleton, answered), body) };
 }
 
 /** Tags of a note as the index knows them, read off the result set rather than re-reading disk. */
@@ -875,6 +846,13 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   let templateWarning: string | undefined;
   if (write === undefined) {
     const body = buildBody(opts, '\n');
+    // The sections this body already answers, so the skeleton does not repeat them as empty
+    // prompts two lines below their own answer. `buildBody` writes `**Contexto:** …` and, when the
+    // caller sent links, a `## Links` block of its own.
+    const answered = [
+      ...(oneLine(opts.contexto) === '' ? [] : ['Contexto']),
+      ...(renderLinks(opts.links, '\n') === undefined ? [] : ['Links']),
+    ];
     // `writeNote` applies the `_templates/wiki.md` skeleton only when it cannot READ the path, so
     // a blank placeholder standing here would cost the note its `# H1` and its sections. The
     // skeleton is therefore built HERE and handed over complete — the placeholder is written over,
@@ -892,7 +870,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     for (let attempt = 0; ; attempt += 1) {
       const built =
         state === 'blank'
-          ? await skeletonContent(opts, newRelPath, body)
+          ? await skeletonContent(opts, newRelPath, body, titulo, answered)
           : { content: body, warning: undefined };
       templateWarning = built.warning;
 
@@ -903,6 +881,10 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
           content: built.content,
           frontmatter: { tags },
           tipo: 'wiki',
+          // The title the caller actually sent, not a title-cased rebuild of the slug: the file
+          // name has to be a slug, the heading a reader sees does not.
+          title: titulo,
+          answeredSections: answered,
           deferCommit: true,
         });
         break;

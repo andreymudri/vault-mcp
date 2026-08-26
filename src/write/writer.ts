@@ -62,6 +62,27 @@ export interface WriteNoteOptions {
   content: string;
   frontmatter?: Frontmatter;
   tipo?: string;
+  /**
+   * The note's own title, for the template's `tp.file.title`. Defaults to a title-cased rebuild of
+   * the FILE NAME, which is all this module has when the caller does not say.
+   *
+   * A rebuild is a lossy one: the file name is a slug, so `Check-then-act não é garantia: publique
+   * com escrita exclusiva` came back as `Check Then Act Nao E Garantia Publique Com Escrita
+   * Exclusiva` — accents gone, punctuation gone, every word capitalised. `vault_learn` is handed
+   * the real title and passes it here; the FILE NAME stays a slug either way, because that is the
+   * note's identity in the vault and in every `[[wiki-link]]` pointing at it.
+   */
+  title?: string;
+  /**
+   * Section names the caller's own body already answers, e.g. `['Contexto']`.
+   *
+   * An EMPTY section in the skeleton is an invitation to fill the note in later, which is why the
+   * others are left standing. One the body already answered two lines above is not an invitation,
+   * it is a duplicate — `vault_learn` writes `**Contexto:** …` and the vault's template declares an
+   * empty `## Contexto` right under it. A section the template brings already FILLED is never
+   * dropped: that would be deleting the user's own text.
+   */
+  answeredSections?: readonly string[];
   /** Write but do not commit, so a caller can batch several writes into one commit. */
   deferCommit?: boolean;
 }
@@ -110,7 +131,7 @@ function titleFromPath(relPath: string): string {
  * The search starts after the frontmatter block, so a `## ` that somehow appears inside
  * a quoted YAML value cannot be mistaken for the first section.
  */
-function spliceBody(skeleton: string, content: string): string {
+export function spliceBody(skeleton: string, content: string): string {
   const body = content.trim();
   if (body === '') return skeleton;
 
@@ -133,10 +154,56 @@ function spliceBody(skeleton: string, content: string): string {
     }
   }
 
-  if (at === -1) return `${skeleton.replace(/\n+$/, '')}\n\n${body}\n`;
-  const head = lines.slice(0, at).join('\n').replace(/\n+$/, '');
+  if (at === -1) return `${stripTrailingNewlines(skeleton)}\n\n${body}\n`;
+  const head = stripTrailingNewlines(lines.slice(0, at).join('\n'));
   const tail = lines.slice(at).join('\n');
-  return `${head}\n\n${body}\n\n${tail}`;
+  // The trailing newline is the skeleton's to lose: a template file saved without one produced a
+  // note without one, and `\ No newline at end of file` in every diff of it afterwards.
+  return `${head}\n\n${body}\n\n${stripTrailingNewlines(tail)}\n`;
+}
+
+/** Trailing newlines dropped by scanning, not by `/\n+$/`, which backtracks quadratically. */
+function stripTrailingNewlines(text: string): string {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) end -= 1;
+  return text.slice(0, end);
+}
+
+/**
+ * The skeleton with its EMPTY `## <name>` sections named in `answered` removed.
+ *
+ * "Empty" is the whole rule and it is checked, never assumed: a section counts only when nothing
+ * but blank lines stands between its heading and the next one. A template that ships prose under
+ * `## Contexto` keeps it — dropping that would be deleting the user's writing to avoid a
+ * duplication the user did not create.
+ */
+export function dropAnsweredSections(skeleton: string, answered: readonly string[]): string {
+  if (answered.length === 0) return skeleton;
+  const wanted = new Set(answered.map((name) => name.trim().toLowerCase()));
+
+  const lines = skeleton.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    const heading = /^##\s+(.*)$/.exec(line);
+    if (heading === null || !wanted.has((heading[1] ?? '').trim().toLowerCase())) {
+      out.push(line);
+      continue;
+    }
+
+    let next = i + 1;
+    while (next < lines.length && !/^##\s/.test(lines[next] ?? '')) next += 1;
+    if (!lines.slice(i + 1, next).every((body) => body.trim() === '')) {
+      out.push(line);
+      continue;
+    }
+    // Skip the heading and the blank run under it; `next` is the following heading, or the end.
+    i = next - 1;
+  }
+
+  // Removing a section from the middle leaves the blank line that preceded it next to the blank
+  // line that followed the one before.
+  return out.join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
 /** True when a parsed frontmatter value counts as "not filled in". Mirrors `ensureFrontmatter`. */
@@ -383,8 +450,11 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
       // model-supplied prose instead makes a note that legitimately discusses `<% %>`
       // syntax permanently unwritable — while adding nothing, since content is not a
       // template and its `<%` is just text.
-      const skeleton = applyTemplate(templateText, { title: titleFromPath(opts.path), now });
-      text = spliceBody(skeleton, opts.content);
+      const skeleton = applyTemplate(templateText, {
+        title: opts.title ?? titleFromPath(opts.path),
+        now,
+      });
+      text = spliceBody(dropAnsweredSections(skeleton, opts.answeredSections ?? []), opts.content);
     }
   }
 

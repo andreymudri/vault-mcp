@@ -1189,14 +1189,19 @@ describe('learn - o insight nunca se perde', () => {
       // Built from the template with THIS call's `now`, not with wall-clock time.
       expect(nota).toContain(`criado: ${TODAY}`);
       expect(nota).toContain('TTL configuravel');
-      expect(nota).toContain('## Contexto');
+      // O `## Contexto` do template NÃO sai aqui: o corpo já traz `**Contexto:**` logo acima, e
+      // repetir a seção vazia embaixo da própria resposta é duplicata, não convite.
+      expect(nota).toContain('**Contexto:** Revisando o wrapper de cache');
+      expect(nota).not.toContain('## Contexto');
+      // As que o corpo NÃO respondeu continuam de pé, para preencher depois no Obsidian.
       expect(nota).toContain('## Solução');
       expect(nota).toContain('## Exemplo');
       // Spliced ABOVE the first section, where the vault's own notes put their lead paragraph -
       // appending instead would file the learning under whatever section happens to come last.
-      expect(nota.indexOf('TTL configuravel')).toBeLessThan(nota.indexOf('## Contexto'));
-      expect(nota.indexOf('# Cache Wrapper Ttl')).toBeLessThan(nota.indexOf('TTL configuravel'));
-      expect(nota.split('\n')).toContain('# Cache Wrapper Ttl');
+      expect(nota.indexOf('TTL configuravel')).toBeLessThan(nota.indexOf('## Solução'));
+      expect(nota.indexOf('# Cache Wrapper TTL')).toBeLessThan(nota.indexOf('TTL configuravel'));
+      // O H1 é o título informado, não uma reconstrução title-case do nome do arquivo.
+      expect(nota.split('\n')).toContain('# Cache Wrapper TTL');
 
       // Created, so it is listed: a note nobody links to is a note nobody finds.
       expect(await read(vaultRoot, '02-wiki/patterns/patterns-moc.md')).toContain(
@@ -1387,9 +1392,9 @@ describe('learn - o insight nunca se perde', () => {
 
     expect(result.path).toBe(stub);
     const nota = await read(vaultRoot, stub);
-    expect(nota.split('\n')).toContain('# Cache Wrapper Ttl');
+    expect(nota.split('\n')).toContain('# Cache Wrapper TTL');
     expect(nota).toContain('TTL configuravel');
-    expect(nota.indexOf('# Cache Wrapper Ttl')).toBeLessThan(nota.indexOf('TTL configuravel'));
+    expect(nota.indexOf('# Cache Wrapper TTL')).toBeLessThan(nota.indexOf('TTL configuravel'));
   });
 
   it('difere do caminho livre apenas em criado, que segue o now da chamada', async () => {
@@ -1556,6 +1561,41 @@ describe('learn - o insight nunca se perde', () => {
     const conteudos = await Promise.all(results.map((r) => read(vaultRoot, r.path)));
     expect(conteudos.join('\n')).toContain('PRIMEIRO insight');
     expect(conteudos.join('\n')).toContain('SEGUNDO insight');
+  });
+
+  /**
+   * O que a nota REALMENTE fica quando o learn cria uma: medido contra o template do vault, porque
+   * é o arquivo que o usuário abre no Obsidian depois.
+   */
+  it('a nota criada usa o título real no H1 e não repete o Contexto vazio', async () => {
+    const retriever = { search: () => ({ results: [] }) } as unknown as Retriever;
+
+    const result = await learn({
+      vaultRoot,
+      retriever,
+      titulo: 'Check-then-act não é garantia: publique com escrita exclusiva',
+      insight: 'Uma garantia que vem de um teste seguido de uma acao nao e uma garantia entre os dois cabe outro escritor',
+      contexto: 'Corrigindo a corrida de escrita entre processos',
+      dominio: 'patterns',
+      tags: ['concorrencia'],
+      now: NOW,
+    });
+
+    const nota = await read(vaultRoot, result.path);
+
+    // O H1 é o título que o chamador deu — com acento, com hífen, com dois-pontos.
+    expect(nota).toContain('# Check-then-act não é garantia: publique com escrita exclusiva');
+    expect(nota).not.toContain('Check Then Act Nao E Garantia');
+    // O nome do ARQUIVO continua slug: é a identidade da nota e o alvo de todo `[[wiki-link]]`.
+    expect(path.basename(result.path)).toMatch(/^[a-z0-9-]+\.md$/);
+
+    // O contexto aparece uma vez só, e não seguido de um `## Contexto` vazio.
+    expect(nota.match(/Corrigindo a corrida de escrita entre processos/g)).toHaveLength(1);
+    expect(nota).not.toContain('## Contexto');
+    // As outras seções do template continuam de pé, para preencher depois.
+    expect(nota).toContain('## Solução');
+    // E o arquivo termina com quebra de linha, mesmo que o template não termine.
+    expect(nota.endsWith('\n')).toBe(true);
   });
 
   it('recusa em vez de escrever por cima quando não há nome livre', async () => {
@@ -1798,8 +1838,9 @@ describe('learn - nada e removido do disco', () => {
     expect(result.action).toBe('created');
     expect(result.path).toBe(stub);
     const nota = await read(vaultRoot, stub);
-    expect(nota.split('\n')).toContain('# Cache Wrapper Ttl');
-    expect(nota).toContain('## Contexto');
+    expect(nota.split('\n')).toContain('# Cache Wrapper TTL');
+    // O esqueleto veio: `## Solução` é a primeira seção que o corpo NÃO respondeu.
+    expect(nota).toContain('## Solução');
     expect(nota).toContain('TTL configuravel');
   });
 
@@ -1999,8 +2040,8 @@ describe('learn - nada e removido do disco', () => {
     const nota = await read(vaultRoot, stub);
     // Born with its skeleton, not appended to: an append runs neither `ensureFrontmatter` nor
     // `applyTemplate`, so the note would carry `{}` for frontmatter and no `# H1` at all.
-    expect(nota).toContain('# Cache Wrapper Ttl');
-    expect(nota).toContain('## Contexto');
+    expect(nota).toContain('# Cache Wrapper TTL');
+    expect(nota).toContain('## Solução');
     expect(nota).toContain('TTL configuravel');
     expect(nota).not.toContain(' '.repeat(64));
   }, 30_000);

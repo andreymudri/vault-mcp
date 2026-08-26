@@ -444,6 +444,107 @@ describe('unifiedDiff round-trip', () => {
   }, 60_000);
 });
 
+/**
+ * O H1 e as seções vazias do esqueleto, nas duas pontas onde o template encontra o conteúdo do
+ * chamador.
+ */
+describe('writeNote — título e seções do esqueleto', () => {
+  let tmp: string;
+  let vaultRoot: string;
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-titulo-test-'));
+    vaultRoot = path.join(tmp, 'vault');
+    await fs.mkdir(path.join(vaultRoot, '_templates'), { recursive: true });
+    await fs.mkdir(path.join(vaultRoot, '02-wiki', 'patterns'), { recursive: true });
+    await fs.writeFile(
+      path.join(vaultRoot, '_templates', 'wiki.md'),
+      '---\ntipo: wiki\ntags: \n---\n\n# <% tp.file.title %>\n\n## Contexto\n\n## Solução\n\n## Referências\n-\n',
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await removeTree(tmp);
+  });
+
+  async function body(rel: string): Promise<string> {
+    return fs.readFile(path.join(vaultRoot, rel), 'utf8');
+  }
+
+  it('usa o título que o chamador informou, com acento e pontuação', async () => {
+    const rel = '02-wiki/patterns/check-then-act-nao-e-garantia.md';
+    await writeNote({
+      vaultRoot,
+      path: rel,
+      content: 'Corpo do insight.\n',
+      tipo: 'wiki',
+      title: 'Check-then-act não é garantia: publique com escrita exclusiva',
+      deferCommit: true,
+    });
+
+    // O NOME DO ARQUIVO continua slug — ele é a identidade da nota no vault e não muda. O que muda
+    // é o H1, que era uma reconstrução title-case do slug e perdia acento e pontuação.
+    expect(await body(rel)).toContain('# Check-then-act não é garantia: publique com escrita exclusiva');
+    expect(await body(rel)).not.toContain('Check Then Act Nao E Garantia');
+  });
+
+  it('sem título informado, continua derivando do nome do arquivo', async () => {
+    const rel = '02-wiki/patterns/nota-sem-titulo.md';
+    await writeNote({ vaultRoot, path: rel, content: 'Corpo.\n', tipo: 'wiki', deferCommit: true });
+
+    expect(await body(rel)).toContain('# Nota Sem Titulo');
+  });
+
+  it('não repete como prompt vazio a seção que o corpo já respondeu', async () => {
+    const rel = '02-wiki/patterns/com-contexto.md';
+    await writeNote({
+      vaultRoot,
+      path: rel,
+      content: 'Corpo do insight.\n\n**Contexto:** investigando a corrida de escrita\n',
+      tipo: 'wiki',
+      answeredSections: ['Contexto'],
+      deferCommit: true,
+    });
+
+    const text = await body(rel);
+    // O contexto aparece UMA vez, e não como um `## Contexto` vazio logo abaixo dele.
+    expect(text).toContain('**Contexto:** investigando a corrida de escrita');
+    expect(text).not.toContain('## Contexto');
+    // As outras seções continuam de pé: são o convite para preencher a nota depois, no Obsidian.
+    expect(text).toContain('## Solução');
+    expect(text).toContain('## Referências');
+  });
+
+  it('nunca remove uma seção que o template já traz preenchida', async () => {
+    await fs.writeFile(
+      path.join(vaultRoot, '_templates', 'wiki.md'),
+      '---\ntipo: wiki\ntags: \n---\n\n# <% tp.file.title %>\n\n## Contexto\n\nTexto que o template traz.\n\n## Solução\n',
+      'utf8',
+    );
+    const rel = '02-wiki/patterns/contexto-cheio.md';
+    await writeNote({
+      vaultRoot,
+      path: rel,
+      content: 'Corpo.\n',
+      tipo: 'wiki',
+      answeredSections: ['Contexto'],
+      deferCommit: true,
+    });
+
+    // Descartar isso seria apagar conteúdo do usuário: a regra é sobre PROMPT VAZIO, não sobre nome.
+    expect(await body(rel)).toContain('Texto que o template traz.');
+    expect(await body(rel)).toContain('## Contexto');
+  });
+
+  it('a nota criada termina com quebra de linha', async () => {
+    const rel = '02-wiki/patterns/fim-de-linha.md';
+    await writeNote({ vaultRoot, path: rel, content: 'Corpo.\n', tipo: 'wiki', deferCommit: true });
+
+    expect(await body(rel)).toMatch(/\n$/);
+  });
+});
+
 describe('atomicWrite', () => {
   let tmp: string;
 

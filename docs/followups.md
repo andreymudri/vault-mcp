@@ -1,7 +1,7 @@
 # Follow-ups conhecidos
 
-**Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26), mais um décimo
-levantado durante a própria correção (item 10, abaixo). Este documento deixou
+**Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26), mais o item 10
+(levantado durante a própria correção) e o item 11 (levantado pelo primeiro `vault_learn` real). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
@@ -166,6 +166,38 @@ falha nos dois sentidos — recusar o que sobrevive é tão erro quanto aceitar 
 - **Metade CRLF do snippet** — não estava fixada: trocar `quoteSnippet` para
   `sanitizeQuoted(text, false)` mantinha tudo verde. Fixada, e a verificação foi por mutação nos dois
   sentidos.
+
+---
+
+## 11. Qualidade da nota que o `vault_learn` cria — CORRIGIDO
+
+Encontrado no primeiro `vault_learn` REAL contra o vault do usuário, e não em teste: o mecanismo
+inteiro funcionou (nota criada no domínio certo, MOC e nota diária propagados, um commit, push) e a
+nota resultante estava feia de três jeitos.
+
+- **O H1 não era o título.** `<% tp.file.title %>` era resolvido por `titleFromPath`, que reconstrói
+  o título a partir do NOME DO ARQUIVO — que é um slug. `Check-then-act não é garantia: publique com
+  escrita exclusiva` virou `Check Then Act Nao E Garantia Publique Com Escrita Exclusiva`: sem
+  acento, sem pontuação, toda palavra capitalizada. O `titulo` estava ali, no argumento da tool, sem
+  ser usado. Agora `WriteNoteOptions.title` é passado pelo `learn`, e o **nome do arquivo continua
+  slug** — ele é a identidade da nota e o alvo de todo `[[wiki-link]]`.
+- **O `## Contexto` do template saía vazio logo abaixo do `**Contexto:**` que o corpo já
+  escrevera.** Uma seção vazia é convite para preencher depois; uma seção vazia embaixo da própria
+  resposta é duplicata. `WriteNoteOptions.answeredSections` nomeia as seções que o corpo já
+  respondeu, e só as VAZIAS com esse nome saem — uma seção que o template traz preenchida nunca é
+  removida, porque isso seria apagar texto do usuário. `## Solução`, `## Exemplo` e `## Referências`
+  continuam de pé, que é a decisão do dono do vault.
+- **A nota terminava sem quebra de linha**, herdado de um template salvo sem uma, e todo diff dela
+  trazia `\ No newline at end of file`. O `spliceBody` agora garante a quebra final.
+
+Junto veio uma consolidação: `learn.ts` carregava a própria cópia de `spliceIntoSkeleton` e de
+`stripTrailingNewlines`, gêmeas do `spliceBody` de `writer.ts` — o mesmo formato do item 5. Agora há
+uma cópia só, exportada de `writer.ts`, e ela usa a varredura linear que estava na cópia de
+`learn.ts` (o `/\n+$/` da outra backtrackeava quadraticamente).
+
+**Não corrigido, e é limitação e não defeito:** a mensagem de commit do `vault_edit_note` também
+title-caseia o slug (`docs(vault): atualizar Check Then Act Nao E...`). Essa tool recebe só o
+CAMINHO — não existe título para usar.
 
 ---
 
