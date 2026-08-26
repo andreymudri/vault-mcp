@@ -126,10 +126,44 @@ export function forMessage(text: string): string {
 export class PathGuardError extends Error {}
 
 /**
+ * The one exemption a caller may ask for, and the only one there will ever be here.
+ *
+ * `allowArchive` makes `99-archive/` legal as a source and as a destination, for
+ * `vault_move` and for nothing else. Archiving and unarchiving are the same move in
+ * opposite directions, so one flag buys both; without it `99-archive/` is a directory a
+ * note enters by hand and never leaves through this server.
+ *
+ * It exempts `99-archive` BY NAME, never "the first list". `_templates` is in
+ * `DENIED_PREFIXES` and in `DENIED_SEGMENTS` at once, and a flag that lifted the whole
+ * prefix list would open the first of those while looking like it only touched the
+ * archive. `DENIED_SEGMENTS` — the MACHINE areas, `.git/` above all — is not reachable
+ * from here under any flag, which is what keeps the escape phase 4 closed shut.
+ *
+ * Writing content into `99-archive/` stays refused everywhere else: `vault_write_note`,
+ * `vault_edit_note`, `vault_learn` and `propagate` all call without the flag, so nothing
+ * can CREATE or EDIT a note in there — only move one in or out. `vault_delete` does not
+ * get the flag either, and that is what makes the directory mean what it says: nothing is
+ * destroyed in there, it only enters and leaves.
+ */
+export interface PathGuardOptions {
+  allowArchive?: boolean;
+}
+
+/** The read-only prefixes still in force under `options`. */
+function deniedPrefixes(options: PathGuardOptions): readonly string[] {
+  const all = DENIED_PREFIXES as readonly string[];
+  return options.allowArchive === true ? all.filter((prefix) => prefix !== '99-archive') : all;
+}
+
+/**
  * Resolves a vault-relative path to an absolute one, refusing anything that escapes
  * the vault or lands in a read-only area. Returns the absolute path.
  */
-export function resolveWritePath(vaultRoot: string, relPath: string): string {
+export function resolveWritePath(
+  vaultRoot: string,
+  relPath: string,
+  options: PathGuardOptions = {},
+): string {
   if (!relPath.endsWith('.md')) {
     throw new PathGuardError(`caminho deve terminar em .md: ${relPath}`);
   }
@@ -151,7 +185,7 @@ export function resolveWritePath(vaultRoot: string, relPath: string): string {
     throw new PathGuardError(`caminho fora do vault: ${relPath}`);
   }
   const head = rel.split(sep)[0];
-  if (head !== undefined && (DENIED_PREFIXES as readonly string[]).includes(head)) {
+  if (head !== undefined && deniedPrefixes(options).includes(head)) {
     throw new PathGuardError(`escrita negada em ${head}/ (somente leitura)`);
   }
   return abs;
@@ -339,7 +373,11 @@ export async function classifyNode(absPath: string): Promise<NodeKind> {
  * `propagate` writes files whose paths are built from caller-supplied input just as
  * `writeNote` does, and a path `writeNote` refuses must not be a path `propagate` accepts.
  */
-export async function guardedPath(vaultRoot: string, relPath: string): Promise<string> {
+export async function guardedPath(
+  vaultRoot: string,
+  relPath: string,
+  options: PathGuardOptions = {},
+): Promise<string> {
   // First, before any `fs` call and before `resolveWritePath` interpolates the string into
   // a message: a NUL makes `fs` throw its own `TypeError` from inside the write.
   if (INVISIBLE_CHARS.test(relPath)) {
@@ -348,7 +386,7 @@ export async function guardedPath(vaultRoot: string, relPath: string): Promise<s
     );
   }
 
-  const absPath = resolveWritePath(vaultRoot, relPath);
+  const absPath = resolveWritePath(vaultRoot, relPath, options);
 
   // Segment-wise, on the RESOLVED path as well as the lexical one, so `02-wiki/./.git/x.md`
   // and a link that lands in `.git` are both caught. Matching whole segments and not string

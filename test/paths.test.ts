@@ -391,3 +391,81 @@ describe('normalizeSegment', () => {
     expect(normalizeSegment('nota.md')).toBe('nota.md');
   });
 });
+
+/**
+ * O modo em que `99-archive/` é legal — a porta que `vault_move` abre e mais ninguém.
+ *
+ * Arquivar e desarquivar são a MESMA operação de mover, e sem esta flag `99-archive/` seria
+ * um diretório em que uma nota entra por `mv` na mão e nunca mais volta pelo MCP. A flag é
+ * estreita de propósito: ela isenta exatamente uma entrada de `DENIED_PREFIXES` e não toca
+ * em `DENIED_SEGMENTS`, que é a lista de áreas de MÁQUINA — `.git/`, `.obsidian/`,
+ * `node_modules/`, `_templates/`. Uma flag que abrisse as duas listas juntas devolveria o
+ * escape para `.git/refs/heads/` que a fase 4 fechou, e o teste que fixa isso é o de
+ * `_templates`, que está nas DUAS listas: ele só passa se a isenção for por nome e não por
+ * "a primeira lista inteira".
+ */
+describe('guardedPath com allowArchive', () => {
+  let tmp: string;
+  let vaultRoot: string;
+
+  beforeEach(async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'vault-mcp-archive-'));
+    vaultRoot = join(tmp, 'vault');
+    await mkdir(join(vaultRoot, '99-archive'), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it('recusa 99-archive/ sem a flag', async () => {
+    await expect(guardedPath(vaultRoot, '99-archive/antigo.md')).rejects.toBeInstanceOf(
+      PathGuardError,
+    );
+  });
+
+  it('aceita 99-archive/ com a flag', async () => {
+    await expect(guardedPath(vaultRoot, '99-archive/antigo.md', { allowArchive: true })).resolves.toBe(
+      resolve(vaultRoot, '99-archive/antigo.md'),
+    );
+  });
+
+  it('aceita um subdiretório de 99-archive/ com a flag', async () => {
+    await expect(
+      guardedPath(vaultRoot, '99-archive/2024/antigo.md', { allowArchive: true }),
+    ).resolves.toBe(resolve(vaultRoot, '99-archive/2024/antigo.md'));
+  });
+
+  it.each(['_templates', '.git', '.obsidian', 'node_modules'])(
+    'continua recusando %s mesmo com a flag ligada',
+    async (name) => {
+      await expect(
+        guardedPath(vaultRoot, `${name}/pwn.md`, { allowArchive: true }),
+      ).rejects.toBeInstanceOf(PathGuardError);
+    },
+  );
+
+  it('continua recusando _templates aninhado com a flag ligada', async () => {
+    await expect(
+      guardedPath(vaultRoot, '02-wiki/_templates/pwn.md', { allowArchive: true }),
+    ).rejects.toBeInstanceOf(PathGuardError);
+  });
+
+  it('continua recusando .git DENTRO de 99-archive com a flag ligada', async () => {
+    // A flag isenta o PREFIXO, e a varredura de segmentos roda depois dela sobre o caminho
+    // inteiro. Sem isso, `99-archive/.git/refs/heads/pwn.md` seria a mesma quebra de
+    // repositório da fase 4, alcançável pela porta que esta flag abre.
+    await expect(
+      guardedPath(vaultRoot, '99-archive/.git/refs/heads/pwn.md', { allowArchive: true }),
+    ).rejects.toBeInstanceOf(PathGuardError);
+  });
+
+  it('continua recusando o que a metade sintática recusa, com a flag ligada', async () => {
+    await expect(
+      guardedPath(vaultRoot, '99-archive/../../fora.md', { allowArchive: true }),
+    ).rejects.toBeInstanceOf(PathGuardError);
+    await expect(
+      guardedPath(vaultRoot, '99-archive/*.md', { allowArchive: true }),
+    ).rejects.toBeInstanceOf(PathGuardError);
+  });
+});
