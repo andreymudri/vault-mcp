@@ -1,7 +1,21 @@
 {
   "name": "vault-mcp",
-  "type": "module",
   "version": "0.1.0",
+  "description": "MCP server for searching, reading and writing an Obsidian knowledge vault: lexical BM25 retrieval plus one wiki-link hop, and learning capture that propagates to the domain MOC, the knowledge index and the daily note in a single commit.",
+  "license": "MIT",
+  "author": "Andrey Mudri <andreybeckert@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andreymudri/vault-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "obsidian",
+    "bm25",
+    "knowledge-base",
+    "model-context-protocol"
+  ],
+  "type": "module",
   "private": true,
   "bin": {
     "vault-mcp": "./dist/server/index.js"
