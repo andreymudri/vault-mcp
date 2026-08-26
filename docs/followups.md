@@ -1,167 +1,170 @@
 # Follow-ups conhecidos
 
-Levantado durante a construção (20 tarefas, 8 fases, todas com gate PASS registrado) e verificado
-contra o código em `main` no commit inicial do repositório. Nada aqui bloqueia: a suíte passa com
-913 testes, o `tsc` está limpo e o binário responde o handshake MCP com as sete tools.
+**Todos os nove itens levantados na construção estão FECHADOS** (2026-08-26). Este documento deixou
+de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
+o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-Este documento é **curado, não um log**. Vários itens levantados durante a run foram corrigidos
-antes do fim (a classe do FIFO, o guard de caminho duplicado, a serialização de escritas, a colisão
-de nome no README e na mensagem de erro) e não aparecem aqui. O que está listado foi confirmado
-aberto por execução, não por leitura.
+A suíte passa com 1.014 testes, o `tsc` está limpo e o binário responde o handshake MCP com as sete
+tools.
 
-Cada item traz o arquivo, a medição que o caracteriza e a forma da correção. A ordem é de
-prioridade, não de descoberta.
+Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
+pelo motivo certo, e só então a correção. Onde o defeito era uma LACUNA DE COBERTURA e não um bug de
+comportamento (itens 7 e 9), o "visto falhando" foi feito por mutação — apagar o clamp, inverter a
+flag — e o teste novo tem de pegar essa mutação.
 
 ---
 
-## 1. Mapa aninhado com alias trava o event loop (~5 s)
+## 1. Mapa aninhado com alias travava o event loop (~5 s) — CORRIGIDO
 
-**`src/server/tools.ts:451`** — o descenso de um nível chama `Object.entries(value)` **antes** do
-teste `depth <= 0` e não memoiza nada. Como um alias YAML faz o mesmo objeto ser referenciado várias
-vezes, ele é resumido uma vez por referência.
+**`src/server/tools.ts`** — o descenso de um nível chamava `Object.entries(value)` **antes** do teste
+`depth <= 0` e não memoizava nada. Como um alias YAML faz o mesmo objeto ser referenciado várias
+vezes, ele era resumido uma vez por REFERÊNCIA.
 
-Medido através da tool real: uma nota de 0,89 MB cujo frontmatter é
-`w: &w {k0: 0, … k59999: 59999}` mais 40 chaves de `b0: {k0: *w, … k24: *w}` faz `vault_get_note`
-devolver 3.911 caracteres depois de **5.237 ms de trabalho síncrono** — durante os quais o servidor
-stdio não atende mais nada. O mesmo valor custava 7 ms antes do descenso. A variante em lista
-(`b0: [*w, *w, …]`) já custava 3.933 ms antes e agora custa 10.936 ms.
+Medido através da tool real: uma nota de 0,89 MB cujo frontmatter é `w: &w {k0: 0, … k59999: 59999}`
+mais 40 chaves de `b0: {k0: *w, … k24: *w}` fazia `vault_get_note` devolver 3.911 caracteres depois
+de **5.237 ms de trabalho síncrono** — durante os quais o servidor stdio não atendia mais nada.
 
-**Correção:** testar `depth <= 0` antes de enumerar, e memoizar o resumo de containers por
-identidade de objeto num `WeakMap`. Bombas de alias exponenciais clássicas continuam limitadas
-(<1 ms, RSS estável) — esta é uma forma diferente, de mapa largo por referência.
+**Correção:** o teste `depth <= 0` passou a vir antes de qualquer enumeração (e usa `Object.keys`
+quando só o número importa), e o resumo de cada container é memoizado por identidade de objeto num
+`WeakMap` por chamada de `renderFrontmatterBlock` — o mapa morre com a chamada, de propósito: um
+cache de módulo responderia por um objeto que o scanner segurou entre refreshes.
 
-## 2. Hard link é indexado na leitura
+**Fixado por:** `test/tools.test.ts`, "um mapa largo referenciado por alias não trava o event loop".
+O teste descarta a primeira chamada (que paga o parse do YAML) e mede a segunda.
 
-**`src/vault/scanner.ts:208`** — o scanner indexa por `entry.isFile()`, e um hard link **é** um
-arquivo regular. A escrita já recusa (`classifyStat` reprova `nlink > 1` em `src/write/paths.ts`),
-mas a leitura não: `fs.link(<segredo fora do vault>, <vault>/02-wiki/x.md)` faz o segredo virar uma
-nota indexada, e `vault_get_note` devolveu uma chave privada que vive fora do vault.
+## 2. Hard link era indexado na leitura — CORRIGIDO
 
-Fechar só a escrita não resolve — o ponto do guard é que conteúdo do vault não puxe bytes de fora, e
-o caminho de leitura faz exatamente isso, direto para o resultado que o agente lê.
+**`src/vault/scanner.ts`** — o scanner indexava por `entry.isFile()`, e um hard link **é** um arquivo
+regular. A escrita já recusava (`classifyStat` reprova `nlink > 1`), a leitura não:
+`fs.link(<segredo fora do vault>, <vault>/02-wiki/x.md)` fazia o segredo virar nota indexada, e
+`vault_get_note` devolvia uma chave privada que vive fora do vault.
 
-**Correção:** aplicar a mesma regra do `classifyStat`, que já é pura sobre `Stats` — é um import e
-uma condição, não um mecanismo novo. **Atenção ao falso positivo:** um snapshot `cp -al` hardlinka
-todo arquivo, então um vault restaurado assim ficaria inteiro fora do índice. Decidir
-deliberadamente entre recusar, avisar, ou recusar apenas links cujo alvo resolve fora da raiz.
+**Correção:** `classifyStat` — a mesma função, agora sobre um `StatLike` estrutural — roda no
+caminho de leitura, sobre o mesmo `Stats` que já respondia o mtime. Um nó reprovado sai do índice
+**com diagnostic**, nomeando a causa.
 
-## 3. Corrida entre processos na escrita
+**Decisão deliberada sobre `cp -al`:** a regra é sobre `nlink`, não sobre onde a contraparte vive —
+não há como perguntar isso a um hard link sem varrer o filesystem. Um vault restaurado com `cp -al`
+fica portanto fora do índice, mas de forma RUIDOSA: um diagnostic por nota. Silenciar seria pior.
 
-**`src/write/atomic.ts:141`** — a publicação é um `fs.rename` puro. O `O_EXCL` da linha 21 protege o
-arquivo temporário, não o alvo, então a garantia vem de um teste seguido de um rename, e não da
-escrita em si.
+**Fixado por:** `test/scanner.test.ts`, describe "VaultScanner: hard link" — os dois casos, o link
+para fora e o link entre dois nomes de dentro.
 
-Dentro do processo isso está fechado: `src/server/tools.ts` serializa `vault_learn`,
-`vault_write_note` e `vault_edit_note` numa fila. Fora do processo, não — Obsidian salvando, um
-cliente de sync, ou uma segunda instância do servidor. Reproduzido com duas chamadas `learn()`
-sobrepostas: as duas responderam `created`/`committed` e o primeiro insight não existia em arquivo
-nenhum nem em blob nenhum.
+## 3. Corrida entre processos na escrita — CORRIGIDO
 
-**Correção:** publicar com `O_CREAT|O_EXCL` (ou criar o alvo exclusivamente antes do rename) e
-repetir a busca por nome livre em `EEXIST`, para a garantia vir da escrita e não do teste.
+**`src/write/atomic.ts`** — a publicação era um `fs.rename` puro. O `O_EXCL` protegia o arquivo
+temporário, não o alvo, então a garantia vinha de um teste seguido de um rename, e não da escrita.
+Reproduzido com duas chamadas `learn()` sobrepostas: as duas respondiam `created`/`committed` e o
+primeiro insight não existia em arquivo nenhum nem em blob nenhum.
 
-## 4. `package.json` sem `private`, com nome já publicado
+**Correção:** `atomicWrite` ganhou `{ exclusive: true }`, usado exatamente quando o chamador
+concluiu que o alvo não existe (`WriteResult.created`). A publicação exclusiva é um `fs.link` — uma
+syscall que publica os bytes prontos e FALHA com `EEXIST` se o nome estiver ocupado — seguido do
+`unlink` do temporário. Preferido a reservar o nome com `O_CREAT|O_EXCL` e renomear por cima porque
+essa variante tem uma janela em que o leitor vê uma nota vazia, e "nenhum leitor observa arquivo
+parcial" é a garantia que este módulo existe para dar. O perdedor recebe `WriteRaceError`, e
+`learn.ts` responde procurando outro nome livre (até 8 vezes) — a mesma saída que o ramo
+"ocupado e não anexável" já tomava.
 
-**`package.json`** — não tem `"private": true`, e `bin: {"vault-mcp": …}` reivindica um nome que já
-existe no npm:
+**Fixado por:** `test/writer.test.ts`, describe "atomicWrite > exclusive" (três casos), e
+`test/learn.test.ts`, "duas learn() sobrepostas no mesmo nome não perdem insight".
 
-    npm view vault-mcp
-      name 'vault-mcp', version 0.0.1, 443 bytes
-      description 'MCP server namespace - part of HLOS ecosystem'
-      maintainer ars923 <context@hlos.ai>
+## 4. `package.json` sem `private`, com nome já publicado — CORRIGIDO
 
-O README e a mensagem de erro do servidor já foram corrigidos para nunca sugerir `npx vault-mcp`.
-Falta o guard local.
+`"private": true` está no `package.json`: um `npm publish` acidental falha aqui e não no registry. O
+nome `vault-mcp` continua sendo de outro autor no npm (`vault-mcp@0.0.1`, 443 bytes, por ars923);
+publicar um dia exige renomear com escopo. O README, a mensagem de erro do servidor e o docblock de
+`src/server/index.ts` dizem todos o caminho absoluto, nunca `npx vault-mcp`.
 
-**Correção:** `"private": true`, para um `npm publish` acidental falhar aqui e não no registry. Se um
-dia for publicar, o pacote precisa ser renomeado (com escopo, ex.: `@andreymudri/vault-mcp`) — o
-nome puro não está disponível.
+**Fixado por:** `test/package.test.ts`.
 
-## 5. Classe de caracteres duplicada em `tools.ts`
+## 5. Classe de caracteres duplicada em `tools.ts` — CORRIGIDO
 
-**`src/server/tools.ts`** — carrega a própria cópia de `INVISIBLE_CHARS`, que é a classe
-consolidada em `src/write/paths.ts` durante a mesma fase. As cópias são idênticas hoje; o risco é
-divergirem.
+`src/server/tools.ts` carregava a própria cópia de `INVISIBLE_CHARS`. Agora importa de
+`src/write/paths.ts` e deriva a forma global de `.source`, como `propagate.ts` e `learn.ts` já
+faziam — `paths.ts` exporta sem a flag `g` de propósito, para não haver `lastIndex` compartilhado.
+As cópias eram idênticas na hora da troca (verificado byte a byte antes).
 
-Isso não é hipotético neste projeto: o escape para dentro de `.git/` corrigido na fase 4 existiu
-justamente porque `propagate.ts` carregava a própria cópia do guard.
+## 6. Vitest não saía quando um teste bloqueava o worker — CORRIGIDO, por fora do vitest
 
-**Correção:** importar de `paths.ts`. Ele exporta a regex **sem** a flag `g` de propósito (nada de
-`lastIndex` compartilhado), então derive uma global a partir de `.source`, como `propagate.ts` e
-`learn.ts` já fazem. `paths.ts` importa só `node:path` e `node:fs`, então não há ciclo.
+O gate lê o **exit code** de `npm test`. Uma suíte que trava não dá exit code nenhum — vira uma
+parada indefinida em vez de um FAIL limpo, e um gate que pode travar não serve como evidência.
 
-## 6. Vitest não sai quando um teste assíncrono estoura o timeout
+**A correção sugerida na versão anterior deste documento não funciona.** Medido em vitest 4.1, com um
+teste bloqueado em leitura SÍNCRONA de um FIFO sem escritor: `teardownTimeout` não resolve,
+`pool: 'forks'` não resolve, e o próprio `testTimeout` não chega a disparar — o event loop do worker
+está bloqueado antes disso. Os três passaram de 120 s sem imprimir uma linha sequer. (A variante
+ASSÍNCRONA, que era o caso medido originalmente, o vitest 4 já encerra sozinho em ~2 s.)
 
-**`vitest.config.ts`** — quando um teste com leitura bloqueada falha (os testes de FIFO), o vitest
-**imprime** a falha e depois nunca termina: `close timed out`, `Failed to terminate worker`. Medido
-com kill externo em exit 124.
+**Correção:** o limite vem de fora do runner. `npm test` roda `scripts/test.mjs`, que sobe o vitest
+em seu próprio GRUPO de processos e sinaliza o grupo — o worker travado não é o processo que o
+script iniciou, então matar só o pai o deixaria para trás. Estourado o limite (15 min, ajustável por
+`VAULT_MCP_TEST_TIMEOUT_MS`), a suíte sai com **124**. Verificado nos três caminhos: suíte verde sai
+0, falha real sai 1, suíte travada sai 124 dentro do limite.
 
-Importa porque o gate lê o **exit code** de `npm test`. Uma suíte que imprime a falha e trava não dá
-exit code nenhum — vira uma parada indefinida em vez de um FAIL limpo, e um gate que pode travar não
-serve como evidência.
+A outra metade da sugestão — estender o `withFifoWatch` — já estava feita: os nove `mkfifo` dos
+testes estão todos sob o watcher.
 
-Não é alcançável hoje: os testes de FIFO passam em milissegundos no código correto, então só uma
-regressão dispara. `test/learn.test.ts` e `test/propagate.test.ts` já usam um helper `withFifoWatch`
-que abre a ponta de escrita com `O_WRONLY|O_NONBLOCK` e faz a falha acontecer em ~2 s com saída
-limpa — esse é o padrão a seguir.
+## 7. Teardown de repositório descartável em `test/git.test.ts` — CORRIGIDO
 
-**Correção:** `teardownTimeout` em `vitest.config.ts`, ou estender o `withFifoWatch` aos testes que
-ainda dependem do timeout do runner.
+Criava repositórios com `git init` + commit e removia com `fs.rm` puro, sem `gc.auto 0` e sem
+`maxRetries` — a forma exata que falhou uma vez no gate com `ENOTEMPTY: rmdir '.../vault/.git'`.
+Agora usa o mesmo par `initScratchRepo`/`removeTree` de `test/writer.test.ts`, nos três sítios.
 
-## 7. Teardown de repositório descartável em `test/git.test.ts`
+## 8. Guard de tag: as três lacunas medidas — CORRIGIDAS
 
-**`test/git.test.ts:28,77,293`** — cria repositórios com `git init` + commit e remove com `fs.rm`
-puro, sem `gc.auto 0` e sem `maxRetries`. É a forma exata que falhou uma vez no gate com
-`ENOTEMPTY: rmdir '.../vault/.git'` — o teardown correndo com o `gc --auto` que o git dispara em
-segundo plano e que sobrevive ao commit já aguardado.
+Todas em **`src/server/tools.ts`**, no `tagRoundTripProblem`:
 
-`test/writer.test.ts` já recebeu o endurecimento (`initScratchRepo` com `gc.auto 0` e um `removeTree`
-com `maxRetries`); este arquivo ficou de fora.
+- **Sexagesimal FLOAT** era um resolver separado que o guard não cobria: `1:30.5`→90,5, `1:30.`→90,
+  `0:30.5`→30,5, `12:00.25`→720,25, `1:30:00.5`→5400,5, `59:59.999`→3599,999. Duas diferenças em
+  relação ao inteiro, as duas medidas: o grupo inicial pode começar com zero, e a forma termina em
+  ponto com dígitos opcionais.
+- **Timestamp ISO completo** passava batido — só a forma curta era coberta —, então
+  `2026-01-10T00:00:00Z` voltava `2026-01-10`. É um regex SEPARADO no js-yaml, e é justamente o que
+  torna mês e dia de um dígito legais nele: `2026-1-5` sozinho é texto, `2026-1-5T01:02:03Z` é uma
+  data.
+- **`NUMERIC_LIKE_RE` era mais LARGA que os resolvers do js-yaml**, recusando tags que sobreviveriam:
+  `009`/`018`/`09` (zero à esquerda significa octal, e 8 e 9 não são dígitos octais — um id de ticket
+  com zero-padding é o caso real), `1_`/`007_` (numérico não termina em underscore), `0X1F`/`0B11`
+  (os prefixos de radix são só minúsculos) e `+.0`/`+.1`/`+.9` (o float de ponto nu do js-yaml não
+  leva sinal).
 
-**Correção:** aplicar o mesmo par. Um teste que falha por acaso é pior que um lento.
+Uma quarta lacuna apareceu durante a medição e foi corrigida junto: a mensagem nomeava o valor de
+volta com `Number`, que ignora o radix — `017` era anunciado como 17 quando o YAML lê 15. O valor
+agora é lido por radix.
 
-## 8. Guard de tag: três lacunas medidas
+**Método, e ele é o ponto:** um corpus de 128 formas foi escrito pelo serializador real e relido pelo
+parser real, e a tabela de `test/tools.test.ts` ("a tag %s só é recusada se realmente não sobreviver
+ao YAML") é esse corpus inteiro. A propriedade é `refused === !roundTrips`, então uma correção errada
+falha nos dois sentidos — recusar o que sobrevive é tão erro quanto aceitar o que não sobrevive.
 
-Todas em **`src/server/tools.ts`**, no `tagRoundTripProblem`. O guard foi reconstruído a partir de
-medição — 55 formas escritas pelo serializador real e lidas de volta pelo parser real — e acerta o
-que foi medido. Estas três ficaram fora da tabela:
+## 9. Itens menores — CORRIGIDOS (um deles não reproduziu)
 
-- **`:723`** — `SEXAGESIMAL_RE` cobre só o **inteiro** sexagesimal do YAML 1.1. Floats passam e são
-  reescritos: `1:30.5` é aceito e volta `90.5`; também `1:30.` → 90, `0:30.5` → 30.5, `12:00.25` →
-  720.25, `1:30:00.5` → 5400.5, `59:59.999` → 3599.999. Note que a restrição de `[1-9]` inicial está
-  certa para inteiros e errada para floats (`0:30` sobrevive, `0:30.5` não).
-- **`:726`** — `YAML_DATE_RE` cobre só o timestamp curto, então a forma ISO completa passa:
-  `2026-01-10T00:00:00Z` volta como `2026-01-10`.
-- **`:719`** — `NUMERIC_LIKE_RE` é **mais larga** que os resolvers do js-yaml em quatro pontos
-  medidos, recusando tags que sobreviveriam, com uma mensagem que nomeia um valor que o YAML nunca
-  produz: decimais com zero à esquerda contendo 8 ou 9 (`009`, um id de ticket com zero-padding é o
-  caso real mais plausível), underscore final (`1_`, `007_`), prefixo de radix maiúsculo (`0X1F`,
-  `0B11`), e `+.0`/`+.1`/`+.9`.
-
-**Correção:** os três são ajustes de regex. O método já está estabelecido — medir a forma pelo
-serializador e pelo parser reais, e recusar só o que de fato não faz round-trip. A tabela de testes
-já é property-based (`refused === !roundTrips`), então uma correção errada falha nos dois sentidos.
-
-## 9. Itens menores, todos medidos
-
-- **`src/server/tools.ts:249`** — o aviso de exclusividade dispara para uma chamada que estava
-  **sozinha** na fila: o próprio slot dela expirando incrementa `expired`, e o terceiro termo de
-  `overlapped` lê isso como exclusão perdida. Conservador, não perigoso; precisa de uma escrita de
-  mais de 60 s para aparecer.
-- **`src/server/tools.ts:557`** — `relayDiff` colapsa CRLF dentro do diff, então uma edição só de
-  fim de linha aparece como um par `-`/`+` visualmente idêntico. O usuário vê uma mudança descrita
-  como mudança, sem diferença visível.
-- **`src/server/index.ts:15`** — o docblock do módulo ainda diz "The process a user starts:
-  `npx vault-mcp`", contradizendo o README e a mensagem de erro, ambos corrigidos. Só comentário.
-  (As menções em `:156,158` explicam que `npx`/`npm` instalam o bin como **symlink**, que é o motivo
-  de `isDirectRun` comparar via `realpathSync` — isso continua verdade, deixe.)
-- **`test/tools.test.ts:892`** — o teste dos clamps de `renderNoteLine` fixa `tipo` e `status` mas
-  **não** `tags`: apagar aquele terceiro clamp mantém os 913 testes verdes. Uma nota no máximo que o
-  próprio `frontmatter.ts` permite (64 tags × 128 chars) renderiza uma linha de 8.380 caracteres sem
-  o clamp contra 584 com ele — 14×, uma vez por nota.
-- **`test/tools.test.ts:497`** — a metade do CRLF no **snippet** não está fixada: trocar
-  `quoteSnippet` para `sanitizeQuoted(text, false)` mantém tudo verde enquanto toda linha de toda
-  nota escrita no Windows ganha um `\r` visível.
+- **Aviso de exclusividade em chamada solitária** (`src/server/tools.ts`) — disparava para uma
+  escrita que estava SOZINHA na fila: o próprio slot dela expirando incrementava `expired` e
+  `outstanding`, e `overlapped` lia isso como exclusão perdida. A fila agora conta TAREFAS QUE
+  COMEÇARAM, que é a pergunta de verdade: o aviso sai se algo começou enquanto esta rodava, ou se
+  algo abandonado ainda corria quando ela começou. Um aviso que aparece onde nada se sobrepôs ensina
+  o leitor a ignorá-lo onde algo se sobrepôs. Fixado pelos dois casos — sozinha e com alguém atrás.
+- **`relayDiff` colapsando CRLF** — **não reproduz.** `relayDiff` chama `sanitizeQuoted(diff, false)`,
+  que é a variante que MOSTRA o `\r`, e uma edição só de fim de linha renderiza `+linha um\r`,
+  medido através da tool real. A metade do diff também já estava fixada: inverter a flag quebra um
+  teste existente. O item era um engano de leitura do documento anterior.
+- **CR órfão no trecho** — achado ao escrever o teste da metade do snippet: `chunker.ts` divide o
+  corpo em `\n` e junta em `\n`, então o terminador da ÚLTIMA linha é o separador que se perde e o
+  `\r` dela fica órfão. Todo trecho de nota escrita no Windows saía com um `\r` visível na última
+  linha citada. Removido só no fim e só no chamador que colapsa — um `\r` solto em qualquer outro
+  lugar continua sendo uma quebra que reescreve linha renderizada, e continua escapado.
+- **Docblock de `src/server/index.ts`** — dizia "The process a user starts: `npx vault-mcp`",
+  contradizendo o README e a mensagem de erro. Corrigido, e as menções a `npx`/`npm` mais abaixo
+  ficaram: elas explicam que o bin é instalado como SYMLINK, que é outro assunto e continua verdade.
+- **Clamp de `tags` em `renderNoteLine`** — não estava fixado: o teste que existia era dominado por
+  `tipo` e `status` gigantes, então apagar o terceiro clamp mantinha tudo verde. O teste novo usa o
+  MÁXIMO LEGAL que `frontmatter.ts` aceita (64 tags de 128 caracteres) e pega a mutação: 8.385
+  caracteres na linha sem o clamp, contra menos de 1.000 com ele — uma vez por nota.
+- **Metade CRLF do snippet** — não estava fixada: trocar `quoteSnippet` para
+  `sanitizeQuoted(text, false)` mantinha tudo verde. Fixada, e a verificação foi por mutação nos dois
+  sentidos.
 
 ---
 
@@ -183,3 +186,13 @@ juntadores (soft hyphen, ZWSP/ZWNJ/ZWJ, word joiner, BOM) ficam crus de propósi
 palavras no meio da prosa.
 
 Registrado aqui para não ser redescoberto como bug.
+
+---
+
+## Aberto, novo
+
+**`tsconfig.json` cobre só `src/`.** Os testes não passam pelo `tsc`, então um fake que não satisfaz
+mais a interface que declara `implements` só aparece quando o teste roda — foi o que aconteceu com o
+`MemoryFs` de `test/retrieval.test.ts` quando `FsOps.stat` ganhou `nlink`. A forma da correção é um
+`tsconfig` de testes (ou um `include` mais largo com `noEmit`) rodado junto do build. Não corrigido
+aqui: está fora dos nove e muda o pipeline, não o servidor.

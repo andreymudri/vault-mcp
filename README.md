@@ -133,10 +133,10 @@ Convenção de diretórios:
 
 ## Limitações Conhecidas
 
-`docs/followups.md` lista o que está aberto e verificado: uma renderização de frontmatter com alias
-que trava o event loop por ~5 s, hard link indexado no caminho de leitura, a corrida de escrita
-entre processos, e ajustes menores no guard de tag. Cada item traz a medição e a forma da correção.
-Nada ali bloqueia o uso; tudo ali foi confirmado por execução.
+Os nove follow-ups levantados na construção foram corrigidos — inclusive o frontmatter com alias que
+travava o event loop por ~5 s, o hard link indexado no caminho de leitura e a corrida de escrita
+entre processos. `docs/followups.md` guarda o histórico: cada item com a medição que o caracterizava,
+a correção aplicada e o teste que a fixa, mais o que continua **aceito deliberadamente**.
 
 ## Desenvolvimento
 
@@ -148,4 +148,8 @@ npm test         # Roda testes vitest
 npm run dev      # Watch mode (se necessário)
 ```
 
-A suíte completa leva ~60 segundos. Alguns testes usam FIFO para simular operações de longa duração; timeouts naturais devem ser respeitados.
+A suíte completa leva ~10 segundos. Alguns testes usam FIFO para simular operações de longa
+duração; todos eles abrem a ponta de escrita por conta própria (`withFifoWatch`), então falham em
+segundos em vez de dependerem do timeout do runner. `npm test` roda por `scripts/test.mjs`, que
+limita a suíte por relógio (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) e mata o grupo de processos: uma
+suíte travada vira exit 124, e não uma parada indefinida sem exit code nenhum.
