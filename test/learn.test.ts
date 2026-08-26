@@ -830,7 +830,33 @@ describe('learn — propagação e commit', () => {
     // The 120th code point is the emoji: a UTF-16 slice would keep its high surrogate alone.
     expect(entry).toContain('🎉');
     expect(entry).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
-    expect(Array.from(entry.slice(entry.indexOf('— ') + 2)).length).toBe(120);
+    // 120 pontos de código de conteúdo MAIS a reticência que marca o corte. A garantia do
+    // par surrogate é a mesma: o emoji continua inteiro, no 120º ponto.
+    const resumo = entry.slice(entry.indexOf('— ') + 2);
+    expect(Array.from(resumo).length).toBe(121);
+    expect(resumo.endsWith('…')).toBe(true);
+    expect(Array.from(resumo)[119]).toBe('🎉');
+  });
+
+  it('não marca com reticência um resumo que coube inteiro', async () => {
+    // O contrapeso: a reticência é sinal de CORTE, não decoração. Uma primeira frase curta
+    // sai como está. Sem isto, sempre acrescentar passaria verde.
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Health check com Terminus',
+      insight: 'O terminus agrega indicadores. Segunda frase fora.',
+      contexto: 'Subindo o healthcheck do cluster',
+      dominio: 'nestjs',
+      tags: ['nestjs'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    const moc = await read(vaultRoot, MOC_NESTJS);
+    const entry = moc.split('\n').find((l) => l.includes('[[health-check-com-terminus]]')) ?? '';
+    expect(entry).toContain('— O terminus agrega indicadores.');
+    expect(entry).not.toContain('…');
   });
 
   it('usa só a primeira frase do insight como resumo', async () => {

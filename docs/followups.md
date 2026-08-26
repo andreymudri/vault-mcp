@@ -6,7 +6,7 @@ item 12 (levantado sondando a recuperação contra o vault real). Este documento
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.043 testes em 17 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+A suíte passa com 1.044 testes em 17 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
 o handshake MCP com as sete tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
@@ -278,6 +278,33 @@ pego por "keeps prose that is not a self-contained placeholder", e alargar para 
 de corpo" é pego por "keeps the placeholder when it is not the only content of the section" — que
 só existe porque a primeira rodada de mutação passou verde e revelou que a guarda
 `bodyIdx.length === 1` não estava fixada por nada.
+
+---
+
+## 14. Resumo cortado se passava por frase inteira — CORRIGIDO
+
+Achado na mesma saída real do item 13. `resumoOf` corta a primeira frase do insight em
+`MAX_RESUMO_CHARS` (120) pontos de código e **não marcava o corte**, então a entrada do MOC
+terminou em:
+
+```
+- [[shim-de-grep...]] — O Claude Code embrulha `grep`, `find` e afins numa função de shell (definida no snapshot em `~/.claude/shell-snapshots/`
+```
+
+Duas coisas erradas de uma vez: a linha lê-se como uma frase completa quando não é, e o corte
+caiu no meio de um trecho de código inline, desequilibrando a crase para o resto da linha.
+
+**Correção:** uma reticência quando — e só quando — houve corte.
+
+**A reticência fica FORA do orçamento de 120**, e a razão é o item que já estava fixado ali: o
+corte é por PONTO DE CÓDIGO justamente para não partir um par surrogate, e roubar um ponto para a
+marca faria o emoji da fronteira ser o descartado — trocando um defeito cosmético por um risco de
+conteúdo. 121 no pior caso é um limite tão bom quanto 120.
+
+**Fixado por:** `test/learn.test.ts`, dois casos. O que já existia ganhou as asserções da marca e
+manteve intactas as do par surrogate (o emoji continua inteiro, no 120º ponto). O novo — "não
+marca com reticência um resumo que coube inteiro" — é o contrapeso, e foi verificado por mutação:
+acrescentar sempre a reticência passava verde sem ele.
 
 ---
 

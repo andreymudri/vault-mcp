@@ -1,4 +1,4 @@
-# A suíte é a evidência deste projeto — 17 arquivos, 1.043 testes, e nada rodava fora da máquina do autor.
+# A suíte é a evidência deste projeto — 17 arquivos, 1.044 testes, e nada rodava fora da máquina do autor.
 #
 # `npm test` é o comando inteiro de propósito: o `pretest` do npm roda o typecheck sobre `src/` E
 # `test/` antes de qualquer teste, e `scripts/test.mjs` limita a suíte por relógio e mata o grupo de

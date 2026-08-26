@@ -576,7 +576,18 @@ function resumoOf(insight: string): string {
   const end = flat.search(/[.!?](\s|$)/);
   const sentence = end === -1 ? flat : flat.slice(0, end + 1);
   const bounded = sliceAtCodePointBoundary(sentence, MAX_RESUMO_CHARS * 2);
-  return Array.from(bounded).slice(0, MAX_RESUMO_CHARS).join('');
+  const points = Array.from(bounded);
+  const kept = points.slice(0, MAX_RESUMO_CHARS).join('');
+  // A reticência é o que separa "esta é a frase" de "esta é a frase, cortada". Sem ela a
+  // linha do MOC lê-se como completa: medido no vault real, um resumo cortado terminou em
+  // ``em `~/.claude/shell-snapshots/`` — que além de mentir sobre estar inteiro, corta no
+  // meio de um trecho de código inline e desequilibra a crase para o resto da linha.
+  //
+  // Ela fica FORA do orçamento de MAX_RESUMO_CHARS, e é por isso: o corte por ponto de
+  // código existe para não partir um par surrogate, e roubar um ponto para a marca faria o
+  // emoji da fronteira ser justamente o descartado — trocando um defeito cosmético por um
+  // risco de conteúdo. 121 pontos no pior caso é um limite tão bom quanto 120.
+  return points.length > MAX_RESUMO_CHARS ? `${kept}…` : kept;
 }
 
 /** Joins the warnings one call can produce, keeping every one of them visible. */
