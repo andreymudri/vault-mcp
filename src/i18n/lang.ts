@@ -1,21 +1,31 @@
 /**
  * O idioma em que o servidor FALA — e a fronteira, que é a parte que importa.
  *
- * Duas famílias de texto saem daqui e só UMA delas é traduzível:
+ * Três famílias de texto saem daqui, e só a primeira é traduzível:
  *
- * - **O que o servidor DIZ** ao agente e ao usuário: descrição das tools, descrição dos campos,
- *   erros, avisos, rótulos do resultado da busca. É isto que `VAULT_LANG` controla. Vale a pena
- *   controlar porque a descrição da tool é o que o MODELO lê para decidir se chama a tool: um
- *   servidor que descreve `vault_learn` em português para um agente operando em inglês está
- *   pagando um imposto de tradução em toda decisão de chamada.
+ * - **O que o servidor DIZ como interface**, e é isto que `VAULT_LANG` controla: descrição das
+ *   tools e dos campos, recusa de entrada (invólucro E conteúdo), erro de start, rótulos do
+ *   resultado (Commit/Push/Aviso/Diff, cabeçalhos, listas vazias, manchetes) e os ERROS LANÇADOS
+ *   pela camada de escrita, que chegam por CÓDIGO e são resolvidos na fronteira da tool — ver
+ *   `errors.ts`. Vale a pena traduzir porque a descrição da tool é o que o MODELO lê para decidir
+ *   se chama a tool, e porque quem esquece a VAULT_PATH recebe a única mensagem que precisava ler.
  *
- * - **O que o servidor ESCREVE no vault**: assunto de commit (`docs(vault): atualizar X`) e nome
- *   de seção (`## Notas`, `## Domínios`, `## Capturas`). Isto NÃO é traduzível, e não é questão de
- *   gosto: `insertUnderSection` procura o nome da seção DENTRO DO ARQUIVO DO USUÁRIO. Traduzir
- *   `'## Notas'` para `'## Notes'` num vault cujo MOC diz `## Notas` não acha a seção, ANEXA uma
- *   segunda, e quebra em silêncio a idempotência que impede o MOC de ganhar uma linha repetida a
- *   cada captura. O assunto de commit tem o mesmo problema com outro nome: ele entra no histórico
- *   de git do usuário, que é do vault e não de quem está lendo.
+ * - **O que o servidor ESCREVE no vault**, que NÃO é traduzível e não é questão de gosto: assunto
+ *   de commit (`docs(vault): atualizar X`) e nome de seção (`## Notas`, `## Domínios`,
+ *   `## Capturas`). `insertUnderSection` procura o nome da seção DENTRO DO ARQUIVO DO USUÁRIO:
+ *   traduzir `'## Notas'` para `'## Notes'` num vault cujo MOC diz `## Notas` não acha a seção,
+ *   ANEXA uma segunda, e quebra em silêncio a idempotência que impede o MOC de ganhar uma linha
+ *   repetida a cada captura. O assunto de commit tem o mesmo problema com outro nome: ele entra
+ *   no histórico de git do usuário, que é do vault e não de quem está lendo.
+ *
+ * - **AVISOS e DIAGNÓSTICOS, que continuam em português por ora** e são a exceção declarada:
+ *   falhas de push e de commit (`git.ts`), avisos de mover/reescrever links (`relocate.ts`,
+ *   `rewrite-links.ts`), e o `Motivo:` com que `vault_learn` explica ter anexado em vez de criado.
+ *   Não é esquecimento: `writer.ts` funde até três avisos de origens diferentes numa string só
+ *   (`joinWarnings`), então um código por aviso não sobrevive à fusão — traduzi-los exige
+ *   reestruturar os arrays de aviso de quatro módulos, e parte deles é ANÁLISE (o `Motivo:` é
+ *   prosa sobre o conteúdo do vault) e não rótulo de interface. Está aqui escrito para o próximo
+ *   leitor saber que a fronteira é esta, e não descobrir por acidente.
  *
  * Resumo: o idioma da INTERFACE é do leitor; o idioma do CONTEÚDO é do vault.
  */

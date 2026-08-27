@@ -194,8 +194,25 @@ repository. Without the flag the default is `local` (the current directory only)
 
 ### `VAULT_LANG`
 
-The language the server **speaks**: `en` (default) or `pt`. It sets the tool and field descriptions,
-the input refusals, and the startup errors.
+The language the server **speaks**: `en` (default) or `pt`. It covers the tool and field
+descriptions, input refusals (wrapper *and* payload), startup errors, result labels (Commit / Push
+/ Warning / Diff, headers, empty-list markers, headlines), and the errors thrown by the write layer
+— path rejected, note not found, invalid domain — which travel as a code and are resolved at the
+tool boundary.
+
+Two things it deliberately does **not** cover, so you know where the line is:
+
+- **Anything written into the vault** — commit subjects (`docs(vault): …`) and section names
+  (`## Notas`, `## Domínios`, `## Capturas`). These follow the *vault*, never the reader, and it is
+  not a matter of taste: the server looks the section name up **inside your own MOC file**, so
+  translating `## Notas` to `## Notes` in a vault whose MOC says `## Notas` would not find the
+  section, would append a second one, and would silently break the idempotency that stops the MOC
+  gaining a duplicate line on every capture.
+- **Warnings and diagnostics**, which stay in Portuguese for now: push and commit failures, move and
+  link-rewrite warnings, and the `Motivo:` line explaining why `vault_learn` appended instead of
+  creating. `writer.ts` merges up to three warnings from different sources into one string, so a
+  per-warning code does not survive the merge; translating them means restructuring the warning
+  arrays of four modules, and part of it is analysis *about vault content* rather than interface.
 
 The default is English even though this server was built for a Portuguese vault. The tool
 description is what the *model* reads to decide whether to call a tool at all, so a server
@@ -223,13 +240,6 @@ it does **not** work in cmd.exe or PowerShell — use the client form above on W
 ```bash
 VAULT_LANG=pt VAULT_PATH="/absolute/path/to/vault" npx @andreymudri/vault-mcp
 ```
-
-**What it does not touch: anything written into the vault.** Commit subjects (`docs(vault): …`) and
-section names (`## Notas`, `## Domínios`, `## Capturas`) follow the *vault*, never the reader. This
-is not a matter of taste: the server looks the section name up **inside your own MOC file**, so
-translating `## Notas` to `## Notes` in a vault whose MOC says `## Notas` would not find the
-section, would append a second one, and would silently break the idempotency that stops the MOC
-gaining a duplicate line on every capture.
 
 ### `VAULT_AUTO_PUSH`
 

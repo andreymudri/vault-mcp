@@ -186,8 +186,25 @@ flag o padrão é `local` (só o diretório atual). Confira com `claude mcp get 
 
 ### `VAULT_LANG`
 
-O idioma em que o servidor **fala**: `en` (padrão) ou `pt`. Vale para a descrição das tools e dos
-campos, as recusas de entrada e os erros de start.
+O idioma em que o servidor **fala**: `en` (padrão) ou `pt`. Cobre a descrição das tools e dos
+campos, as recusas de entrada (invólucro *e* conteúdo), os erros de start, os rótulos do resultado
+(Commit / Push / Aviso / Diff, cabeçalhos, marcadores de lista vazia, manchetes) e os erros
+lançados pela camada de escrita — caminho recusado, nota não encontrada, domínio inválido — que
+viajam como código e são resolvidos na fronteira da tool.
+
+Duas coisas que ele deliberadamente **não** cobre, para você saber onde fica a linha:
+
+- **Tudo que é escrito no vault** — assunto de commit (`docs(vault): …`) e nome de seção
+  (`## Notas`, `## Domínios`, `## Capturas`). Seguem o *vault*, nunca o leitor, e não é questão de
+  gosto: o servidor procura o nome da seção **dentro do seu próprio arquivo de MOC**, então
+  traduzir `## Notas` para `## Notes` num vault cujo MOC diz `## Notas` não acharia a seção,
+  anexaria uma segunda, e quebraria em silêncio a idempotência que impede o MOC de ganhar uma
+  linha repetida a cada captura.
+- **Avisos e diagnósticos**, que por ora seguem em português: falhas de push e de commit, avisos de
+  mover e de reescrever links, e a linha `Motivo:` que explica por que o `vault_learn` anexou em
+  vez de criar. O `writer.ts` funde até três avisos de origens diferentes numa string só, então um
+  código por aviso não sobrevive à fusão; traduzi-los exige reestruturar os arrays de aviso de
+  quatro módulos, e parte disso é análise *sobre o conteúdo do vault*, não rótulo de interface.
 
 O padrão é inglês mesmo tendo o servidor nascido servindo um vault em português. A descrição da
 tool é o que o *modelo* lê para decidir se chama a tool, então um servidor descrito num idioma em
@@ -213,13 +230,6 @@ De um shell POSIX dá para prefixar direto. Esta forma é gramática de shell, n
 ```bash
 VAULT_LANG=pt VAULT_PATH="/caminho/absoluto/do/vault" npx @andreymudri/vault-mcp
 ```
-
-**O que ele não toca: nada que seja escrito no vault.** Assunto de commit (`docs(vault): …`) e nome
-de seção (`## Notas`, `## Domínios`, `## Capturas`) seguem o *vault*, nunca o leitor. Não é questão
-de gosto: o servidor procura o nome da seção **dentro do seu próprio arquivo de MOC**, então
-traduzir `## Notas` para `## Notes` num vault cujo MOC diz `## Notas` não acharia a seção, anexaria
-uma segunda, e quebraria em silêncio a idempotência que impede o MOC de ganhar uma linha repetida a
-cada captura.
 
 ### `VAULT_AUTO_PUSH`
 
