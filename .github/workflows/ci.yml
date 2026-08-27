@@ -21,8 +21,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Três sistemas operacionais, e não por simetria: o vault é um CAMINHO DE ARQUIVO, e caminho é a
+  # única coisa deste projeto que muda de forma conforme o sistema. O código normaliza tudo para `/`
+  # internamente (`relocate.ts`, `learn.ts`) e volta para o separador nativo no `scanner`, o que
+  # PARECE certo — e ninguém nunca rodou nada disso fora do Linux. O Obsidian é majoritariamente
+  # Windows: o primeiro usuário de Windows não pode continuar sendo a suíte de testes.
+  #
+  # `fail-fast: false` porque o interessante aqui é justamente QUAIS plataformas quebram. Um job
+  # cancelando os outros esconde a resposta na primeira falha.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     timeout-minutes: 15
 
     steps:
