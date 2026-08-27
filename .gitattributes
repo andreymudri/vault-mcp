@@ -1,0 +1,6 @@
+# O checkout tem de ser byte-idêntico em todo sistema: a suíte compara conteúdo de
+# fixture com literais que trazem `\n`, e um runner com `core.autocrlf=true` (o padrão do
+# Windows) transformava isso em 48 falhas que não eram do código. CRLF é uma forma de vault
+# SUPORTADA — e por isso é testada com conteúdo construído em memória, nunca com um arquivo
+# cujo conteúdo depende da configuração de git de quem clonou.
+* text=auto eol=lf

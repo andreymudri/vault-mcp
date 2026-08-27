@@ -511,6 +511,58 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 /**
+ * O mesmo texto com CRLF colapsado para LF, mais o mapa que devolve cada posição normalizada
+ * para o deslocamento original.
+ *
+ * `map[i]` é o deslocamento, no texto ORIGINAL, do caractere que virou a posição `i` do
+ * normalizado; `map[normalizado.length]` é o fim do original. Com isso um casamento encontrado
+ * no espaço normalizado vira uma fatia exata do original — inclusive quando o trecho começa ou
+ * termina exatamente sobre um `\r\n`, que ocupa dois caracteres de um lado e um do outro.
+ */
+function foldLineEndings(text: string): { folded: string; map: number[] } {
+  let folded = '';
+  const map: number[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '\r' && text[i + 1] === '\n') {
+      map.push(i);
+      folded += '\n';
+      i += 1;
+      continue;
+    }
+    map.push(i);
+    folded += text[i];
+  }
+  map.push(text.length);
+  return { folded, map };
+}
+
+/**
+ * Onde `oldText` está em `before` IGNORANDO a diferença entre `\r\n` e `\n`, e quantas vezes.
+ *
+ * Existe porque o trecho e o arquivo chegam por caminhos que não concordam sobre o terminador.
+ * O arquivo tem o que o editor do usuário gravou — num vault de Windows, CRLF. O trecho vem do
+ * agente, que quase sempre o copiou da resposta de `vault_search`, e essa resposta mostra o corpo
+ * com o `\r` REMOVIDO de propósito, para o `\r` não aparecer no fim de cada linha na tela. O
+ * resultado, com casamento por substring exata, é `trecho não encontrado` num texto que o usuário
+ * está vendo na tela — o pior formato de erro que existe.
+ *
+ * Isto é um SEGUNDO passo, tentado só depois de o casamento exato falhar, e não uma substituição
+ * dele: enquanto houver ocorrência exata, é ela que decide, e nenhuma nota LF muda de
+ * comportamento por causa desta função.
+ */
+function matchFoldingLineEndings(
+  before: string,
+  oldText: string
+): { at: number; end: number; occurrences: number } {
+  const { folded, map } = foldLineEndings(before);
+  const needle = foldLineEndings(oldText).folded;
+  const occurrences = countOccurrences(folded, needle);
+  if (occurrences !== 1) return { at: -1, end: -1, occurrences };
+  const start = folded.indexOf(needle);
+  return { at: map[start]!, end: map[start + needle.length]!, occurrences };
+}
+
+/**
  * Replaces one exact substring of an existing note.
  *
  * Exact-substring, and exactly ONE occurrence: zero is an error naming the file, two or
@@ -539,14 +591,25 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
 
   const before = await fs.readFile(absPath, 'utf8');
   const occurrences = countOccurrences(before, opts.oldText);
-
-  if (occurrences === 0) throw new EditError(`trecho não encontrado em ${opts.path}`);
   if (occurrences > 1) {
     throw new EditError(`trecho ambíguo em ${opts.path}: ${occurrences} ocorrências`);
   }
 
-  const at = before.indexOf(opts.oldText);
-  const after = before.slice(0, at) + opts.newText + before.slice(at + opts.oldText.length);
+  // Exato primeiro, sempre. O passo tolerante a terminador só é alcançado quando o exato achou
+  // ZERO, então uma nota LF segue decidida pelo casamento exato e nada nela muda de comportamento.
+  let at = before.indexOf(opts.oldText);
+  let end = at + opts.oldText.length;
+  if (occurrences === 0) {
+    const folded = matchFoldingLineEndings(before, opts.oldText);
+    if (folded.occurrences === 0) throw new EditError(`trecho não encontrado em ${opts.path}`);
+    if (folded.occurrences > 1) {
+      throw new EditError(`trecho ambíguo em ${opts.path}: ${folded.occurrences} ocorrências`);
+    }
+    at = folded.at;
+    end = folded.end;
+  }
+
+  const after = before.slice(0, at) + opts.newText + before.slice(end);
 
   return writeAndCommit({
     vaultRoot: opts.vaultRoot,
