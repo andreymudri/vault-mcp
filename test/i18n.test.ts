@@ -169,13 +169,29 @@ describe('o CONTEÚDO da recusa também fala o idioma, não só o invólucro', (
       .toContain('esperado number, recebido string');
   });
 
-  it('nenhuma frase mistura os dois idiomas em nenhum dos caminhos', async () => {
-    // O invariante de verdade, e o que teria pego isto na primeira vez: varrer as recusas de
-    // TODAS as tools e exigir que nenhuma resposta em inglês carregue palavra portuguesa.
-    const PT = /\b(campo obrigatório|esperado|recebido|inválida?|não pode|vazia|caminho)\b/i;
-    for (const tool of await tools('en')) {
-      const texto = (await tool.handler({})).content[0]!.text;
-      expect(texto, `${tool.name}: ${texto}`).not.toMatch(PT);
+  it('nenhuma recusa mistura os dois idiomas, e nenhuma é igual nos dois', async () => {
+    // A primeira versão deste teste comparava contra uma LISTA de palavras portuguesas — as sete
+    // que me ocorreram — e por isso passava com `vault_list` devolvendo "Nenhuma nota com os
+    // filtros informados." em modo inglês. Uma lista de palavras é um teste que só acha o que
+    // quem o escreveu já sabia.
+    //
+    // O invariante de verdade não precisa de vocabulário: a MESMA chamada nos DOIS idiomas tem
+    // de devolver textos DIFERENTES. Se saem idênticos, aquele texto não passa pelo catálogo —
+    // qualquer que seja a palavra, e sem eu precisar tê-la previsto.
+    const en = await tools('en');
+    const pt = await tools('pt');
+
+    for (const [i, tool] of en.entries()) {
+      const rEn = await tool.handler({});
+      const rPt = await pt[i]!.handler({});
+      if (!rEn.isError) continue; // caminho feliz: fora do escopo declarado de VAULT_LANG
+
+      const textoEn = rEn.content[0]!.text;
+      const textoPt = rPt.content[0]!.text;
+      expect(textoEn, `${tool.name} devolveu texto idêntico nos dois idiomas`).not.toBe(textoPt);
+      expect(textoEn, `${tool.name}: ${textoEn}`).not.toMatch(
+        /campo obrigatório|esperado |recebido |não pode|vazia/i,
+      );
     }
   });
 });
