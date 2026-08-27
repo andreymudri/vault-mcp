@@ -162,6 +162,16 @@ async function makeVault(): Promise<{ tmp: string; vaultRoot: string }> {
 async function initScratchRepo(repo: string): Promise<void> {
   await git(repo, ['init']);
   await git(repo, ['config', 'gc.auto', '0']);
+  // Este repositório existe para provar que `unifiedDiff` produz um patch que aplica BYTE A
+  // BYTE. Um git configurado com `core.autocrlf=true` — o padrão de instalação no Windows, e o
+  // que os runners do GitHub trazem — reescreve os terminadores ao aplicar, e a asserção passa
+  // a medir a configuração de git da máquina em vez do patch. Fixar aqui é o que torna a
+  // asserção sobre o NOSSO código em todo sistema.
+  //
+  // Vale só para os repositórios descartáveis desta suíte: o `.gitattributes` do projeto cuida
+  // do checkout, e nenhum dos dois toca no vault de ninguém.
+  await git(repo, ['config', 'core.autocrlf', 'false']);
+  await git(repo, ['config', 'core.eol', 'lf']);
 }
 
 /**

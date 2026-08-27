@@ -118,7 +118,13 @@ class MemoryFs implements FsOps {
   }
 
   private relative(path: string): string {
-    return path === MEM_ROOT ? '' : path.slice(MEM_ROOT.length + 1);
+    // O scanner chega aqui com o que `join` produziu, e no Windows `join` usa `\`. As chaves
+    // deste mapa são POSIX porque é assim que o vault nomeia uma nota internamente — então sem
+    // normalizar, TODO `readdir` devolve vazio, o índice fica sem nenhuma nota, e a suíte
+    // inteira falha afirmando coisas sobre busca em vez de sobre separador de caminho. Foi
+    // exatamente o que 14 testes deste arquivo relataram no primeiro CI de Windows.
+    const posix = path.replace(/\\/g, '/');
+    return posix === MEM_ROOT ? '' : posix.slice(MEM_ROOT.length + 1);
   }
 
   private file(path: string): MemFile {
