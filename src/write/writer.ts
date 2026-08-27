@@ -537,6 +537,28 @@ function foldLineEndings(text: string): { folded: string; map: number[] } {
 }
 
 /**
+ * `newText` com o terminador que a nota já usa.
+ *
+ * A outra metade do problema que `matchFoldingLineEndings` resolve na ENTRADA: o trecho novo vem
+ * do agente e vem com `\n`, e gravá-lo cru dentro de um arquivo CRLF deixa a nota com as duas
+ * formas ao mesmo tempo. Quem paga não é este servidor — é o usuário, cujo editor reserializa o
+ * arquivo, cujo git passa a marcar a nota inteira como alterada, e cujo próximo diff vira ruído
+ * em cima de linhas que ninguém tocou.
+ *
+ * A regra é deliberadamente estreita: converte só quando a nota é INTEIRAMENTE CRLF. Um arquivo
+ * já misto continua misto, porque não foi este servidor que o misturou e escolher um lado ali
+ * seria reescrever linhas fora da edição pedida. Um arquivo LF não é tocado — é o caso de todo o
+ * resto da suíte, e ele passa por aqui como identidade.
+ */
+function withLineEndingsOf(before: string, newText: string): string {
+  const crlf = countOccurrences(before, '\r\n');
+  if (crlf === 0) return newText;
+  const loneLf = countOccurrences(before, '\n') - crlf;
+  if (loneLf > 0) return newText;
+  return newText.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+}
+
+/**
  * Onde `oldText` está em `before` IGNORANDO a diferença entre `\r\n` e `\n`, e quantas vezes.
  *
  * Existe porque o trecho e o arquivo chegam por caminhos que não concordam sobre o terminador.
@@ -609,7 +631,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
     end = folded.end;
   }
 
-  const after = before.slice(0, at) + opts.newText + before.slice(end);
+  const after = before.slice(0, at) + withLineEndingsOf(before, opts.newText) + before.slice(end);
 
   return writeAndCommit({
     vaultRoot: opts.vaultRoot,
