@@ -13,6 +13,7 @@ import { extractLinkTargets } from '../src/vault/links.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import type { Chunk, ScoredChunk } from '../src/types.js';
+import { NO_FIFO } from './platform.js';
 import {
   DUPLICATE_SCORE_RATIO,
   LearnError,
@@ -1263,7 +1264,7 @@ describe('learn - o insight nunca se perde', () => {
     expect(await read(vaultRoot, result.path)).toContain('backoff exponencial');
   });
 
-  it('não abre o alvo da regra de duplicata antes de classificá-lo', async () => {
+  it.skipIf(NO_FIFO)('não abre o alvo da regra de duplicata antes de classificá-lo', async () => {
     // The classification runs BEFORE anything is opened. Without it the first thing to touch the
     // target is `readFile`, which follows the link onto a FIFO and never returns — the collision
     // guard further down cannot help here, because this target comes from the duplicate rule.
@@ -1979,7 +1980,7 @@ describe('learn - nada e removido do disco', () => {
     expect((await fs.lstat(a)).isSymbolicLink()).toBe(true);
   });
 
-  it('não abre um FIFO no lugar do template quando um placeholder ocupa o caminho', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no lugar do template quando um placeholder ocupa o caminho', async () => {
     // `_templates/wiki.md` is read with no classification at all on this route, and a FIFO
     // there left the promise pending for as long as the process lived — on the single thread
     // that serves every tool call, so every LATER call hung too and only SIGKILL recovered it.
@@ -2011,7 +2012,7 @@ describe('learn - nada e removido do disco', () => {
     expect((await fs.lstat(template)).isFIFO()).toBe(true);
   }, 30_000);
 
-  it('não abre um FIFO no lugar do template quando o caminho da nota está livre', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no lugar do template quando o caminho da nota está livre', async () => {
     // The OTHER route to the same file: with the note's path free, `writeNote` is the one that
     // reads the skeleton. Both routes have to answer the same way, or the hang simply moves.
     const template = path.join(vaultRoot, '_templates', 'wiki.md');
@@ -2158,7 +2159,7 @@ describe('learn - nada e removido do disco', () => {
     expect(commit).not.toContain('chave-secreta');
   }, 30_000);
 
-  it('não abre um FIFO no caminho da nota', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no caminho da nota', async () => {
     // Reading a FIFO never returns. On a single-threaded stdio server that is the whole process,
     // and the path merely LOOKS like a note - so nothing may open it, neither to judge whether it
     // is blank nor to append to it.

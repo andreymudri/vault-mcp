@@ -19,6 +19,7 @@ import {
   removeFromSection,
 } from '../src/write/propagate.js';
 import { formatLocal } from '../src/write/template.js';
+import { NO_FIFO } from './platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -881,7 +882,7 @@ describe('propagate', () => {
     expect(res.written).toContain(path.join(vaultRoot, DAILY_REL));
   });
 
-  it('não abre um FIFO no lugar do MOC', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no lugar do MOC', async () => {
     // Reading a FIFO nobody writes to never returns. On the single-threaded stdio server
     // that wedges every later tool call and only a SIGKILL recovers it — and the MOC path
     // is built from caller input, so it is a path an attacker or a stray `mkfifo` can pick.
@@ -911,7 +912,7 @@ describe('propagate', () => {
     expect(await read(vaultRoot, DAILY_REL)).toContain(`- ${NOW_TIME} [[nova-nota]] (gotcha)`);
   });
 
-  it('não abre um FIFO no lugar da daily', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no lugar da daily', async () => {
     const dailyPath = path.join(vaultRoot, DAILY_REL);
     await fs.rm(dailyPath);
     await execFileAsync('mkfifo', [dailyPath]);

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { parseFile } from '../src/vault/frontmatter.js';
@@ -30,7 +30,11 @@ function parseInChildProcess(tz: string, fixture: string): Record<string, unknow
     entry,
     [
       `import { readFileSync } from 'node:fs';`,
-      `import { parseFile } from ${JSON.stringify(join(REPO_ROOT, 'src/vault/frontmatter.ts'))};`,
+      // `pathToFileURL`, e não o caminho cru: um caminho absoluto do Windows começa com
+      // `D:\\`, e o loader ESM lê esse `D:` como um ESQUEMA de URL — ele recusa com
+      // `ERR_UNSUPPORTED_ESM_URL_SCHEME: Received protocol 'd:'` antes de abrir o arquivo.
+      // No POSIX o caminho cru funcionava por acidente: `/` não parece esquema nenhum.
+      `import { parseFile } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, 'src/vault/frontmatter.ts')).href)};`,
       `const raw = readFileSync(${JSON.stringify(join(VAULT, fixture))}, 'utf8');`,
       `process.stdout.write(JSON.stringify(parseFile(${JSON.stringify(fixture)}, raw).frontmatter));`,
     ].join('\n'),

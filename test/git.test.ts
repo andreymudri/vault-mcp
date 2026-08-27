@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { commitFiles, headBlobState, headSha } from '../src/write/git.js';
+import { NO_HOSTILE_FILENAMES } from './platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -194,7 +195,7 @@ describe('commitFiles', () => {
     expect(status).toContain('trabalho-do-usuario.md');
   });
 
-  it('treats a path containing a glob character literally, never as a wildcard', async () => {
+  it.skipIf(NO_HOSTILE_FILENAMES)('treats a path containing a glob character literally, never as a wildcard', async () => {
     // The file to commit is literally named with a `*` in it (a legal
     // filename on this filesystem). A sibling file whose name a glob
     // expansion of `target*.md` would incorrectly match, but which the tool
@@ -223,7 +224,7 @@ describe('commitFiles', () => {
     expect(status).toBe('?? targetX.md');
   });
 
-  it('does not let a glob-like pathspec at the commit step sweep in an already-staged unrelated file', async () => {
+  it.skipIf(NO_HOSTILE_FILENAMES)('does not let a glob-like pathspec at the commit step sweep in an already-staged unrelated file', async () => {
     // This isolates --literal-pathspecs on the `commit` invocation
     // specifically: targetX.md is staged by something other than
     // commitFiles (simulating unrelated in-flight work), before
@@ -464,7 +465,7 @@ describe('commitFiles', () => {
     expect(status).toContain('?? .obsidian/');
   });
 
-  it('asks whether anything is staged with literal pathspecs, so a glob-like target is not answered for by a sibling', async () => {
+  it.skipIf(NO_HOSTILE_FILENAMES)('asks whether anything is staged with literal pathspecs, so a glob-like target is not answered for by a sibling', async () => {
     // The staged-check must ask exactly the question the commit will ask.
     // Target `target*.md` is committed and unchanged; the sibling
     // `targetX.md`, which a glob expansion would match, has a staged
