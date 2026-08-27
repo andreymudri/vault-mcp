@@ -15,6 +15,12 @@
  *   sempre num FIFO sem escritor — a falha que esses testes existem para impedir — não tem
  *   equivalente lá.
  *
+ * - `NO_POSIX_MODES`: bits de permissão. O NTFS não os tem, e o Node relata `0o666` para
+ *   qualquer arquivo gravável por mais que se chame `chmod` nele — medido: os testes de modo
+ *   deste projeto receberam 438 (`0o666`) onde exigiam 384 (`0o600`). O `chmod` do `atomicWrite`
+ *   continua sendo chamado lá e continua sendo inofensivo; o controle de acesso no Windows é por
+ *   ACL herdada do diretório, que é outro mecanismo e não algo que esta suíte afirme.
+ *
  * Ambos são nomeados pelo que FALTA na plataforma, para o `it.skipIf(NO_FIFO)` do
  * call site se ler como uma frase. Ambos são `skipIf` e não uma exclusão do arquivo inteiro: o resto de cada um desses arquivos
  * roda no Windows e é justamente onde o tratamento de CAMINHO pode quebrar.
@@ -26,3 +32,6 @@ export const NO_HOSTILE_FILENAMES = IS_WINDOWS;
 
 /** FIFOs, que o Windows não tem. Ver o comentário acima. */
 export const NO_FIFO = IS_WINDOWS;
+
+/** Bits de permissão POSIX, que o NTFS não tem. Ver o comentário acima. */
+export const NO_POSIX_MODES = IS_WINDOWS;
