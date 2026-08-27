@@ -1,5 +1,6 @@
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promises as fs, type Stats } from 'node:fs';
+import { coded } from '../i18n/errors.js';
 
 export const DENIED_PREFIXES = ['99-archive', '_templates'] as const;
 
@@ -165,28 +166,28 @@ export function resolveWritePath(
   options: PathGuardOptions = {},
 ): string {
   if (!relPath.endsWith('.md')) {
-    throw new PathGuardError(`caminho deve terminar em .md: ${relPath}`);
+    throw coded(new PathGuardError(`caminho deve terminar em .md: ${relPath}`), 'path.mustEndMd', { relPath });
   }
   // The contract is "vault-relative path in": an absolute relPath must be rejected even when
   // it happens to resolve inside the vault, because `resolve(root, absPath)` ignores `root`
   // for an absolute `absPath` and the containment check below would otherwise let it through.
   if (isAbsolute(relPath)) {
-    throw new PathGuardError(`caminho deve ser relativo ao vault: ${relPath}`);
+    throw coded(new PathGuardError(`caminho deve ser relativo ao vault: ${relPath}`), 'path.mustBeRelative', { relPath });
   }
   // git interpreta pathspec como glob. `*.md` passa em qualquer checagem de contenção e de
   // sufixo, mas chega ao `git add` como curinga e arrasta arquivos que a tool nunca tocou.
   if (/[*?[\]]/.test(relPath)) {
-    throw new PathGuardError(`caminho não pode conter metacaractere de glob: ${relPath}`);
+    throw coded(new PathGuardError(`caminho não pode conter metacaractere de glob: ${relPath}`), 'path.noGlob', { relPath });
   }
   const root = resolve(vaultRoot);
   const abs = resolve(root, relPath);
   const rel = relative(root, abs);
   if (rel === '' || rel.startsWith('..') || resolve(root, rel) !== abs) {
-    throw new PathGuardError(`caminho fora do vault: ${relPath}`);
+    throw coded(new PathGuardError(`caminho fora do vault: ${relPath}`), 'path.outsideVault', { relPath });
   }
   const head = rel.split(sep)[0];
   if (head !== undefined && deniedPrefixes(options).includes(head)) {
-    throw new PathGuardError(`escrita negada em ${head}/ (somente leitura)`);
+    throw coded(new PathGuardError(`escrita negada em ${head}/ (somente leitura)`), 'path.readOnlyArea', { head });
   }
   return abs;
 }
@@ -227,7 +228,7 @@ export async function assertNoSymlinkEscape(vaultRoot: string, abs: string): Pro
   // Confirm the real path is inside the vault
   const rel = relative(realRoot, realPath);
   if (rel.startsWith('..')) {
-    throw new PathGuardError(`symlink apontaria para fora do vault: ${abs}`);
+    throw coded(new PathGuardError(`symlink apontaria para fora do vault: ${abs}`), 'path.symlinkEscapes', { abs });
   }
 }
 
@@ -381,9 +382,11 @@ export async function guardedPath(
   // First, before any `fs` call and before `resolveWritePath` interpolates the string into
   // a message: a NUL makes `fs` throw its own `TypeError` from inside the write.
   if (INVISIBLE_CHARS.test(relPath)) {
-    throw new PathGuardError(
-      `caminho não pode conter caractere de controle: ${forMessage(relPath)}`,
-    );
+    throw coded(
+        new PathGuardError(`caminho não pode conter caractere de controle: ${forMessage(relPath)}`),
+        'path.noControlChar',
+        { relPath: forMessage(relPath) },
+      );
   }
 
   const absPath = resolveWritePath(vaultRoot, relPath, options);
@@ -394,9 +397,11 @@ export async function guardedPath(
   // exactly as `99-archive-notes/` stays legal beside the denied `99-archive/`.
   for (const segment of await pathSegments(vaultRoot, absPath)) {
     if (DENIED_SEGMENTS.has(normalizeSegment(segment))) {
-      throw new PathGuardError(
-        `escrita negada em ${forMessage(segment)}/ (área interna, não é conteúdo)`,
-      );
+      throw coded(
+          new PathGuardError(`escrita negada em ${forMessage(segment)}/ (área interna, não é conteúdo)`),
+          'path.internalArea',
+          { segment: forMessage(segment) },
+        );
     }
   }
 

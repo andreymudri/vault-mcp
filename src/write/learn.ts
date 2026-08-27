@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { basename, join, relative, sep } from 'node:path';
 
+import { coded } from '../i18n/errors.js';
 import { tokenize } from '../index/tokenizer.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
@@ -288,13 +289,17 @@ export interface LearnResult {
  * is an identifier and a repaired one is silently not the domain the caller asked for.
  */
 function dominioProblem(dominio: string): string | undefined {
-  if (dominio === '') return 'domínio vazio';
-  if (dominio.length > 64) return 'domínio longo demais';
-  if (INVISIBLE_CHARS.test(dominio)) return 'domínio com caractere de controle';
-  if (/\s/.test(dominio)) return 'domínio não pode conter espaço';
-  if (/[\\/]/.test(dominio)) return 'domínio não pode conter separador de caminho';
-  if (dominio.startsWith('.')) return 'domínio não pode começar com ponto';
-  if (/[*?[\]:"<>|]/.test(dominio)) return 'domínio com caractere não permitido';
+  // CÓDIGO e não prosa, ao contrário da cópia em `propagate.ts` (que alimenta avisos e cujos
+  // testes fixam o texto). Este valor entra como parâmetro de `learn.badDomain` e é resolvido no
+  // catálogo pela fronteira: devolvendo a frase pronta, ela saía em português dentro de um
+  // invólucro inglês — o mesmo defeito de sempre, um nível mais fundo.
+  if (dominio === '') return 'domain.empty';
+  if (dominio.length > 64) return 'domain.tooLong';
+  if (INVISIBLE_CHARS.test(dominio)) return 'domain.controlChar';
+  if (/\s/.test(dominio)) return 'domain.hasSpace';
+  if (/[\\/]/.test(dominio)) return 'domain.hasSeparator';
+  if (dominio.startsWith('.')) return 'domain.startsWithDot';
+  if (/[*?[\]:"<>|]/.test(dominio)) return 'domain.badChar';
   return undefined;
 }
 
@@ -737,7 +742,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const titulo = oneLine(opts.titulo);
   const noteSlug = slug(titulo);
   if (noteSlug === '') {
-    throw new LearnError('título inválido: não gera um nome de arquivo (use letras ou números)');
+    throw coded(new LearnError('título inválido: não gera um nome de arquivo (use letras ou números)'), 'learn.badTitle');
   }
 
   // `writeNote` hands the composed body to `ensureFrontmatter`, which reads a `---` on the FIRST
@@ -763,7 +768,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const problem = dominioProblem(opts.dominio);
   // The domain is NOT interpolated into this message: it is refused precisely because it can
   // carry a line break or a bidi control, and a warning that can forge a line is worthless.
-  if (problem !== undefined) throw new LearnError(`domínio inválido: ${problem}`);
+  if (problem !== undefined) throw coded(new LearnError(`domínio inválido: ${problem}`), 'learn.badDomain', { problem });
 
   const dominios = await existingDomains(opts.vaultRoot);
   const domainIsNew = !dominios.includes(opts.dominio);

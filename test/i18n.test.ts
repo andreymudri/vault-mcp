@@ -211,3 +211,42 @@ describe('o CONTEÚDO da recusa também fala o idioma, não só o invólucro', (
     }
   });
 });
+
+describe('erros da camada de escrita também falam o idioma', () => {
+  // Estes nascem fundo em paths.ts / relocate.ts / learn.ts, que não têm catálogo nenhum e nem
+  // deveriam ter. Eles carregam um CÓDIGO, e quem resolve é a fronteira da tool. São os erros que
+  // um operador de fato tem de agir sobre — caminho errado, nota inexistente, domínio inválido —
+  // e eram os últimos a sair em português dentro de um invólucro inglês.
+  const casos: Array<[string, string, Record<string, unknown>, RegExp, RegExp]> = [
+    ['nota inexistente', 'vault_get_note', { path: 'nope.md' }, /note not found/i, /nota não encontrada/i],
+    ['extensão errada', 'vault_write_note', { path: 'x.txt', content: 'a' }, /must end in \.md/i, /deve terminar em \.md/i],
+    ['fora do vault', 'vault_write_note', { path: '../fora.md', content: 'a' }, /outside the vault/i, /fora do vault/i],
+    // `vault_delete` num caminho que não existe: chega em relocate.noteNotFound, que É um erro
+    // com código. Editar um arquivo inexistente NÃO serve aqui — o `readFile` estoura ENOENT cru
+    // do Node antes de qualquer erro nosso, e um ENOENT não é texto que este servidor escreveu.
+    ['nota a apagar não existe', 'vault_delete', { path: 'nada.md' }, /not found/i, /não encontrad/i],
+  ];
+
+  it.each(casos)('%s: inglês', async (_l, tool, args, esperado) => {
+    const t = (await tools('en')).find((x) => x.name === tool);
+    expect((await t!.handler(args)).content[0]!.text).toMatch(esperado);
+  });
+
+  it.each(casos)('%s: português', async (_l, tool, args, _en, esperado) => {
+    const t = (await tools('pt')).find((x) => x.name === tool);
+    expect((await t!.handler(args)).content[0]!.text).toMatch(esperado);
+  });
+
+  it('resolve um parâmetro que é ELE PRÓPRIO um código', async () => {
+    // `learn.badDomain` recebe o motivo apurado por `dominioProblem`, que devolve um código e não
+    // prosa. Sem resolver o parâmetro, saía 'invalid domain: domínio não pode conter espaço' —
+    // o defeito de invólucro-traduzido-sobre-miolo-português, um nível mais fundo.
+    const args = { titulo: 't', insight: 'i', contexto: 'c', dominio: 'a b' };
+    const en = (await tools('en')).find((x) => x.name === 'vault_learn');
+    const pt = (await tools('pt')).find((x) => x.name === 'vault_learn');
+    const textoEn = (await en!.handler(args)).content[0]!.text;
+    expect(textoEn).toContain('domain cannot contain a space');
+    expect(textoEn).not.toContain('domínio');
+    expect((await pt!.handler(args)).content[0]!.text).toContain('domínio não pode conter espaço');
+  });
+});

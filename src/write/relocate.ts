@@ -17,6 +17,7 @@ import {
 } from './propagate.js';
 import { buildVaultIndex, rewriteLinks, type VaultIndex } from './rewrite-links.js';
 import { formatLocal } from './template.js';
+import { coded } from '../i18n/errors.js';
 
 /**
  * Moving, renaming, promoting, archiving and deleting a note — the four operations that
@@ -139,9 +140,11 @@ function targetBasename(target: string): string {
 async function readIfPresent(absPath: string, relPath: string): Promise<string> {
   const kind = await classifyNode(absPath);
   if (kind === 'foreign') {
-    throw new RelocateError(
-      `caminho não é uma nota (link, diretório ou dispositivo): ${forMessage(relPath)}`,
-    );
+    throw coded(
+        new RelocateError(`caminho não é uma nota (link, diretório ou dispositivo): ${forMessage(relPath)}`),
+        'path.notANote',
+        { relPath: forMessage(relPath) },
+      );
   }
   if (kind === 'missing') return '';
   return fs.readFile(absPath, 'utf8');
@@ -218,16 +221,16 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
   const fromRel = toVaultRelative(opts.vaultRoot, fromAbs);
   const toRel = toVaultRelative(opts.vaultRoot, toAbs);
   if (fromAbs === toAbs) {
-    throw new RelocateError(`origem e destino são o mesmo caminho: ${forMessage(fromRel)}`);
+    throw coded(new RelocateError(`origem e destino são o mesmo caminho: ${forMessage(fromRel)}`), 'relocate.samePath', { fromRel: forMessage(fromRel) });
   }
 
   if ((await classifyNode(fromAbs)) !== 'file') {
-    throw new RelocateError(`origem não é uma nota: ${forMessage(fromRel)}`);
+    throw coded(new RelocateError(`origem não é uma nota: ${forMessage(fromRel)}`), 'relocate.sourceNotANote', { fromRel: forMessage(fromRel) });
   }
   // Asked, and answered by the `link` publish below as well. This is the message the user
   // reads; that is the guarantee, and neither one substitutes for the other.
   if ((await classifyNode(toAbs)) !== 'missing') {
-    throw new RelocateError(`destino já existe: ${forMessage(toRel)}`);
+    throw coded(new RelocateError(`destino já existe: ${forMessage(toRel)}`), 'relocate.destExists', { toRel: forMessage(toRel) });
   }
 
   const notes = opts.scanner.allNotes();
@@ -390,9 +393,11 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     await fs.link(fromAbs, toAbs);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new RelocateError(
-        `${forMessage(toRel)} passou a existir enquanto a nota era movida; nada foi sobrescrito`,
-      );
+      throw coded(
+          new RelocateError(`${forMessage(toRel)} passou a existir enquanto a nota era movida; nada foi sobrescrito`),
+          'relocate.raceOnMove',
+          { toRel: forMessage(toRel) },
+        );
     }
     throw err;
   }
@@ -449,7 +454,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   const relPath = toVaultRelative(opts.vaultRoot, absPath);
 
   if ((await classifyNode(absPath)) !== 'file') {
-    throw new RelocateError(`nota não encontrada: ${forMessage(relPath)}`);
+    throw coded(new RelocateError(`nota não encontrada: ${forMessage(relPath)}`), 'relocate.noteNotFound', { relPath: forMessage(relPath) });
   }
 
   const content = await fs.readFile(absPath, 'utf8');

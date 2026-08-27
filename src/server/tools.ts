@@ -5,6 +5,7 @@ import { resolve, sep } from 'node:path';
 import { z } from 'zod';
 
 import { LinkGraph } from '../graph/graph.js';
+import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
 import { messagesFor, type Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
@@ -368,6 +369,27 @@ function describeIssues(error: z.ZodError, m: Messages): string {
  * That is the contract the plan asks for — a malformed note must never take the process down — and
  * it holds for direct callers too, not only for the ones coming through the protocol adapter.
  */
+/**
+ * A mensagem de um erro no idioma do catálogo, ou a original quando ele não carrega código.
+ *
+ * O português do template é BYTE-IDÊNTICO ao literal do `throw`, então em modo pt nada muda —
+ * o que mantém verdes as dezenas de testes de unidade que afirmam sobre `err.message` direto.
+ */
+function translateError(err: unknown, m: Messages): string {
+  const { code, params } = errorContext(err);
+  if (code === undefined) return messageOf(err);
+  const codes = m.errorCodes as Record<string, string | undefined>;
+  const template = codes[code];
+  if (template === undefined) return messageOf(err);
+  // Um parâmetro pode ser ELE PRÓPRIO um código — `learn.badDomain` recebe o motivo apurado por
+  // `dominioProblem`. Sem resolver aqui, o invólucro sai traduzido com o miolo em português, que
+  // é exatamente o defeito que este trabalho todo existe para fechar.
+  const resolved = Object.fromEntries(
+    Object.entries(params ?? {}).map(([k, v]) => [k, (typeof v === 'string' && codes[v]) || v]),
+  );
+  return renderTemplate(template, resolved);
+}
+
 function define<Shape extends z.ZodRawShape>(
   redact: (text: string) => string,
   m: Messages,
@@ -391,8 +413,12 @@ function define<Shape extends z.ZodRawShape>(
       } catch (err) {
         // Redacted BEFORE escaping: the errors that carry an absolute root come from `paths.ts` and
         // `git.ts`, which build it from the real filesystem, so the root reaches here unescaped.
-        if (err instanceof ToolError) return fail(forMessage(redact(err.message)));
-        return fail(`${name} ${m.errors.toolFailed}: ${forMessage(redact(messageOf(err)))}`);
+        // O código, quando o erro traz um, decide o texto: é assim que um erro nascido fundo em
+        // `paths.ts` ou `relocate.ts` — que não tem catálogo nenhum, nem deveria ter — sai no
+        // idioma pedido. Sem código, sai como veio, que é o comportamento de sempre.
+        const text = translateError(err, m);
+        if (err instanceof ToolError) return fail(forMessage(redact(text)));
+        return fail(`${name} ${m.errors.toolFailed}: ${forMessage(redact(text))}`);
       }
     },
   };
@@ -1211,7 +1237,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       refreshVault(deps);
       const note = deps.scanner.getNote(input.path);
       if (note === undefined) {
-        throw new ToolError(`nota não encontrada: ${forMessage(input.path)}`);
+        throw coded(new ToolError(`nota não encontrada: ${forMessage(input.path)}`), 'note.notFound', { path: forMessage(input.path) });
       }
 
       const frontmatter = renderFrontmatterBlock(note.frontmatter);
@@ -1291,7 +1317,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       // exist, so a wrong path and a genuinely unlinked note would give the same answer, and the
       // agent would read a typo as "this note is isolated".
       if (target === undefined) {
-        throw new ToolError(`nota não encontrada: ${forMessage(input.path)}`);
+        throw coded(new ToolError(`nota não encontrada: ${forMessage(input.path)}`), 'note.notFound', { path: forMessage(input.path) });
       }
 
       // Rebuilt per call rather than cached: the scanner's delta is consumed by the retriever

@@ -2,6 +2,7 @@ import { constants, promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
+import { coded } from '../i18n/errors.js';
 
 /** How many times a colliding temporary name is retried before giving up. */
 const TMP_ATTEMPTS = 8;
@@ -131,7 +132,7 @@ export async function atomicWrite(
     // Defence in depth against a future edit moving the temporary file elsewhere: it must
     // be a direct child of the target's own directory, which is the guarded one.
     if (dirname(resolve(tmpPath)) !== resolve(dir)) {
-      throw new Error(`arquivo temporário fora do diretório do destino: ${tmpPath}`);
+      throw coded(new Error(`arquivo temporário fora do diretório do destino: ${tmpPath}`), 'atomic.tmpOutsideDir', { tmpPath });
     }
 
     try {
@@ -145,7 +146,7 @@ export async function atomicWrite(
   }
 
   if (handle === undefined) {
-    throw new Error(`não foi possível criar um arquivo temporário em ${dir}`);
+    throw coded(new Error(`não foi possível criar um arquivo temporário em ${dir}`), 'atomic.tmpCreateFailed', { dir });
   }
 
   try {

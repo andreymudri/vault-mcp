@@ -150,7 +150,15 @@ export function applyTemplate(templateText: string, ctx: TemplateContext): strin
     const dateMatch = DATE_NOW_RE.exec(expr);
     if (dateMatch) return formatLocal(ctx.now, dateMatch[2] ?? '');
 
-    throw new TemplateError(`expressão Templater não suportada: <% ${expr} %>`);
+    // `Object.assign` em vez do helper `coded`, e por um motivo concreto: os testes de fuso de
+    // `template.test.ts` rodam este arquivo num processo filho com `node probe.ts`, sob type
+    // stripping, e ali um import de valor apontando para `../i18n/errors.js` não resolve — só
+    // existe `errors.ts`. As outras importações deste módulo são `import type` (apagadas) ou um
+    // pacote real, então esta seria a primeira de verdade. O formato do marcador é idêntico.
+    throw Object.assign(new TemplateError(`expressão Templater não suportada: <% ${expr} %>`), {
+      code: 'template.unsupportedExpr',
+      params: { expr },
+    });
   });
 
   assertNoResidualToken(templateText, tokenStarts);

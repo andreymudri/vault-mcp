@@ -15,6 +15,7 @@ import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
 import { commitFiles } from './git.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
+import { coded } from '../i18n/errors.js';
 
 /** Thrown when `editNote` cannot locate exactly one occurrence of the text to replace. */
 export class EditError extends Error {
@@ -351,9 +352,11 @@ async function writeAndCommit(
     await atomicWrite(opts.absPath, opts.after, { exclusive: opts.created });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new WriteRaceError(
-        `${opts.relPath} passou a existir enquanto a nota era escrita; nada foi sobrescrito`,
-      );
+      throw coded(
+          new WriteRaceError(`${opts.relPath} passou a existir enquanto a nota era escrita; nada foi sobrescrito`),
+          'write.raceOnCreate',
+          { relPath: opts.relPath },
+        );
     }
     throw err;
   }
@@ -389,9 +392,7 @@ async function writeAndCommit(
 async function refuseForeign(absPath: string, relPath: string): Promise<NodeKind> {
   const kind = await classifyNode(absPath);
   if (kind === 'foreign') {
-    throw new PathGuardError(
-      `caminho não é uma nota (link, diretório ou dispositivo): ${forMessage(relPath)}`
-    );
+    throw coded(new PathGuardError(`caminho não é uma nota (link, diretório ou dispositivo): ${forMessage(relPath)}`), 'path.notANote', { relPath: forMessage(relPath) });
   }
   return kind;
 }
@@ -603,7 +604,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
   if (opts.oldText === '') {
     // The empty string occurs between every pair of characters, so "exactly one
     // occurrence" is never true of it and counting it would not terminate.
-    throw new EditError(`trecho vazio para edição em ${opts.path}`);
+    throw coded(new EditError(`trecho vazio para edição em ${opts.path}`), 'edit.emptySnippet', { path: opts.path });
   }
 
   // Same question as `writeNote`'s, and it has to be asked here too: `editNote` is reached
@@ -623,7 +624,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
   let end = at + opts.oldText.length;
   if (occurrences === 0) {
     const folded = matchFoldingLineEndings(before, opts.oldText);
-    if (folded.occurrences === 0) throw new EditError(`trecho não encontrado em ${opts.path}`);
+    if (folded.occurrences === 0) throw coded(new EditError(`trecho não encontrado em ${opts.path}`), 'edit.notFound', { path: opts.path });
     if (folded.occurrences > 1) {
       throw new EditError(`trecho ambíguo em ${opts.path}: ${folded.occurrences} ocorrências`);
     }
