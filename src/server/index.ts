@@ -8,6 +8,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
+import { resolveLang, type Lang } from '../i18n/lang.js';
+import { messagesFor } from '../i18n/messages.js';
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
 import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
@@ -58,14 +60,13 @@ export class VaultPathError extends Error {
  * modes are testable without mutating global state in a parallel test runner.
  */
 export function resolveVaultPath(env: NodeJS.ProcessEnv): string {
+  // O idioma sai do MESMO env, porque esta é a primeira mensagem que um usuário novo vê — e
+  // quase sempre a única, já que quem esquece a variável nunca chega a ter uma sessão. Deixá-la
+  // em português é entregar a um usuário do npm um erro que ele não lê, sobre a única coisa que
+  // ele precisa corrigir para o servidor subir.
+  const startup = messagesFor(resolveLang(env)).startup;
   const raw = env['VAULT_PATH'];
-  if (raw === undefined || raw.trim() === '') {
-    throw new VaultPathError(
-      'VAULT_PATH não definida: aponte-a para a pasta raiz do vault, ex.: ' +
-        'VAULT_PATH="/caminho/absoluto/do/vault" npx @andreymudri/vault-mcp ' +
-        '(de um clone: node /caminho/absoluto/do/vault-mcp/dist/server/index.js)',
-    );
-  }
+  if (raw === undefined || raw.trim() === '') throw new VaultPathError(startup.vaultPathMissing);
 
   const vaultRoot = resolve(raw);
   let isDirectory: boolean;
@@ -73,10 +74,10 @@ export function resolveVaultPath(env: NodeJS.ProcessEnv): string {
     isDirectory = statSync(vaultRoot).isDirectory();
   } catch (err) {
     throw new VaultPathError(
-      `VAULT_PATH não pôde ser lida (${vaultRoot}): ${err instanceof Error ? err.message : String(err)}`,
+      `${startup.vaultPathUnreadable} (${vaultRoot}): ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  if (!isDirectory) throw new VaultPathError(`VAULT_PATH não é um diretório: ${vaultRoot}`);
+  if (!isDirectory) throw new VaultPathError(`${startup.vaultPathNotDirectory}: ${vaultRoot}`);
   return vaultRoot;
 }
 
@@ -132,21 +133,17 @@ export function toolCallback(
  * scanner's change delta, and a second scanner over the same vault would answer from an index
  * nobody kept in step.
  */
-export function createVaultServer(vaultRoot: string): McpServer {
+export function createVaultServer(vaultRoot: string, lang: Lang = 'en'): McpServer {
   const scanner = new VaultScanner({ vaultRoot });
   const retriever = new Retriever({ scanner });
+  const messages = messagesFor(lang);
   const server = new McpServer(
     { name: 'vault-mcp', version: VERSION },
-    {
-      capabilities: { tools: {} },
-      instructions:
-        'Servidor do vault de conhecimento. Busque antes de responder sobre decisões, padrões ou ' +
-        'histórico do usuário, cite sempre `caminho:linha`, e registre aprendizados com vault_learn.',
-    },
+    { capabilities: { tools: {} }, instructions: messages.instructions },
   );
 
   const redact = makeRedactor(vaultRoot);
-  for (const tool of createTools({ retriever, scanner, vaultRoot })) {
+  for (const tool of createTools({ retriever, scanner, vaultRoot, messages })) {
     server.registerTool(
       tool.name,
       { description: tool.description, inputSchema: tool.inputSchema },
@@ -169,7 +166,7 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const server = createVaultServer(vaultRoot);
+  const server = createVaultServer(vaultRoot, resolveLang(process.env));
   await server.connect(new StdioServerTransport());
 }
 
@@ -197,7 +194,8 @@ export function isDirectRun(entry: string | undefined, moduleUrl: string): boole
 
 if (isDirectRun(process.argv[1], import.meta.url)) {
   void main().catch((err: unknown) => {
-    process.stderr.write(`vault-mcp falhou ao iniciar: ${err instanceof Error ? err.message : String(err)}\n`);
+    const startFailed = messagesFor(resolveLang(process.env)).startup.startFailed;
+    process.stderr.write(`${startFailed}: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
 }

@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import { messagesFor, type Messages } from '../i18n/messages.js';
 import { promises as fs } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
@@ -43,6 +44,12 @@ export interface ToolDeps {
   /** MUST be the very scanner the retriever was built with — see `refreshVault`. */
   scanner: VaultScanner;
   vaultRoot: string;
+  /**
+   * O catálogo do idioma em que este servidor FALA. Ausente significa inglês, o padrão de
+   * `resolveLang` — ver `src/i18n/lang.ts` para a fronteira entre o que é traduzível e o que é
+   * vocabulário do vault e portanto não é.
+   */
+  messages?: Messages;
 }
 
 /**
@@ -1132,82 +1139,39 @@ async function withWriteDetail<T>(
   }
 }
 
-const SEARCH_DESCRIPTION =
-  'Busca semântica-lexical no vault (BM25 + um salto de wiki-links). Chame antes de responder ' +
-  'qualquer pergunta sobre decisões, padrões, gotchas ou histórico do usuário, e antes de gravar ' +
-  'um aprendizado novo. Devolve trechos já citados como `caminho:linha` — repita essa citação na ' +
-  'resposta ao usuário. Notas de `01-raw/` ficam de fora salvo include_raw.';
 
-const GET_NOTE_DESCRIPTION =
-  'Lê uma nota inteira pelo caminho relativo ao vault (ex.: `02-wiki/nestjs/auth-guard.md`), com ' +
-  'frontmatter, links resolvidos e links quebrados. Use depois de vault_search quando o trecho ' +
-  'não bastar, ou antes de editar a nota.';
 
-const LIST_DESCRIPTION =
-  'Lista notas por metadado — tipo, tags, status, pasta — sem olhar o conteúdo. Use para ' +
-  'inventário ("quais projetos ativos existem?", "quais notas têm a tag jwt?"), não para buscar ' +
-  'assunto: para assunto use vault_search.';
 
-const BACKLINKS_DESCRIPTION =
-  'Lista as notas que apontam para a nota informada. Use para medir o quanto um assunto está ' +
-  'conectado, achar o MOC que indexa a nota, ou avaliar o impacto de mudar/renomear uma nota.';
 
-const WRITE_NOTE_DESCRIPTION =
-  'Cria ou substitui uma nota inteira, com frontmatter garantido, e commita no git do vault. ' +
-  'Substitui o arquivo inteiro: para mudar um trecho use vault_edit_note, e para registrar um ' +
-  'aprendizado use vault_learn, que decide o destino e propaga sozinho.';
 
-const EDIT_NOTE_DESCRIPTION =
-  'Substitui UM trecho exato de uma nota existente e commita. Falha, sem escrever, se o trecho ' +
-  'não aparecer ou aparecer mais de uma vez — nesse caso mande mais contexto em old_text.';
 
-const LEARN_DESCRIPTION =
-  'Registra um aprendizado no vault. Chame sempre que, durante a sessão, aparecer algo não óbvio ' +
-  'e reutilizável — uma decisão de arquitetura, um pattern, um gotcha, uma armadilha de ' +
-  'configuração —, sem perguntar antes onde salvar: o servidor decide sozinho entre anexar à nota ' +
-  'existente que já cobre o assunto e criar uma nota nova (o viés é criar), e propaga sozinho para ' +
-  'o MOC do domínio e para a nota diária (e para o índice de conhecimento quando o domínio é ' +
-  'novo), tudo em um único commit. ' +
-  'Mostre ao usuário o diff devolvido.';
 
-const MOVE_DESCRIPTION =
-  'Move, renomeia, promove ou arquiva uma nota, corrigindo sozinho todo link que passaria a ' +
-  'apontar para outro lugar, migrando a entrada dela entre os MOCs de domínio e commitando tudo ' +
-  'de uma vez. `to` é o caminho completo com `.md`, então as quatro operações são a mesma: ' +
-  '`01-raw/inbox/rascunho.md` → `02-wiki/nestjs/auth-guard.md` promove, renomeia e troca de ' +
-  'domínio junto. `99-archive/` vale como origem E destino, o que dá arquivar e desarquivar. ' +
-  'Um domínio de destino sem MOC exige confirm_novo_dominio. Mostre ao usuário o diff devolvido.';
 
-const DELETE_DESCRIPTION =
-  'Apaga uma nota e commita, tirando a linha dela do MOC do domínio. Recusa, sem apagar, se a ' +
-  'nota não tiver versão commitada no HEAD (aí não haveria como desfazer), se ela for estrutural ' +
-  '(MOC, nota diária, índice) ou se ela estiver em `99-archive/`. Notas apontadas por outras ' +
-  'exigem confirm, e a recusa lista quem aponta — os links delas ficarão quebrados. A resposta ' +
-  'traz o comando exato que desfaz.';
 
 export function createTools(deps: ToolDeps): ToolDefinition[] {
+  const m = deps.messages ?? messagesFor('en');
   const writes = new WriteQueue();
   const redact = makeRedactor(deps.vaultRoot);
 
   const vaultSearch = define(
     redact,
     'vault_search',
-    SEARCH_DESCRIPTION,
+    m.tools.vault_search.description,
     {
-      query: z.string().min(1, 'query não pode ser vazia').describe('Termos de busca em linguagem natural.'),
+      query: z.string().min(1, m.validation.queryEmpty).describe(m.tools.vault_search.query),
       limit: z
         .number()
         .int()
         .min(1)
         .max(50)
         .optional()
-        .describe('Máximo de trechos devolvidos (padrão 6).'),
-      tipo: z.string().optional().describe('Filtra pelo `tipo` do frontmatter: wiki, moc, projeto, daily.'),
-      folder: z.string().optional().describe('Restringe a uma pasta do vault, ex.: `02-wiki/nestjs`.'),
+        .describe(m.tools.vault_search.limit),
+      tipo: z.string().optional().describe(m.tools.vault_search.tipo),
+      folder: z.string().optional().describe(m.tools.vault_search.folder),
       include_raw: z
         .boolean()
         .optional()
-        .describe('Inclui `01-raw/` (captura crua), fora dos resultados por padrão.'),
+        .describe(m.tools.vault_search.include_raw),
     },
     async (input) => {
       const { results, suggestions } = deps.retriever.search({
@@ -1241,8 +1205,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultGetNote = define(
     redact,
     'vault_get_note',
-    GET_NOTE_DESCRIPTION,
-    { path: z.string().min(1, 'caminho não pode ser vazio').describe('Caminho relativo ao vault, com `.md`.') },
+    m.tools.vault_get_note.description,
+    { path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_get_note.path) },
     async (input) => {
       refreshVault(deps);
       const note = deps.scanner.getNote(input.path);
@@ -1281,12 +1245,12 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultList = define(
     redact,
     'vault_list',
-    LIST_DESCRIPTION,
+    m.tools.vault_list.description,
     {
-      tipo: z.string().optional().describe('`tipo` do frontmatter: wiki, moc, projeto, daily.'),
-      tags: z.array(z.string()).optional().describe('Todas estas tags precisam estar na nota.'),
-      status: z.string().optional().describe('`status` do frontmatter, ex.: ativo, pausado.'),
-      folder: z.string().optional().describe('Pasta do vault, casada em fronteira de segmento.'),
+      tipo: z.string().optional().describe(m.tools.vault_list.tipo),
+      tags: z.array(z.string()).optional().describe(m.tools.vault_list.tags),
+      status: z.string().optional().describe(m.tools.vault_list.status),
+      folder: z.string().optional().describe(m.tools.vault_list.folder),
     },
     async (input) => {
       refreshVault(deps);
@@ -1316,8 +1280,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultBacklinks = define(
     redact,
     'vault_backlinks',
-    BACKLINKS_DESCRIPTION,
-    { path: z.string().min(1, 'caminho não pode ser vazio').describe('Caminho relativo ao vault, com `.md`.') },
+    m.tools.vault_backlinks.description,
+    { path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_backlinks.path) },
     async (input) => {
       refreshVault(deps);
       const target = deps.scanner.getNote(input.path);
@@ -1351,14 +1315,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultWriteNote = define(
     redact,
     'vault_write_note',
-    WRITE_NOTE_DESCRIPTION,
+    m.tools.vault_write_note.description,
     {
-      path: z.string().min(1, 'caminho não pode ser vazio').describe('Caminho relativo ao vault, com `.md`.'),
-      content: z.string().describe('Conteúdo markdown da nota, sem o bloco de frontmatter.'),
+      path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_write_note.path),
+      content: z.string().describe(m.tools.vault_write_note.content),
       frontmatter: z
         .record(z.unknown())
         .optional()
-        .describe('Campos do frontmatter, ex.: `{ "tipo": "wiki", "tags": ["jwt"] }`.'),
+        .describe(m.tools.vault_write_note.frontmatter),
     },
     async (input) => {
       const frontmatter = toFrontmatter(input.frontmatter);
@@ -1385,11 +1349,11 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultEditNote = define(
     redact,
     'vault_edit_note',
-    EDIT_NOTE_DESCRIPTION,
+    m.tools.vault_edit_note.description,
     {
-      path: z.string().min(1, 'caminho não pode ser vazio').describe('Caminho relativo ao vault, com `.md`.'),
-      old_text: z.string().min(1, 'old_text não pode ser vazio').describe('Trecho exato a substituir; precisa ser único na nota.'),
-      new_text: z.string().describe('Texto que entra no lugar.'),
+      path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_edit_note.path),
+      old_text: z.string().min(1, m.validation.oldTextEmpty).describe(m.tools.vault_edit_note.old_text),
+      new_text: z.string().describe(m.tools.vault_edit_note.new_text),
     },
     async (input) => {
       const { value: result, warning } = await writes.runExclusive(() =>
@@ -1409,25 +1373,25 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultLearn = define(
     redact,
     'vault_learn',
-    LEARN_DESCRIPTION,
+    m.tools.vault_learn.description,
     {
-      titulo: z.string().min(1, 'título não pode ser vazio').describe('Título curto do aprendizado; vira o nome do arquivo.'),
-      insight: z.string().min(1, 'insight não pode ser vazio').describe('O aprendizado em si, em markdown.'),
-      contexto: z.string().min(1, 'contexto não pode ser vazio').describe('Onde e por que isso apareceu.'),
+      titulo: z.string().min(1, m.validation.tituloEmpty).describe(m.tools.vault_learn.titulo),
+      insight: z.string().min(1, m.validation.insightEmpty).describe(m.tools.vault_learn.insight),
+      contexto: z.string().min(1, m.validation.contextoEmpty).describe(m.tools.vault_learn.contexto),
       dominio: z
         .string()
-        .min(1, 'domínio não pode ser vazio')
-        .describe('Domínio em `02-wiki/`, ex.: nestjs, docker, patterns. Um domínio novo exige confirm_novo_dominio.'),
+        .min(1, m.validation.dominioEmpty)
+        .describe(m.tools.vault_learn.dominio),
       projeto: z
         .string()
         .optional()
-        .describe('Nome do projeto em `03-projects/` a que o aprendizado pertence; entra na linha de captura da nota diária.'),
-      tags: z.array(z.string()).optional().describe('Tags do frontmatter da nota.'),
-      links: z.array(z.string()).optional().describe('Wiki-links relacionados, sem os colchetes.'),
+        .describe(m.tools.vault_learn.projeto),
+      tags: z.array(z.string()).optional().describe(m.tools.vault_learn.tags),
+      links: z.array(z.string()).optional().describe(m.tools.vault_learn.links),
       confirm_novo_dominio: z
         .boolean()
         .optional()
-        .describe('Confirma a criação de um domínio que ainda não existe em `02-wiki/`.'),
+        .describe(m.tools.vault_learn.confirm_novo_dominio),
     },
     async (input) => {
       const { value: result, warning: queueWarning } = await writes.runExclusive(() =>
@@ -1491,17 +1455,17 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultMove = define(
     redact,
     'vault_move',
-    MOVE_DESCRIPTION,
+    m.tools.vault_move.description,
     {
-      from: z.string().min(1, 'caminho de origem não pode ser vazio').describe('Caminho atual da nota, relativo ao vault, com `.md`.'),
+      from: z.string().min(1, m.validation.fromEmpty).describe(m.tools.vault_move.from),
       to: z
         .string()
-        .min(1, 'caminho de destino não pode ser vazio')
-        .describe('Caminho completo de destino, relativo ao vault, com `.md`. Mover, renomear e promover são a mesma operação.'),
+        .min(1, m.validation.toEmpty)
+        .describe(m.tools.vault_move.to),
       confirm_novo_dominio: z
         .boolean()
         .optional()
-        .describe('Confirma a criação do MOC de um domínio de destino que ainda não tem um.'),
+        .describe(m.tools.vault_move.confirm_novo_dominio),
     },
     async (input) => {
       const { value: result, warning } = await refreshedWrite(() =>
@@ -1528,13 +1492,13 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const vaultDelete = define(
     redact,
     'vault_delete',
-    DELETE_DESCRIPTION,
+    m.tools.vault_delete.description,
     {
-      path: z.string().min(1, 'caminho não pode ser vazio').describe('Caminho relativo ao vault, com `.md`.'),
+      path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_delete.path),
       confirm: z
         .boolean()
         .optional()
-        .describe('Confirma apagar mesmo com outras notas apontando para esta; os links delas ficam quebrados.'),
+        .describe(m.tools.vault_delete.confirm),
     },
     async (input) => {
       const { value: result, warning } = await refreshedWrite(() =>

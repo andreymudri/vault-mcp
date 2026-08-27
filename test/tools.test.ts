@@ -15,6 +15,7 @@ import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import { NO_HOSTILE_FILENAMES } from './platform.js';
+import { messagesFor } from '../src/i18n/messages.js';
 import {
   MAX_NOTE_CHARS,
   WriteQueue,
@@ -102,7 +103,11 @@ interface Harness {
 function makeTools(vaultRoot: string): Harness {
   const scanner = new VaultScanner({ vaultRoot });
   const retriever = new Retriever({ scanner });
-  const tools = createTools({ retriever, scanner, vaultRoot });
+  // Português FIXADO, e não o padrão: as asserções deste arquivo foram escritas contra o catálogo
+  // pt (descrição de tool, texto de recusa), e desde que `VAULT_LANG` existe o padrão é `en`. Sem
+  // fixar, este arquivo passaria a testar o catálogo inglês por acidente e a falhar por idioma em
+  // vez de por comportamento. Quem cobre o padrão e a troca é `test/i18n.test.ts`.
+  const tools = createTools({ retriever, scanner, vaultRoot, messages: messagesFor('pt') });
   const tool = (name: string): ToolDefinition => {
     const found = tools.find((candidate) => candidate.name === name);
     if (found === undefined) throw new Error(`tool ausente: ${name}`);
@@ -2301,7 +2306,9 @@ describe('binário compilado (dist/server/index.js)', () => {
 
     expect(code).toBe(1);
     expect(stdout).toBe('');
-    expect(stderr).toMatch(/diretório/i);
+    // Contra o CATÁLOGO e não contra uma palavra solta: o subprocesso roda sem VAULT_LANG, logo
+    // no idioma padrão, e uma asserção em português aqui mediria o padrão em vez do erro.
+    expect(stderr).toContain(messagesFor('en').startup.vaultPathNotDirectory);
   }, 120_000);
 });
 
@@ -2331,11 +2338,11 @@ describe('servidor MCP', () => {
     for (const linha of texto.split('\n')) expect(linha.startsWith('Aviso:')).toBe(false);
   });
 
-  it('resolveVaultPath exige VAULT_PATH', async () => {
-    expect(() => resolveVaultPath({})).toThrow(VaultPathError);
-    expect(() => resolveVaultPath({ VAULT_PATH: '' })).toThrow(VaultPathError);
+  it.each(['en', 'pt'] as const)('resolveVaultPath exige VAULT_PATH (%s)', async (lang) => {
+    expect(() => resolveVaultPath({ VAULT_LANG: lang })).toThrow(VaultPathError);
+    expect(() => resolveVaultPath({ VAULT_LANG: lang, VAULT_PATH: '' })).toThrow(VaultPathError);
     try {
-      resolveVaultPath({});
+      resolveVaultPath({ VAULT_LANG: lang });
     } catch (err) {
       const mensagem = String((err as Error).message);
       expect(mensagem).toContain('VAULT_PATH');
@@ -2349,7 +2356,10 @@ describe('servidor MCP', () => {
       // ESCOPADA. Um `npx vault-mcp` cru aqui é a regressão que isto pega.
       expect(mensagem).not.toMatch(/npx\s+vault-mcp/);
       expect(mensagem).toContain('npx @andreymudri/vault-mcp');
-      expect(mensagem).toContain('node /caminho/absoluto/do/vault-mcp/dist/server/index.js');
+      // A FORMA do comando, não a prosa em volta: o caminho de exemplo é traduzido (`/caminho/`
+      // vira `/path/`), mas "node, caminho absoluto, o entrypoint compilado" é o que a sugestão
+      // promete, e é o que tem que valer em todo idioma do catálogo.
+      expect(mensagem).toMatch(/node \/\S*vault-mcp\/dist\/server\/index\.js/);
     }
   });
 
