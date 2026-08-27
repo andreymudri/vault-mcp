@@ -1,11 +1,11 @@
 import { realpathSync } from 'node:fs';
-import { messagesFor, type Messages } from '../i18n/messages.js';
 import { promises as fs } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
 import { z } from 'zod';
 
 import { LinkGraph } from '../graph/graph.js';
+import { messagesFor, type Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { Frontmatter, Note, ScoredChunk } from '../types.js';
@@ -365,6 +365,7 @@ function describeIssues(error: z.ZodError): string {
  */
 function define<Shape extends z.ZodRawShape>(
   redact: (text: string) => string,
+  m: Messages,
   name: string,
   description: string,
   shape: Shape,
@@ -378,7 +379,7 @@ function define<Shape extends z.ZodRawShape>(
     handler: async (args) => {
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
-        return fail(`entrada inválida para ${name}: ${forMessage(describeIssues(parsed.error))}`);
+        return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error))}`);
       }
       try {
         return ok(await run(parsed.data));
@@ -386,7 +387,7 @@ function define<Shape extends z.ZodRawShape>(
         // Redacted BEFORE escaping: the errors that carry an absolute root come from `paths.ts` and
         // `git.ts`, which build it from the real filesystem, so the root reaches here unescaped.
         if (err instanceof ToolError) return fail(forMessage(redact(err.message)));
-        return fail(`${name} falhou: ${forMessage(redact(messageOf(err)))}`);
+        return fail(`${name} ${m.errors.toolFailed}: ${forMessage(redact(messageOf(err)))}`);
       }
     },
   };
@@ -1139,15 +1140,6 @@ async function withWriteDetail<T>(
   }
 }
 
-
-
-
-
-
-
-
-
-
 export function createTools(deps: ToolDeps): ToolDefinition[] {
   const m = deps.messages ?? messagesFor('en');
   const writes = new WriteQueue();
@@ -1155,6 +1147,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultSearch = define(
     redact,
+    m,
     'vault_search',
     m.tools.vault_search.description,
     {
@@ -1204,6 +1197,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultGetNote = define(
     redact,
+    m,
     'vault_get_note',
     m.tools.vault_get_note.description,
     { path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_get_note.path) },
@@ -1244,6 +1238,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultList = define(
     redact,
+    m,
     'vault_list',
     m.tools.vault_list.description,
     {
@@ -1279,6 +1274,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultBacklinks = define(
     redact,
+    m,
     'vault_backlinks',
     m.tools.vault_backlinks.description,
     { path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_backlinks.path) },
@@ -1314,6 +1310,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultWriteNote = define(
     redact,
+    m,
     'vault_write_note',
     m.tools.vault_write_note.description,
     {
@@ -1348,6 +1345,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultEditNote = define(
     redact,
+    m,
     'vault_edit_note',
     m.tools.vault_edit_note.description,
     {
@@ -1372,6 +1370,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultLearn = define(
     redact,
+    m,
     'vault_learn',
     m.tools.vault_learn.description,
     {
@@ -1454,6 +1453,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultMove = define(
     redact,
+    m,
     'vault_move',
     m.tools.vault_move.description,
     {
@@ -1491,6 +1491,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
   const vaultDelete = define(
     redact,
+    m,
     'vault_delete',
     m.tools.vault_delete.description,
     {

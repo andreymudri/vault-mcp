@@ -9,7 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { resolveLang, type Lang } from '../i18n/lang.js';
-import { messagesFor } from '../i18n/messages.js';
+import { messagesFor, type Messages } from '../i18n/messages.js';
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
 import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
@@ -107,6 +107,7 @@ function toCallToolResult(result: ToolResult): CallToolResult {
 export function toolCallback(
   tool: ToolDefinition,
   redact: (text: string) => string,
+  messages: Messages = messagesFor('en'),
 ): (args: unknown) => Promise<CallToolResult> {
   return async (args: unknown): Promise<CallToolResult> => {
     try {
@@ -114,7 +115,9 @@ export function toolCallback(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return toCallToolResult({
-        content: [{ type: 'text', text: `${tool.name} falhou: ${forMessage(redact(message))}` }],
+        content: [
+          { type: 'text', text: `${tool.name} ${messages.errors.toolFailed}: ${forMessage(redact(message))}` },
+        ],
         isError: true,
       });
     }
@@ -147,7 +150,7 @@ export function createVaultServer(vaultRoot: string, lang: Lang = 'en'): McpServ
     server.registerTool(
       tool.name,
       { description: tool.description, inputSchema: tool.inputSchema },
-      toolCallback(tool, redact),
+      toolCallback(tool, redact, messages),
     );
   }
 

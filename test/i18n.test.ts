@@ -103,3 +103,31 @@ describe('o catálogo inglês não é cidadão de segunda classe', () => {
     }
   });
 });
+
+describe('a recusa de entrada fala o idioma do catálogo inteira', () => {
+  // O invólucro da mensagem ficou em português enquanto o conteúdo já vinha traduzido, e o
+  // resultado era "entrada inválida para vault_search: query: query cannot be empty" — uma frase
+  // em dois idiomas no caminho de erro MAIS COMUM que existe (argumento inválido). Para quem
+  // ligou VAULT_LANG=en isso derruba a promessa inteira da opção: continua chegando texto que a
+  // pessoa não lê, agora com a agravante de parecer defeito.
+  it('em inglês, nem o invólucro nem o conteúdo vêm em português', async () => {
+    const search = (await tools('en')).find((t) => t.name === 'vault_search');
+    const result = await search!.handler({ query: '' });
+    const texto = result.content[0]!.text;
+
+    expect(result.isError).toBe(true);
+    expect(texto).toContain('query cannot be empty');
+    expect(texto).not.toContain('entrada inválida');
+    expect(texto).toMatch(/invalid input/i);
+  });
+
+  it('em português segue inteiramente em português', async () => {
+    const search = (await tools('pt')).find((t) => t.name === 'vault_search');
+    const result = await search!.handler({ query: '' });
+    const texto = result.content[0]!.text;
+
+    expect(result.isError).toBe(true);
+    expect(texto).toContain('entrada inválida para vault_search');
+    expect(texto).toContain('query não pode ser vazia');
+  });
+});

@@ -24,6 +24,11 @@ const PT = {
     startFailed: 'vault-mcp falhou ao iniciar',
   },
 
+  errors: {
+    invalidInput: 'entrada inválida para',
+    toolFailed: 'falhou',
+  },
+
   validation: {
     queryEmpty: 'query não pode ser vazia',
     pathEmpty: 'caminho não pode ser vazio',
@@ -156,6 +161,11 @@ const EN: Messages = {
     vaultPathUnreadable: 'VAULT_PATH could not be read',
     vaultPathNotDirectory: 'VAULT_PATH is not a directory',
     startFailed: 'vault-mcp failed to start',
+  },
+
+  errors: {
+    invalidInput: 'invalid input for',
+    toolFailed: 'failed',
   },
 
   validation: {
