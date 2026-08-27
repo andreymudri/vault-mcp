@@ -198,6 +198,18 @@ Deliberadamente **não** adivinha por `LANG`/`LC_ALL`. Na máquina do próprio a
 português e o shell é `LANG=en_US.UTF-8`: a inferência acertaria o caso genérico e erraria
 justamente o caso conhecido.
 
+Defina como você já define a `VAULT_PATH` — pelo cliente MCP, que funciona em todo sistema:
+
+```bash
+claude mcp add vault --scope user \
+  -e "VAULT_PATH=/caminho/absoluto/do/vault" \
+  -e "VAULT_LANG=pt" -- \
+  npx -y @andreymudri/vault-mcp
+```
+
+De um shell POSIX dá para prefixar direto. Esta forma é gramática de shell, não um comando, então
+**não** funciona no cmd.exe nem no PowerShell — no Windows use a forma do cliente, acima:
+
 ```bash
 VAULT_LANG=pt VAULT_PATH="/caminho/absoluto/do/vault" npx @andreymudri/vault-mcp
 ```

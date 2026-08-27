@@ -12,6 +12,7 @@
       "registryType": "npm",
       "identifier": "@andreymudri/vault-mcp",
       "version": "0.2.0",
+      "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
       },
@@ -21,7 +22,7 @@
           "description": "Absolute path to the root folder of the Obsidian vault to serve. Required; the server exits with a message on stderr without it.",
           "isRequired": true,
           "isSecret": false,
-          "format": "string"
+          "format": "filepath"
         },
         {
           "name": "VAULT_LANG",

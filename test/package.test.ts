@@ -75,7 +75,8 @@ describe('server.json — o contrato do MCP Registry', () => {
       registryType: string;
       identifier: string;
       version: string;
-      environmentVariables: Array<{ name: string; isRequired?: boolean }>;
+      runtimeHint?: string;
+      environmentVariables: Array<{ name: string; isRequired?: boolean; format?: string }>;
     }>;
   };
 
@@ -99,6 +100,14 @@ describe('server.json — o contrato do MCP Registry', () => {
     expect(server.packages[0]?.version).toBe(pkg.version);
   });
 
+  it('declara o runtime, para o cliente não ter de adivinhar no Windows', () => {
+    // Sem `runtimeHint` o cliente adivinha — e a adivinhação que quebra é a do Windows: `npx`
+    // resolve para `npx.cmd`, arquivo de lote que o CreateProcess não executa, então um cliente
+    // que faça spawn com shell:false morre com ENOENT antes de o servidor subir. É a MESMA falha
+    // que `scripts/test.mjs` já documenta sobre o `vitest.CMD`.
+    expect(server.packages[0]?.runtimeHint).toBe('npx');
+  });
+
   it('aponta para o pacote npm deste repositório', () => {
     expect(server.packages[0]?.registryType).toBe('npm');
     expect(server.packages[0]?.identifier).toBe(pkg.name);
@@ -117,6 +126,11 @@ describe('server.json — o contrato do MCP Registry', () => {
     const vars = server.packages[0]?.environmentVariables ?? [];
     const byName = new Map(vars.map((v) => [v.name, v]));
     expect(byName.get('VAULT_PATH')?.isRequired).toBe(true);
+    // `filepath`, não `string`: é o único input cuja FORMA muda por sistema. O schema define o
+    // enum [string, number, boolean, filepath], e `string` manda todo cliente desenhar caixa de
+    // texto livre — no Windows a pessoa digita `C:\\Users\\me\\vault` ali, o cliente grava isso num
+    // JSON de configuração, e `\\U` não é escape JSON válido: o próprio arquivo deixa de parsear.
+    expect(byName.get('VAULT_PATH')?.format).toBe('filepath');
     expect(byName.get('VAULT_LANG')?.isRequired).toBe(false);
     expect(byName.get('VAULT_AUTO_PUSH')?.isRequired).toBe(false);
   });

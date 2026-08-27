@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -9,8 +9,21 @@ import { createTools } from '../src/server/tools.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 
+const trash: string[] = [];
+
+afterEach(async () => {
+  // O resto da suíte limpa o que cria (relocate.test.ts:45 até com maxRetries, porque o rmdir do
+  // Windows bate em EBUSY enquanto um indexador segura o handle). Este arquivo não limpava, e
+  // vazava um diretório por chamada: /tmp e /var/folders são varridos pelo sistema, mas o
+  // %LOCALAPPDATA%\Temp do Windows não tem varredor e acumula para sempre.
+  for (const dir of trash.splice(0)) {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 async function tools(lang: Lang) {
   const vaultRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-i18n-'));
+  trash.push(vaultRoot);
   const scanner = new VaultScanner({ vaultRoot });
   const retriever = new Retriever({ scanner });
   return createTools({ retriever, scanner, vaultRoot, messages: messagesFor(lang) });

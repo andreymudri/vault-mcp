@@ -268,7 +268,11 @@ async function runServer(
   timeoutMs = 20_000,
 ): Promise<RunResult> {
   const child = spawn(process.execPath, [binPath], {
-    env: { ...process.env, VAULT_PATH: undefined, ...env },
+    // VAULT_LANG limpa junto com VAULT_PATH: sem isso o filho HERDA o idioma da máquina, e a
+    // asserção de catálogo lá embaixo passa a medir o ambiente de quem roda em vez do código.
+    // Numa máquina com VAULT_LANG=pt exportada — exatamente o que a seção nova do README manda o
+    // usuário de português fazer — a suíte falhava por idioma. O CI não pega: runner não exporta.
+    env: { ...process.env, VAULT_PATH: undefined, VAULT_LANG: undefined, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 

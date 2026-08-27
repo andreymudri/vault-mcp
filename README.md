@@ -207,6 +207,19 @@ It deliberately does **not** guess from `LANG`/`LC_ALL`. On the author's own mac
 Portuguese while the shell is `LANG=en_US.UTF-8`, so inference would get the generic case right and
 the one known case wrong.
 
+Set it the same way you set `VAULT_PATH` — through your MCP client, which works on every
+platform:
+
+```bash
+claude mcp add vault --scope user \
+  -e "VAULT_PATH=/absolute/path/to/vault" \
+  -e "VAULT_LANG=pt" -- \
+  npx -y @andreymudri/vault-mcp
+```
+
+From a POSIX shell you can also prefix it directly. This form is shell grammar, not a command, so
+it does **not** work in cmd.exe or PowerShell — use the client form above on Windows:
+
 ```bash
 VAULT_LANG=pt VAULT_PATH="/absolute/path/to/vault" npx @andreymudri/vault-mcp
 ```
