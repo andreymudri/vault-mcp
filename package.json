@@ -1,6 +1,6 @@
 {
   "name": "@andreymudri/vault-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.andreymudri/vault-mcp",
   "description": "MCP server for searching, reading and writing an Obsidian knowledge vault: lexical BM25 retrieval plus one wiki-link hop, and learning capture that propagates to the domain MOC, the knowledge index and the daily note in a single commit.",
   "license": "MIT",
