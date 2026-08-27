@@ -197,7 +197,10 @@ describe('o CONTEÚDO da recusa também fala o idioma, não só o invólucro', (
     for (const [i, tool] of en.entries()) {
       const rEn = await tool.handler({});
       const rPt = await pt[i]!.handler({});
-      if (!rEn.isError) continue; // caminho feliz: fora do escopo declarado de VAULT_LANG
+      // Sem exceção para o caminho feliz. A versão anterior pulava as respostas de SUCESSO
+      // ('caminho feliz: fora do escopo declarado'), e era justamente ali que o `vault_list`
+      // devolvia 'Nenhuma nota com os filtros informados.' em modo inglês. Uma exceção que
+      // esconde o único caso que falhava não é escopo, é ponto cego.
 
       const textoEn = rEn.content[0]!.text;
       const textoPt = rPt.content[0]!.text;

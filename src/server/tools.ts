@@ -727,19 +727,20 @@ function renderWrite(
   result: WriteResult,
   verb: string,
   redact: (text: string) => string,
+  m: Messages,
   queueWarning?: string,
 ): string {
   const lines = [
     `${verb}: ${forMessage(result.path)}`,
-    `Commit: ${result.committed ? 'sim' : 'não'}`,
+    `${m.results.commit}: ${result.committed ? m.results.yes : m.results.no}`,
     // Only when a push was ATTEMPTED. With `VAULT_AUTO_PUSH` unset the server touches no network at
     // all, and a `Push: não` line there would report on something nobody asked for.
-    ...(result.pushed === undefined ? [] : [`Push: ${result.pushed ? 'sim' : 'não'}`]),
+    ...(result.pushed === undefined ? [] : [`${m.results.push}: ${result.pushed ? m.results.yes : m.results.no}`]),
   ];
   for (const warning of [result.warning, queueWarning]) {
-    if (warning !== undefined) lines.push(`Aviso: ${forMessage(redact(warning))}`);
+    if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
   }
-  lines.push('', 'Diff:', result.diff === '' ? '(sem alteração de conteúdo)' : relayDiff(result.diff));
+  lines.push('', `${m.results.diff}:`, result.diff === '' ? m.results.noContentChange : relayDiff(result.diff));
   return lines.join('\n');
 }
 
@@ -754,32 +755,33 @@ function renderRelocate(
   headline: string,
   result: MoveResult | DeleteResult,
   redact: (text: string) => string,
+  m: Messages,
   queueWarning?: string,
 ): string {
   const lines = [headline];
   if ('rewritten' in result) {
     lines.push(
-      `Links corrigidos em: ${
-        result.rewritten.length === 0 ? '(nada)' : forMessage(result.rewritten.join(', '))
+      `${m.results.linksFixedIn}: ${
+        result.rewritten.length === 0 ? m.results.nothing : forMessage(result.rewritten.join(', '))
       }`,
     );
   }
   lines.push(
-    `MOC/índice atualizados: ${
-      result.propagated.length === 0 ? '(nada)' : forMessage(result.propagated.join(', '))
+    `${m.results.mocIndexUpdated}: ${
+      result.propagated.length === 0 ? m.results.nothing : forMessage(result.propagated.join(', '))
     }`,
-    `Commit: ${result.committed ? 'sim' : 'não'}`,
-    ...(result.pushed === undefined ? [] : [`Push: ${result.pushed ? 'sim' : 'não'}`]),
+    `${m.results.commit}: ${result.committed ? m.results.yes : m.results.no}`,
+    ...(result.pushed === undefined ? [] : [`${m.results.push}: ${result.pushed ? m.results.yes : m.results.no}`]),
   );
   if ('undo' in result && result.undo !== undefined) {
     // Vault-relative on purpose (see `relocate.ts`): a command carrying the redactor's `<vault>`
     // is a command the user pastes and watches fail, so the answer says where to run it instead.
-    lines.push(`Desfazer, de dentro do vault: ${forMessage(result.undo)}`);
+    lines.push(`${m.results.undoFromVault}: ${forMessage(result.undo)}`);
   }
   for (const warning of [...result.warnings, queueWarning]) {
-    if (warning !== undefined) lines.push(`Aviso: ${forMessage(redact(warning))}`);
+    if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
   }
-  lines.push('', 'Diff (mostre ao usuário):', result.diff === '' ? '(vazio)' : relayDiff(result.diff));
+  lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff));
   return lines.join('\n');
 }
 
@@ -1185,16 +1187,15 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       // shaped exactly like a result this search never found.
       const query = forMessage(input.query);
       if (results.length === 0) {
-        const head = `Nenhum resultado para "${query}".`;
+        const head = `${m.results.noResultsFor} "${query}".`;
         return suggestions === undefined
           ? head
           : `${head}\nSugestões de termos parecidos no vault: ${forMessage(suggestions.join(', '))}`;
       }
 
       const head =
-        `${results.length} resultado(s) para "${query}". ` +
-        'Cite `caminho:linha` ao usar qualquer trecho abaixo. ' +
-        'Cada trecho da nota vem prefixado com `> `; linhas sem esse prefixo são deste servidor, ' +
+        `${results.length} ${m.results.resultsFor} "${query}". ` +
+        m.results.citePreamble +
         'nunca conteúdo do vault.';
       return [head, ...results.map(renderResult)].join('\n\n');
     },
@@ -1229,11 +1230,11 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
       return [
         forMessage(`${note.path} — ${note.title}`),
-        'Frontmatter:',
+        `${m.results.frontmatter}:`,
         frontmatter === '' ? '  (nenhum)' : frontmatter,
-        `Links: ${note.links.length === 0 ? '(nenhum)' : forMessage(note.links.join(', '))}`,
-        `Links quebrados: ${
-          note.brokenLinks.length === 0 ? '(nenhum)' : forMessage(note.brokenLinks.join(', '))
+        `${m.results.links}: ${note.links.length === 0 ? m.results.none : forMessage(note.links.join(', '))}`,
+        `${m.results.brokenLinks}: ${
+          note.brokenLinks.length === 0 ? m.results.none : forMessage(note.brokenLinks.join(', '))
         }`,
         '',
         body,
@@ -1272,7 +1273,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         })
         .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-      if (notes.length === 0) return 'Nenhuma nota com os filtros informados.';
+      if (notes.length === 0) return m.results.noNotesMatchingFilters;
       return [`${notes.length} nota(s):`, ...notes.map(renderNoteLine)].join('\n');
     },
   );
@@ -1303,7 +1304,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       const backlinks = graph.backlinks(target.path).sort();
 
       if (backlinks.length === 0) {
-        return `Nenhuma nota aponta para ${forMessage(target.path)}.`;
+        return `${m.results.noNotesPointTo} ${forMessage(target.path)}.`;
       }
       const lines = backlinks.map((path) => {
         const note = deps.scanner.getNote(path);
@@ -1344,7 +1345,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           }),
         ),
       );
-      return renderWrite(result, result.created ? 'Nota criada' : 'Nota substituída', redact, warning);
+      return renderWrite(result, result.created ? m.results.noteCreated : m.results.noteReplaced, redact, m, warning);
     },
   );
 
@@ -1369,7 +1370,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           }),
         ),
       );
-      return renderWrite(result, 'Nota editada', redact, warning);
+      return renderWrite(result, m.results.noteEdited, redact, m, warning);
     },
   );
 
@@ -1420,22 +1421,22 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
 
       const lines = [
         result.action === 'created'
-          ? `Aprendizado registrado em nota NOVA: ${forMessage(result.path)}`
-          : `Aprendizado ANEXADO à nota existente: ${forMessage(result.path)}`,
+          ? `${m.results.learnedNewNote}: ${forMessage(result.path)}`
+          : `${m.results.learnedAppended}: ${forMessage(result.path)}`,
         // `reason` and `warning` name paths read off the vault index, so they carry whatever a
         // file name carries.
-        `Motivo: ${forMessage(redact(result.reason))}`,
+        `${m.results.reason}: ${forMessage(redact(result.reason))}`,
         `Propagado para: ${
           result.propagated.length === 0 ? '(nada)' : forMessage(result.propagated.join(', '))
         }`,
-        `Commit: ${result.committed ? 'sim' : 'não'}`,
+        `${m.results.commit}: ${result.committed ? m.results.yes : m.results.no}`,
         // Same rule as `renderWrite`: the line exists only when a push was attempted.
-        ...(result.pushed === undefined ? [] : [`Push: ${result.pushed ? 'sim' : 'não'}`]),
+        ...(result.pushed === undefined ? [] : [`${m.results.push}: ${result.pushed ? m.results.yes : m.results.no}`]),
       ];
       for (const aviso of [result.warning, queueWarning]) {
-        if (aviso !== undefined) lines.push(`Aviso: ${forMessage(redact(aviso))}`);
+        if (aviso !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(aviso))}`);
       }
-      lines.push('', 'Diff (mostre ao usuário):', result.diff === '' ? '(vazio)' : relayDiff(result.diff));
+      lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff));
       return lines.join('\n');
     },
   );
@@ -1486,9 +1487,10 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         }),
       );
       return renderRelocate(
-        `Nota movida: ${forMessage(result.from)} → ${forMessage(result.to)}`,
+        `${m.results.noteMoved}: ${forMessage(result.from)} → ${forMessage(result.to)}`,
         result,
         redact,
+        m,
         warning,
       );
     },
@@ -1516,7 +1518,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           now: new Date(),
         }),
       );
-      return renderRelocate(`Nota apagada: ${forMessage(result.path)}`, result, redact, warning);
+      return renderRelocate(`${m.results.noteDeleted}: ${forMessage(result.path)}`, result, redact, m, warning);
     },
   );
 
