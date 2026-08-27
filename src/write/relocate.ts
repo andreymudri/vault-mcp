@@ -333,10 +333,8 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     const onDisk = plans.get(destMoc)?.before ?? existing;
     const domainIsNew = existing === '';
     if (domainIsNew && opts.confirmNovoDominio !== true) {
-      throw new RelocateError(
-        `${forMessage(toDomain ?? '')} ainda não tem MOC em 02-wiki/; ` +
-          'passe confirm_novo_dominio para criá-lo',
-      );
+      throw coded(new RelocateError(`${forMessage(toDomain ?? '')} ainda não tem MOC em 02-wiki/; ` +
+          'passe confirm_novo_dominio para criá-lo'), 'relocate.newDomainNeedsConfirm', { toDomain: forMessage(toDomain ?? '') });
     }
 
     const slug = posix.basename(toRel, '.md');
@@ -463,18 +461,23 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   const { frontmatter } = parseFile(relPath, content);
   const tipo = typeof frontmatter.tipo === 'string' ? frontmatter.tipo : undefined;
   if (relPath === KNOWLEDGE_INDEX || tipo === 'moc' || tipo === 'daily') {
-    throw new RelocateError(
-      `${forMessage(relPath)} é uma nota estrutural (${tipo ?? 'índice'}) e não é apagada por aqui`,
-    );
+    throw coded(new RelocateError(`${forMessage(relPath)} é uma nota estrutural (${tipo ?? 'índice'}) e não é apagada por aqui`), 'relocate.structuralNote', { relPath: forMessage(relPath), tipo: tipo ?? 'índice' });
   }
 
   const warnings: string[] = [];
   const head = await headBlobState(opts.vaultRoot, relPath);
   if (!head.inHead) {
-    throw new RelocateError(
-      `${forMessage(relPath)} não tem versão commitada no HEAD, então apagá-la é irreversível; ` +
-        'commite a nota antes, ou apague fora do MCP' +
-        (head.reason === undefined ? '' : ` (${forMessage(head.reason)})`),
+    throw coded(
+      new RelocateError(
+        `${forMessage(relPath)} não tem versão commitada no HEAD, então apagá-la é irreversível; ` +
+          'commite a nota antes, ou apague fora do MCP' +
+          (head.reason === undefined ? '' : ` (${forMessage(head.reason)})`),
+      ),
+      'relocate.noHeadVersion',
+      {
+        relPath: forMessage(relPath),
+        detail: head.reason === undefined ? '' : ` (${forMessage(head.reason)})`,
+      },
     );
   }
   if (head.modified) {
@@ -527,9 +530,13 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   if (backlinks.length > 0 && opts.confirm !== true) {
     // The list is the whole point of the refusal: there is nowhere to rewrite these links to,
     // so whoever confirms is choosing to leave them broken and has to see which ones.
-    throw new RelocateError(
-      `${backlinks.length} nota(s) apontam para ${forMessage(relPath)} e os links ficarão ` +
-        `quebrados: ${forMessage(backlinks.join(', '))}; passe confirm para apagar mesmo assim`,
+    throw coded(
+      new RelocateError(
+        `${backlinks.length} nota(s) apontam para ${forMessage(relPath)} e os links ficarão ` +
+          `quebrados: ${forMessage(backlinks.join(', '))}; passe confirm para apagar mesmo assim`,
+      ),
+      'relocate.hasBacklinks',
+      { count: backlinks.length, relPath: forMessage(relPath), list: forMessage(backlinks.join(', ')) },
     );
   }
 

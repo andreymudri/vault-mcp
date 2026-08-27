@@ -376,7 +376,7 @@ function describeIssues(error: z.ZodError, m: Messages): string {
  * o que mantém verdes as dezenas de testes de unidade que afirmam sobre `err.message` direto.
  */
 function translateError(err: unknown, m: Messages): string {
-  const { code, params } = errorContext(err);
+  const { code, params, hint } = errorContext(err);
   if (code === undefined) return messageOf(err);
   const codes = m.errorCodes as Record<string, string | undefined>;
   const template = codes[code];
@@ -387,7 +387,10 @@ function translateError(err: unknown, m: Messages): string {
   const resolved = Object.fromEntries(
     Object.entries(params ?? {}).map(([k, v]) => [k, (typeof v === 'string' && codes[v]) || v]),
   );
-  return renderTemplate(template, resolved);
+  const text = renderTemplate(template, resolved);
+  const hintTemplate = hint === undefined ? undefined : codes[hint.code];
+  if (hint === undefined || hintTemplate === undefined) return text;
+  return `${text}; ${renderTemplate(hintTemplate, hint.params)}`;
 }
 
 function define<Shape extends z.ZodRawShape>(
@@ -720,16 +723,16 @@ function relayDiff(diff: string): string {
 }
 
 /** One rendered result: the citation line the vault's `CLAUDE.md` requires, then the text. */
-function renderResult(item: ScoredChunk): string {
+function renderResult(item: ScoredChunk, m: Messages): string {
   const { chunk } = item;
   const trail =
     chunk.headingPath.length === 0 ? '' : ` — ${forMessage(chunk.headingPath.join(' > '))}`;
   const flags = [
     `score ${item.score.toFixed(2)}`,
-    item.viaGraph ? 'via grafo' : undefined,
+    item.viaGraph ? m.results.viaGraph : undefined,
     // The BOOLEAN, never the marker text. `TRUNCATION_MARKER` is ordinary prose that a note can
     // quote verbatim (`src/types.ts` says so), so matching on it would label an intact note as cut.
-    item.truncated === true ? 'trecho truncado' : undefined,
+    item.truncated === true ? m.results.snippetTruncated : undefined,
   ]
     .filter((flag): flag is string => flag !== undefined)
     .join(', ');
@@ -1052,7 +1055,7 @@ function coerceTags(value: unknown): string[] {
   for (const item of items) {
     if (out.length >= MAX_TAGS) break;
     if (item === null || item === undefined || typeof item === 'object') {
-      throw new ToolError('frontmatter.tags só aceita textos ou números; remova listas e objetos');
+      throw coded(new ToolError('frontmatter.tags só aceita textos ou números; remova listas e objetos'), 'tags.scalarOnly');
     }
     const tag = String(item).slice(0, MAX_TAG_LENGTH).trim();
     if (tag === '') continue;
@@ -1116,7 +1119,10 @@ function toFrontmatter(input: Record<string, unknown> | undefined): Frontmatter 
  * `stat` is confined to a path that stays inside the vault: this runs on caller-supplied input and
  * must not report on files outside it, not even a link count.
  */
-async function hardLinkHint(vaultRoot: string, relPath: string): Promise<string | undefined> {
+async function hardLinkHint(
+  vaultRoot: string,
+  relPath: string,
+): Promise<{ nlink: number } | undefined> {
   try {
     // REAL paths on both sides, never the lexical ones. `resolve(root, relPath)` keeps the string
     // inside the vault while `lstat` follows every symlink on the way: with `02-wiki/fora` linked
@@ -1128,13 +1134,7 @@ async function hardLinkHint(vaultRoot: string, relPath: string): Promise<string 
     if (target !== root && !target.startsWith(`${root}${sep}`)) return undefined;
 
     const stat = await fs.lstat(target);
-    if (stat.nlink > 1) {
-      return (
-        `o arquivo tem ${stat.nlink} hard links apontando para o mesmo inode ` +
-        '(uma cópia `cp -al` ou um snapshot de backup faz isso), então escrever nele mudaria ' +
-        'todas as cópias de uma vez'
-      );
-    }
+    if (stat.nlink > 1) return { nlink: stat.nlink };
   } catch {
     // Sem alvo legível não há o que explicar; o erro original já é a resposta.
   }
@@ -1169,7 +1169,22 @@ async function withWriteDetail<T>(
     if (err instanceof EditError || err instanceof LearnError || err instanceof ToolError) throw err;
     const hint = await hardLinkHint(vaultRoot, relPath);
     if (hint === undefined) throw err;
-    throw new ToolError(`${messageOf(err)}; ${hint}`);
+    // O português fica no `message` como sempre ficou; a versão traduzível vai pelo canal de
+    // dica, com código próprio.
+    const hintPt =
+      `o arquivo tem ${hint.nlink} hard links apontando para o mesmo inode ` +
+      '(uma cópia `cp -al` ou um snapshot de backup faz isso), então escrever nele mudaria ' +
+      'todas as cópias de uma vez';
+    // O código do erro ORIGINAL vem junto. Reconstruir com `new ToolError(messageOf(err))` o
+    // descartava, então um sítio corretamente anotado — `path.notANote`, por exemplo — voltava a
+    // sair em português sempre que a dica de hard link se anexava. Não era um vazamento a mais:
+    // era um vetor que desfazia a tradução de qualquer erro que passasse por aqui.
+    const { code, params } = errorContext(err);
+    const wrapped = new ToolError(`${messageOf(err)}; ${hintPt}`);
+    const hintCtx = { code: 'hint.hardLinks', params: { nlink: hint.nlink } };
+    throw code === undefined
+      ? coded(wrapped, 'hint.hardLinks', { nlink: hint.nlink })
+      : coded(wrapped, code, params, hintCtx);
   }
 }
 
@@ -1216,14 +1231,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         const head = `${m.results.noResultsFor} "${query}".`;
         return suggestions === undefined
           ? head
-          : `${head}\nSugestões de termos parecidos no vault: ${forMessage(suggestions.join(', '))}`;
+          : `${head}\n${m.results.similarTerms}: ${forMessage(suggestions.join(', '))}`;
       }
 
       const head =
         `${results.length} ${m.results.resultsFor} "${query}". ` +
         m.results.citePreamble +
-        'nunca conteúdo do vault.';
-      return [head, ...results.map(renderResult)].join('\n\n');
+        m.results.citePreambleTail;
+      return [head, ...results.map((item) => renderResult(item, m))].join('\n\n');
     },
   );
 
@@ -1252,12 +1267,12 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       const body =
         note.body.length <= MAX_NOTE_CHARS
           ? note.body
-          : `${sliceAtCodePointBoundary(note.body, MAX_NOTE_CHARS)}\n[…nota cortada em ${MAX_NOTE_CHARS} caracteres]`;
+          : `${sliceAtCodePointBoundary(note.body, MAX_NOTE_CHARS)}\n[…${renderTemplate(m.results.noteTruncated, { max: MAX_NOTE_CHARS })}]`;
 
       return [
         forMessage(`${note.path} — ${note.title}`),
         `${m.results.frontmatter}:`,
-        frontmatter === '' ? '  (nenhum)' : frontmatter,
+        frontmatter === '' ? `  ${m.results.none}` : frontmatter,
         `${m.results.links}: ${note.links.length === 0 ? m.results.none : forMessage(note.links.join(', '))}`,
         `${m.results.brokenLinks}: ${
           note.brokenLinks.length === 0 ? m.results.none : forMessage(note.brokenLinks.join(', '))
@@ -1300,7 +1315,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
       if (notes.length === 0) return m.results.noNotesMatchingFilters;
-      return [`${notes.length} nota(s):`, ...notes.map(renderNoteLine)].join('\n');
+      return [`${notes.length} ${m.results.notesCount}:`, ...notes.map(renderNoteLine)].join('\n');
     },
   );
 
@@ -1336,7 +1351,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         const note = deps.scanner.getNote(path);
         return forMessage(`- ${path}${note === undefined ? '' : ` — ${note.title}`}`);
       });
-      return [`${backlinks.length} nota(s) apontam para ${forMessage(target.path)}:`, ...lines].join('\n');
+      return [`${backlinks.length} ${m.results.notesPointTo} ${forMessage(target.path)}:`, ...lines].join('\n');
     },
   );
 
@@ -1452,8 +1467,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         // `reason` and `warning` name paths read off the vault index, so they carry whatever a
         // file name carries.
         `${m.results.reason}: ${forMessage(redact(result.reason))}`,
-        `Propagado para: ${
-          result.propagated.length === 0 ? '(nada)' : forMessage(result.propagated.join(', '))
+        `${m.results.propagatedTo}: ${
+          result.propagated.length === 0 ? m.results.nothing : forMessage(result.propagated.join(', '))
         }`,
         `${m.results.commit}: ${result.committed ? m.results.yes : m.results.no}`,
         // Same rule as `renderWrite`: the line exists only when a push was attempted.

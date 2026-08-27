@@ -21,9 +21,30 @@ afterEach(async () => {
   }
 });
 
-async function tools(lang: Lang) {
+/**
+ * Um vault com CONTEÚDO, e essa é a correção que importa aqui.
+ *
+ * A versão anterior criava um diretório vazio, então TODA tool respondia pelo ramo de vault
+ * vazio — e era exatamente por isso que a manchete povoada do `vault_list` ('5 nota(s):') e a do
+ * `vault_backlinks` sobreviviam a um teste cujo próprio comentário dizia ter fechado esse ponto
+ * cego. Um varredor que só visita o caso vazio não varre nada.
+ */
+async function makeVault(): Promise<string> {
   const vaultRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-i18n-'));
   trash.push(vaultRoot);
+  const write = async (rel: string, body: string) => {
+    const abs = path.join(vaultRoot, ...rel.split('/'));
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, body, 'utf8');
+  };
+  await write('02-wiki/nestjs/auth-guard.md', '---\ntipo: wiki\ntags: [jwt]\n---\n\n# Auth Guard\n\nGuarda de autenticação com jwt token.\n');
+  await write('02-wiki/nestjs/nestjs-moc.md', '---\ntipo: moc\n---\n\n# NestJS MOC\n\n## Notas\n\n- [[auth-guard]] — guarda\n');
+  await write('02-wiki/docker/multi-stage.md', '---\ntipo: wiki\ntags: [docker]\n---\n\n# Multi Stage\n\nBuild em camadas, aponta para [[auth-guard]].\n');
+  return vaultRoot;
+}
+
+async function tools(lang: Lang) {
+  const vaultRoot = await makeVault();
   const scanner = new VaultScanner({ vaultRoot });
   const retriever = new Retriever({ scanner });
   return createTools({ retriever, scanner, vaultRoot, messages: messagesFor(lang) });
@@ -180,6 +201,29 @@ describe('o CONTEÚDO da recusa também fala o idioma, não só o invólucro', (
     expect((await search!.handler({})).content[0]!.text).toContain('campo obrigatório');
     expect((await search!.handler({ query: 'x', limit: 'abc' })).content[0]!.text)
       .toContain('esperado number, recebido string');
+  });
+
+  it('nenhuma RESPOSTA POVOADA é igual nos dois idiomas', async () => {
+    // O varredor de recusas não bastava: um vault vazio faz toda tool cair no ramo vazio, e as
+    // manchetes povoadas ('5 nota(s):', 'N nota(s) apontam para') nunca eram exercitadas.
+    const en = await tools('en');
+    const pt = await tools('pt');
+    const chamadas: Array<[string, Record<string, unknown>]> = [
+      ['vault_search', { query: 'jwt' }],
+      ['vault_list', { tipo: 'wiki' }],
+      ['vault_backlinks', { path: '02-wiki/nestjs/auth-guard.md' }],
+      ['vault_get_note', { path: '02-wiki/nestjs/auth-guard.md' }],
+    ];
+    for (const [nome, args] of chamadas) {
+      const a = await en.find((t) => t.name === nome)!.handler(args);
+      const b = await pt.find((t) => t.name === nome)!.handler(args);
+      expect(a.content[0]!.text, `${nome} respondeu idêntico nos dois idiomas`).not.toBe(
+        b.content[0]!.text,
+      );
+      expect(a.content[0]!.text, `${nome}: ${a.content[0]!.text.slice(0, 120)}`).not.toMatch(
+        /nota\(s\)|Sugestões|via grafo|trecho truncado|nota cortada|\(nenhum\)|\(nada\)|Propagado para/i,
+      );
+    }
   });
 
   it('nenhuma recusa mistura os dois idiomas, e nenhuma é igual nos dois', async () => {

@@ -123,9 +123,15 @@ function assertNoResidualToken(templateText: string, tokenStarts: Set<number>): 
   // adversarial input into an error message.
   const fragment = templateText.slice(at, at + 60);
   const ellipsis = templateText.length > at + 60 ? '…' : '';
-  throw new TemplateError(
-    `token Templater não resolvido (forma não suportada, possivelmente ` +
-      `multi-linha): ${fragment.replace(/\n/g, '\\n')}${ellipsis}`,
+  throw Object.assign(
+    new TemplateError(
+      `token Templater não resolvido (forma não suportada, possivelmente ` +
+        `multi-linha): ${fragment.replace(/\n/g, '\\n')}${ellipsis}`,
+    ),
+    // `Object.assign` e não o helper `coded`, pelo mesmo motivo do outro sítio deste arquivo:
+    // os testes de fuso rodam este módulo num filho sob type stripping, onde um import de valor
+    // para `../i18n/errors.js` não resolve.
+    { code: 'template.unresolvedToken', params: { fragment: fragment.replace(/\n/g, '\\n'), ellipsis } },
   );
 }
 

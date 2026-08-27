@@ -16,6 +16,15 @@ export interface ErrorContext {
   readonly code?: string;
   /** Valores para os `{placeholders}` do template. */
   readonly params?: Readonly<Record<string, string | number>>;
+  /**
+   * Uma DICA anexada ao erro, com código próprio, resolvida e acrescentada depois do template.
+   *
+   * Existe para o `withWriteDetail`, que junta uma explicação ao erro original. Sem este canal,
+   * traduzir pelo código devolveria só o template e a dica sumiria — trocar um vazamento de
+   * idioma por uma perda de informação seria péssimo negócio. Tem código próprio porque a dica
+   * é frase inteira e independente, não um parâmetro do erro que a acompanha.
+   */
+  readonly hint?: { readonly code: string; readonly params?: Readonly<Record<string, string | number>> };
 }
 
 /**
@@ -43,13 +52,23 @@ export function coded<E extends Error>(
   err: E,
   code: string,
   params?: Readonly<Record<string, string | number>>,
+  hint?: ErrorContext['hint'],
 ): E {
-  return Object.assign(err, params === undefined ? { code } : { code, params });
+  return Object.assign(err, {
+    code,
+    ...(params === undefined ? {} : { params }),
+    ...(hint === undefined ? {} : { hint }),
+  });
 }
 
 /** O contexto de um erro desconhecido, vazio quando ele não carrega nenhum. */
 export function errorContext(err: unknown): ErrorContext {
   if (typeof err !== 'object' || err === null) return {};
-  const { code, params } = err as ErrorContext;
-  return typeof code === 'string' ? { code, ...(params === undefined ? {} : { params }) } : {};
+  const { code, params, hint } = err as ErrorContext;
+  if (typeof code !== 'string') return {};
+  return {
+    code,
+    ...(params === undefined ? {} : { params }),
+    ...(hint === undefined ? {} : { hint }),
+  };
 }

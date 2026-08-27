@@ -254,7 +254,7 @@ turned on:
   configured says so instead of having a remote and a branch guessed for it
 - **it always fails as a warning, never as a rollback.** The note is already on disk and committed;
   undoing that because the network went down would be the worst trade available. The tool's response
-  gains a `Push: sim|não` line, which only appears when a push was in fact ATTEMPTED
+  gains a `Push: yes|no` line (`Push: sim|não` under `VAULT_LANG=pt`), which only appears when a push was in fact ATTEMPTED
 - **a remote that moved ahead is not resolved on its own.** Pull, rebase and merge rewrite the user's
   knowledge base, and that is their decision — not a side effect of saving one note. The warning
   names the situation and stops

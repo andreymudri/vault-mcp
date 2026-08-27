@@ -244,7 +244,7 @@ ligado:
   isso em vez de ter remote e branch adivinhados
 - **falha sempre como aviso, nunca como rollback.** A nota já está em disco e commitada; desfazer
   isso porque a rede caiu seria o pior negócio disponível. A resposta da tool ganha uma linha
-  `Push: sim|não`, que só aparece quando um push foi de fato TENTADO
+  `Push: sim|não` (`Push: yes|no` sob `VAULT_LANG=en`), que só aparece quando um push foi de fato TENTADO
 - **um remote que andou na frente não é resolvido sozinho.** Pull, rebase e merge reescrevem a base
   de conhecimento do usuário, e isso é decisão dele — não efeito colateral de gravar uma nota. O
   aviso nomeia a situação e para

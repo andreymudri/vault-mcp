@@ -10,6 +10,7 @@ import {
   PathGuardError,
 } from './paths.js';
 import { ensureFrontmatter, formatLocal } from './template.js';
+import { coded } from '../i18n/errors.js';
 
 /**
  * Automatic propagation of a learning into the three places that make it findable again:
@@ -631,7 +632,7 @@ async function applyTarget(
     // reason and the two must not disagree.
     const kind = await classifyNode(absPath);
     if (kind === 'foreign') {
-      throw new PathGuardError('alvo não é um arquivo comum (link, diretório ou dispositivo)');
+      throw coded(new PathGuardError('alvo não é um arquivo comum (link, diretório ou dispositivo)'), 'path.notARegularFile');
     }
 
     let before = '';

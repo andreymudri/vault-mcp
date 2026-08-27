@@ -615,7 +615,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
   const before = await fs.readFile(absPath, 'utf8');
   const occurrences = countOccurrences(before, opts.oldText);
   if (occurrences > 1) {
-    throw new EditError(`trecho ambíguo em ${opts.path}: ${occurrences} ocorrências`);
+    throw coded(new EditError(`trecho ambíguo em ${opts.path}: ${occurrences} ocorrências`), 'edit.ambiguous', { path: opts.path, occurrences });
   }
 
   // Exato primeiro, sempre. O passo tolerante a terminador só é alcançado quando o exato achou
@@ -626,7 +626,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
     const folded = matchFoldingLineEndings(before, opts.oldText);
     if (folded.occurrences === 0) throw coded(new EditError(`trecho não encontrado em ${opts.path}`), 'edit.notFound', { path: opts.path });
     if (folded.occurrences > 1) {
-      throw new EditError(`trecho ambíguo em ${opts.path}: ${folded.occurrences} ocorrências`);
+      throw coded(new EditError(`trecho ambíguo em ${opts.path}: ${folded.occurrences} ocorrências`), 'edit.ambiguous', { path: opts.path, occurrences: folded.occurrences });
     }
     at = folded.at;
     end = folded.end;

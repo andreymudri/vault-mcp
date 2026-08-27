@@ -203,7 +203,7 @@ export async function assertNoSymlinkEscape(vaultRoot: string, abs: string): Pro
   try {
     realRoot = await fs.realpath(root);
   } catch (err) {
-    throw new PathGuardError(`raiz do vault inexistente ou inacessível: ${root} (${(err as Error).message})`);
+    throw coded(new PathGuardError(`raiz do vault inexistente ou inacessível: ${root} (${(err as Error).message})`), 'path.rootMissing', { root, detail: (err as Error).message });
   }
 
   // Walk up from abs to find the nearest existing directory

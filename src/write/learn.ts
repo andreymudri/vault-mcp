@@ -725,9 +725,7 @@ async function freeNotePath(
     const candidate = `${WIKI_PREFIX}${dominio}/${head}-${suffix}.md`;
     if (isWritable(await pathState(resolveWritePath(vaultRoot, candidate)))) return candidate;
   }
-  throw new LearnError(
-    `não há nome livre para a nota em ${WIKI_PREFIX}${dominio}/: 100 variações já existem`,
-  );
+  throw coded(new LearnError(`não há nome livre para a nota em ${WIKI_PREFIX}${dominio}/: 100 variações já existem`), 'learn.noFreeName', { prefix: WIKI_PREFIX, dominio });
 }
 
 /**
@@ -759,10 +757,8 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   // rewriting the user's text, while this input is trivially fixable by the caller — and the
   // message says exactly how.
   if (blockText(opts.insight).trim().split('\n', 1)[0]?.trim() === '---') {
-    throw new LearnError(
-      'insight não pode começar com o delimitador de frontmatter `---`: ele viraria o ' +
-        'frontmatter da nota. Escreva ao menos uma linha de texto antes do bloco.',
-    );
+    throw coded(new LearnError('insight não pode começar com o delimitador de frontmatter `---`: ele viraria o ' +
+        'frontmatter da nota. Escreva ao menos uma linha de texto antes do bloco.'), 'learn.insightStartsWithDelimiter');
   }
 
   const problem = dominioProblem(opts.dominio);
@@ -774,10 +770,8 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const domainIsNew = !dominios.includes(opts.dominio);
   if (domainIsNew && opts.confirmNovoDominio !== true) {
     const validos = dominios.length === 0 ? 'nenhum' : dominios.join(', ');
-    throw new LearnError(
-      `domínio '${opts.dominio}' não existe em 02-wiki/. Domínios válidos: ${validos}. ` +
-        'Repita com confirm_novo_dominio para criar o domínio.',
-    );
+    throw coded(new LearnError(`domínio '${opts.dominio}' não existe em 02-wiki/. Domínios válidos: ${validos}. ` +
+        'Repita com confirm_novo_dominio para criar o domínio.'), 'learn.unknownDomain', { dominio: opts.dominio, validos });
   }
 
   const tags = (opts.tags ?? []).filter((tag): tag is string => typeof tag === 'string');
