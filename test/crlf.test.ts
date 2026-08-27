@@ -56,3 +56,31 @@ describe('vault_edit_note sobre uma nota CRLF', () => {
     expect(after).toContain('Linha do meio.');
   });
 });
+
+describe('vault_edit_note preserva o terminador da nota', () => {
+  const REL = '02-wiki/docker/multi-stage.md';
+  const CRLF = ['---', 'tipo: wiki', '---', '', '# Multi-stage', '', 'Primeira linha.', 'Segunda linha.', ''].join('\r\n');
+
+  it('grava a linha inserida com CRLF, e não deixa a nota com terminador misto', async () => {
+    // Casar ignorando o terminador resolve a ENTRADA. A saída é a outra metade: escrever o
+    // `newText` do agente com `\n` cru dentro de um arquivo CRLF deixa a nota com as duas
+    // formas ao mesmo tempo. Quem paga isso é o usuário, e não este servidor — o Obsidian
+    // reserializa, o git marca o arquivo inteiro como alterado, e o diff da próxima escrita
+    // vira ruído em cima de uma nota que ninguém tocou.
+    const vaultRoot = await makeVaultWith(REL, CRLF);
+
+    await editNote({
+      vaultRoot,
+      path: REL,
+      oldText: 'Primeira linha.\nSegunda linha.',
+      newText: 'Primeira linha.\nLinha do meio.\nSegunda linha.',
+      deferCommit: true,
+    });
+
+    const after = await fs.readFile(path.join(vaultRoot, REL), 'utf8');
+    expect(after).toContain('Primeira linha.\r\nLinha do meio.\r\nSegunda linha.');
+    // Nenhum `\n` solto: todo `\n` do arquivo tem um `\r` na frente.
+    const soltos = [...after.matchAll(/(^|[^\r])\n/g)];
+    expect(soltos).toEqual([]);
+  });
+});
