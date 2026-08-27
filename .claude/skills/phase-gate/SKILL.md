@@ -127,6 +127,38 @@ For **every finding** and **every claimed fix**, spawn an independent agent whos
 Watch for **false equivalence** — an agent claiming two code paths are the same when only their
 happy paths match. Make it name the inputs where they diverge, or reject the claim.
 
+## 3b. Agents that finish without answering
+
+Measured in a real run of this gate: **three of five dispatched agents signalled idle and never
+delivered a result.** One of them was the refuter. The consequence is the worst one available —
+the refutation round for both confirmed findings ended up performed by the orchestrator, the same
+party that wrote the fixes, which is precisely the independence the gate exists to provide.
+
+Silence is not a clean result. Treat the two as different outcomes and never conflate them:
+
+| Outcome | Record as |
+|---|---|
+| Agent returns findings | its verdict |
+| Agent explicitly says "nothing found" | CLEAN |
+| Agent goes idle without answering | **UNVERIFIED — that lens did not run** |
+
+Rules:
+
+1. **State the delivery contract in the dispatch prompt**: "return JSON even if empty; if you
+   cannot finish, say what you did and did not check." An agent that knows a partial answer is
+   acceptable will send one.
+2. **Ask at most once more.** A nudge after an idle signal is legitimate — in this run it turned
+   two silent agents into full reports. Beyond that you are polling; stop.
+3. **Never infer a clean result from silence.** "No findings reported" and "no review happened"
+   look identical from here and mean opposite things.
+4. **Adjust the verdict for missing coverage.** A gate where a lens did not run cannot be a PASS
+   on the strength of the lenses that did; either re-dispatch that lens or record the gap and let
+   the verdict carry it.
+5. **Clean up after non-responders.** They leave worktrees and processes behind. The orchestrator
+   removes them, having first re-read each one — see the resource guards.
+6. **Prefer more, smaller refuters over one big one.** A single refuter that goes silent takes the
+   entire refutation round with it; three narrow ones degrade instead of failing.
+
 ## 4. Fix, then prove the fix is load-bearing
 
 For each confirmed finding: write the failing test **first**, watch it fail for the right reason
