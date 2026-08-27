@@ -11,6 +11,7 @@ import { atomicWrite } from '../src/write/atomic.js';
 import { unifiedDiff } from '../src/write/diff.js';
 import { PathGuardError } from '../src/write/paths.js';
 import { TemplateError, formatLocal } from '../src/write/template.js';
+import { NO_FIFO, NO_POSIX_MODES } from './platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1414,7 +1415,7 @@ describe('atomicWrite guarantees', () => {
     expect(await fs.readdir(tmp)).toEqual(['nota.md']);
   });
 
-  it('keeps the mode of the note it replaces', async () => {
+  it.skipIf(NO_POSIX_MODES)('keeps the mode of the note it replaces', async () => {
     const target = path.join(tmp, 'segredo.md');
     await atomicWrite(target, 'v1\n');
     await fs.chmod(target, 0o600);
@@ -1436,7 +1437,7 @@ describe('atomicWrite guarantees', () => {
     expect((await fs.stat(target)).mode & 0o777).toBe(0o666 & ~process.umask());
   });
 
-  it('never lets the plaintext sit on disk world-readable before the mode is set', async () => {
+  it.skipIf(NO_POSIX_MODES)('never lets the plaintext sit on disk world-readable before the mode is set', async () => {
     // The bytes were written into a 0644 temporary file and chmod'd to 0600 only
     // afterwards, so the full plaintext of a note deliberately kept owner-only was
     // readable by every process on the machine for the length of the write. The mode has
@@ -1633,7 +1634,7 @@ describe('write guard', () => {
     expect(await exists(result.absPath)).toBe(true);
   });
 
-  it('não abre um FIFO no caminho da nota ao escrever', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no caminho da nota ao escrever', async () => {
     // `guardedPath` answers a question about the PATH: containment, suffix, denied segments,
     // symlink escape. A FIFO inside the vault passes every one of them — it is `.md`, it is
     // contained, it is in no denied directory — and the read that follows blocks on `open()` of
@@ -1656,7 +1657,7 @@ describe('write guard', () => {
     expect(await countCommits(vaultRoot)).toBe(antes);
   }, 30_000);
 
-  it('não abre um FIFO no caminho da nota ao editar', async () => {
+  it.skipIf(NO_FIFO)('não abre um FIFO no caminho da nota ao editar', async () => {
     // The same hole on the other exported write path, and the same classification closes it.
     const fifo = path.join(vaultRoot, '02-wiki', 'cano.md');
     await execFileAsync('mkfifo', [fifo]);
