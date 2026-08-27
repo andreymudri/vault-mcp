@@ -62,3 +62,62 @@ describe('package.json', () => {
     expect(VERSION).toBe(pkg.version);
   });
 });
+
+describe('server.json — o contrato do MCP Registry', () => {
+  const server = JSON.parse(
+    readFileSync(fileURLToPath(new URL('../server.json', import.meta.url)), 'utf8')
+  ) as {
+    name: string;
+    description: string;
+    version: string;
+    repository: { url: string; source: string };
+    packages: Array<{
+      registryType: string;
+      identifier: string;
+      version: string;
+      environmentVariables: Array<{ name: string; isRequired?: boolean }>;
+    }>;
+  };
+
+  it('o nome do registry é o mesmo `mcpName` que vai DENTRO do pacote publicado', () => {
+    // É assim que o registry prova que quem publica é dono do pacote: ele lê o `mcpName` do
+    // tarball no npm e exige que bata com o `name` daqui. Os dois moram em arquivos diferentes,
+    // então divergem sem ninguém notar — até o publish recusar, com o pacote já no npm.
+    expect(server.name).toBe(pkg.mcpName);
+  });
+
+  it('o nome está sob o namespace que a autenticação do GitHub concede', () => {
+    // Autenticando por GitHub, o registry só aceita `io.github.<usuário>/…`. Qualquer outro
+    // prefixo é recusado no publish, e o erro fala de namespace e não do que está errado aqui.
+    expect(server.name).toBe('io.github.andreymudri/vault-mcp');
+  });
+
+  it('as TRÊS versões andam juntas', () => {
+    // `package.json`, o topo do server.json, e a versão do pacote dentro dele. Uma release que
+    // esquece qualquer uma publica metadado apontando para um tarball que não é o dela.
+    expect(server.version).toBe(pkg.version);
+    expect(server.packages[0]?.version).toBe(pkg.version);
+  });
+
+  it('aponta para o pacote npm deste repositório', () => {
+    expect(server.packages[0]?.registryType).toBe('npm');
+    expect(server.packages[0]?.identifier).toBe(pkg.name);
+    expect(server.repository.url).toBe('https://github.com/andreymudri/vault-mcp');
+  });
+
+  it('a descrição cabe no limite de 100 caracteres do registry', () => {
+    // Aprendido pelo caminho caro: o `validate` do mcp-publisher recusa com 422
+    // `expected length <= 100` — e recusa DEPOIS de o pacote já estar no npm, porque a ordem da
+    // release é npm primeiro, registry depois. Um teste aqui move a descoberta para o `npm test`.
+    expect(server.description.length).toBeLessThanOrEqual(100);
+    expect(server.description.trim()).not.toBe('');
+  });
+
+  it('declara VAULT_PATH como obrigatória e as outras como opcionais', () => {
+    const vars = server.packages[0]?.environmentVariables ?? [];
+    const byName = new Map(vars.map((v) => [v.name, v]));
+    expect(byName.get('VAULT_PATH')?.isRequired).toBe(true);
+    expect(byName.get('VAULT_LANG')?.isRequired).toBe(false);
+    expect(byName.get('VAULT_AUTO_PUSH')?.isRequired).toBe(false);
+  });
+});

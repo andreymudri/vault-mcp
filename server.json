@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.andreymudri/vault-mcp",
+  "description": "Long-term memory for a coding agent: searches your Obsidian vault and cites path:line.",
+  "repository": {
+    "url": "https://github.com/andreymudri/vault-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@andreymudri/vault-mcp",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "VAULT_PATH",
+          "description": "Absolute path to the root folder of the Obsidian vault to serve. Required; the server exits with a message on stderr without it.",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "VAULT_LANG",
+          "description": "Language the server speaks in tool descriptions and errors: 'en' (default) or 'pt'. It never changes what is written into the vault — commit subjects and section names follow the vault.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "VAULT_AUTO_PUSH",
+          "description": "Set to 1 to git push after each write's commit. Off by default: it is the only thing this server does that leaves the machine. A failed push is reported as a warning, never rolled back.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
