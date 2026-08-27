@@ -192,6 +192,32 @@ which is the point: the vault answers about decisions and patterns while you wor
 repository. Without the flag the default is `local` (the current directory only). Check with
 `claude mcp get vault`; to remove it, `claude mcp remove vault -s user`.
 
+### `VAULT_LANG`
+
+The language the server **speaks**: `en` (default) or `pt`. It sets the tool and field descriptions,
+the input refusals, and the startup errors.
+
+The default is English even though this server was built for a Portuguese vault. The tool
+description is what the *model* reads to decide whether to call a tool at all, so a server
+described in a language the agent is not operating in pays a translation tax on every call
+decision — and whoever forgets `VAULT_PATH` gets, in a language they may not read, the one message
+they needed to read.
+
+It deliberately does **not** guess from `LANG`/`LC_ALL`. On the author's own machine the vault is
+Portuguese while the shell is `LANG=en_US.UTF-8`, so inference would get the generic case right and
+the one known case wrong.
+
+```bash
+VAULT_LANG=pt VAULT_PATH="/absolute/path/to/vault" npx @andreymudri/vault-mcp
+```
+
+**What it does not touch: anything written into the vault.** Commit subjects (`docs(vault): …`) and
+section names (`## Notas`, `## Domínios`, `## Capturas`) follow the *vault*, never the reader. This
+is not a matter of taste: the server looks the section name up **inside your own MOC file**, so
+translating `## Notas` to `## Notes` in a vault whose MOC says `## Notas` would not find the
+section, would append a second one, and would silently break the idempotency that stops the MOC
+gaining a duplicate line on every capture.
+
 ### `VAULT_AUTO_PUSH`
 
 Every write (`vault_write_note`, `vault_edit_note`, `vault_learn`, `vault_move`, `vault_delete`) already commits to the vault's git.

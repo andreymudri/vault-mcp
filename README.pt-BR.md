@@ -184,6 +184,31 @@ ponto: o vault responde sobre decisões e patterns enquanto você trabalha em ou
 flag o padrão é `local` (só o diretório atual). Confira com `claude mcp get vault`; para remover,
 `claude mcp remove vault -s user`.
 
+### `VAULT_LANG`
+
+O idioma em que o servidor **fala**: `en` (padrão) ou `pt`. Vale para a descrição das tools e dos
+campos, as recusas de entrada e os erros de start.
+
+O padrão é inglês mesmo tendo o servidor nascido servindo um vault em português. A descrição da
+tool é o que o *modelo* lê para decidir se chama a tool, então um servidor descrito num idioma em
+que o agente não está operando paga imposto de tradução em toda decisão de chamada — e quem
+esquece a `VAULT_PATH` recebe, num idioma que talvez não leia, a única mensagem que precisava ler.
+
+Deliberadamente **não** adivinha por `LANG`/`LC_ALL`. Na máquina do próprio autor o vault é em
+português e o shell é `LANG=en_US.UTF-8`: a inferência acertaria o caso genérico e erraria
+justamente o caso conhecido.
+
+```bash
+VAULT_LANG=pt VAULT_PATH="/caminho/absoluto/do/vault" npx @andreymudri/vault-mcp
+```
+
+**O que ele não toca: nada que seja escrito no vault.** Assunto de commit (`docs(vault): …`) e nome
+de seção (`## Notas`, `## Domínios`, `## Capturas`) seguem o *vault*, nunca o leitor. Não é questão
+de gosto: o servidor procura o nome da seção **dentro do seu próprio arquivo de MOC**, então
+traduzir `## Notas` para `## Notes` num vault cujo MOC diz `## Notas` não acharia a seção, anexaria
+uma segunda, e quebraria em silêncio a idempotência que impede o MOC de ganhar uma linha repetida a
+cada captura.
+
 ### `VAULT_AUTO_PUSH`
 
 Toda escrita (`vault_write_note`, `vault_edit_note`, `vault_learn`, `vault_move`, `vault_delete`) já commita no git do vault.
