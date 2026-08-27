@@ -45,11 +45,14 @@ export interface ToolDeps {
   scanner: VaultScanner;
   vaultRoot: string;
   /**
-   * O catálogo do idioma em que este servidor FALA. Ausente significa inglês, o padrão de
-   * `resolveLang` — ver `src/i18n/lang.ts` para a fronteira entre o que é traduzível e o que é
-   * vocabulário do vault e portanto não é.
+   * O catálogo do idioma em que este servidor FALA. OBRIGATÓRIO, e não opcional-com-padrão: a
+   * versão opcional deixava um chamador esquecer o argumento e receber inglês num servidor
+   * português sem erro de compilação, e o número desses padrões silenciosos CRESCEU no mesmo
+   * commit que consertava esta classe de bug. O único padrão do sistema mora em `resolveLang`,
+   * onde está documentado. Ver `src/i18n/lang.ts` para a fronteira entre o traduzível e o
+   * vocabulário do vault.
    */
-  messages?: Messages;
+  messages: Messages;
 }
 
 /**
@@ -341,15 +344,17 @@ function messageOf(err: unknown): string {
  * translated here rather than by hanging a custom message off each of the twenty-odd fields, where
  * the next field added would silently be the one in English.
  */
-function describeIssues(error: z.ZodError): string {
+function describeIssues(error: z.ZodError, m: Messages): string {
   return error.issues
     .map((issue) => {
       const where = issue.path.join('.');
       const message =
         issue.code === 'invalid_type'
           ? issue.received === 'undefined'
-            ? 'campo obrigatório'
-            : `esperado ${issue.expected}, recebido ${issue.received}`
+            ? m.validation.requiredField
+            : m.validation.wrongType
+                .replace('{expected}', String(issue.expected))
+                .replace('{received}', String(issue.received))
           : issue.message;
       return where === '' ? message : `${where}: ${message}`;
     })
@@ -379,7 +384,7 @@ function define<Shape extends z.ZodRawShape>(
     handler: async (args) => {
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
-        return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error))}`);
+        return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m))}`);
       }
       try {
         return ok(await run(parsed.data));
@@ -1141,7 +1146,7 @@ async function withWriteDetail<T>(
 }
 
 export function createTools(deps: ToolDeps): ToolDefinition[] {
-  const m = deps.messages ?? messagesFor('en');
+  const m = deps.messages;
   const writes = new WriteQueue();
   const redact = makeRedactor(deps.vaultRoot);
 

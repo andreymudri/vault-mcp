@@ -30,6 +30,8 @@ const PT = {
   },
 
   validation: {
+    requiredField: 'campo obrigatório',
+    wrongType: 'esperado {expected}, recebido {received}',
     queryEmpty: 'query não pode ser vazia',
     pathEmpty: 'caminho não pode ser vazio',
     oldTextEmpty: 'old_text não pode ser vazio',
@@ -169,6 +171,8 @@ const EN: Messages = {
   },
 
   validation: {
+    requiredField: 'required field',
+    wrongType: 'expected {expected}, received {received}',
     queryEmpty: 'query cannot be empty',
     pathEmpty: 'path cannot be empty',
     oldTextEmpty: 'old_text cannot be empty',
@@ -283,5 +287,10 @@ const CATALOGS: Record<Lang, Messages> = { pt: PT as unknown as Messages, en: EN
 
 /** O catálogo do idioma pedido. */
 export function messagesFor(lang: Lang): Messages {
-  return CATALOGS[lang];
+  // Fallback e não indexação crua: `createVaultServer` é entrypoint EXPORTADO de um pacote
+  // publicado e tipa `lang` como `Lang`, o que o TypeScript garante só de dentro. Um chamador em
+  // JS puro passando `'fr'` fazia isto devolver `undefined` e o servidor morrer com um TypeError
+  // em `instructions` — degradar é a política que `resolveLang` já documenta para o mesmo valor,
+  // e a camada de i18n passa a ser incapaz de lançar.
+  return CATALOGS[lang] ?? CATALOGS.en;
 }

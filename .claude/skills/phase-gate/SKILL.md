@@ -79,6 +79,39 @@ Every lens returns findings as `{severity, file, line, claim, reproduction, sugg
   toolchain internal or to a language/locale default rather than to behavior? Is there a test that
   would pass with the implementation deleted?
 
+## 2b. The shared tree is contested — isolate every mutation
+
+The four lenses, any refuter, and **you** all share one working tree. That makes the tree a
+mutable global, and mutation testing on a mutable global gives results that cannot be trusted:
+
+- one agent's `git checkout -- <file>` clobbers another's in-flight mutation;
+- a lens's red can be caused by *someone else's* mutation, not by the revert it thinks it made;
+- `git add -A` by the orchestrator can sweep a lens's in-flight edit into a commit.
+
+All three were observed in a real run of this gate. The orchestrator was the worst offender: it
+edited and committed in the shared tree while four lenses were running, then attributed the
+resulting dirt to a lens.
+
+**Rules, for lenses and orchestrator alike:**
+
+1. Anyone mutating source runs in their **own detached worktree**:
+
+```bash
+git worktree add --detach "$SCRATCH/wt" HEAD
+ln -s "$REPO/node_modules" "$SCRATCH/wt/node_modules"   # avoid a reinstall
+# mutate + test there, every command bounded with `timeout`
+git worktree remove --force "$SCRATCH/wt"
+```
+
+2. **The orchestrator does not edit or commit the shared tree while lenses are running.** Queue
+   your own fixes until every lens has reported. If you must commit, `git add <explicit paths>` —
+   never `git add -A` — and inspect `git show --stat` afterwards for anything you did not intend.
+3. Never run `git checkout --`, `git stash`, or `git restore` in the shared tree during a gate.
+4. Any suite result measured while the tree was contested is **unverified**. Re-run it in a tree
+   proven clean (`git status --short` empty) before it can support a verdict.
+5. When HEAD moves mid-gate, tell the running lenses: their line numbers have shifted and their
+   finding may already be fixed.
+
 ## 3. Refutation round
 
 For **every finding** and **every claimed fix**, spawn an independent agent whose only job is to

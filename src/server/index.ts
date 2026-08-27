@@ -107,7 +107,7 @@ function toCallToolResult(result: ToolResult): CallToolResult {
 export function toolCallback(
   tool: ToolDefinition,
   redact: (text: string) => string,
-  messages: Messages = messagesFor('en'),
+  messages: Messages,
 ): (args: unknown) => Promise<CallToolResult> {
   return async (args: unknown): Promise<CallToolResult> => {
     try {

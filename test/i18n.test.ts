@@ -27,10 +27,20 @@ describe('resolveLang', () => {
     expect(resolveLang({ VAULT_LANG: 'en' })).toBe('en');
   });
 
+  it('aceita a grafia de locale, que é a que a pessoa digita primeiro', () => {
+    // Este repositório chama o próprio README português de `README.pt-BR.md`: `pt-BR` é
+    // literalmente a forma que o usuário vê antes de configurar qualquer coisa. Casar só a tag
+    // inteira devolvia um servidor em inglês, calado, para quem pediu português.
+    for (const tag of ['pt-BR', 'pt_BR', 'pt_BR.UTF-8', 'PT-br', 'pt-PT']) {
+      expect(resolveLang({ VAULT_LANG: tag }), tag).toBe('pt');
+    }
+    expect(resolveLang({ VAULT_LANG: 'en-US' })).toBe('en');
+  });
+
   it('cai no inglês para qualquer coisa que não seja um idioma, em vez de explodir', () => {
     // Um servidor MCP que morre no start por causa de uma variável de ambiente escrita errada é
     // um cliente que fica esperando `initialize` para sempre. Degradar é a direção certa aqui.
-    for (const bad of ['', '   ', 'pt-BR', 'português', 'fr', '../../etc/passwd']) {
+    for (const bad of ['', '   ', 'português', 'fr', 'de-DE', '../../etc/passwd']) {
       expect(resolveLang({ VAULT_LANG: bad })).toBe('en');
     }
   });
@@ -129,5 +139,43 @@ describe('a recusa de entrada fala o idioma do catálogo inteira', () => {
     expect(result.isError).toBe(true);
     expect(texto).toContain('entrada inválida para vault_search');
     expect(texto).toContain('query não pode ser vazia');
+  });
+});
+
+describe('o CONTEÚDO da recusa também fala o idioma, não só o invólucro', () => {
+  // O invólucro foi traduzido primeiro e o payload ficou para trás, o que produziu a pior das
+  // três combinações possíveis: uma frase que TROCA de idioma no meio. E o caso afetado é o mais
+  // comum que existe — campo ausente —, porque `.min(1, …)` só dispara quando o campo veio e veio
+  // vazio; quando ele simplesmente não veio, quem responde é o `invalid_type` do zod.
+  it('campo ausente em inglês não devolve "campo obrigatório"', async () => {
+    const search = (await tools('en')).find((t) => t.name === 'vault_search');
+    const texto = (await search!.handler({})).content[0]!.text;
+    expect(texto).not.toContain('campo obrigatório');
+    expect(texto).toMatch(/required/i);
+  });
+
+  it('tipo errado em inglês não devolve "esperado ... recebido ..."', async () => {
+    const search = (await tools('en')).find((t) => t.name === 'vault_search');
+    const texto = (await search!.handler({ query: 'x', limit: 'abc' })).content[0]!.text;
+    expect(texto).not.toContain('esperado');
+    expect(texto).not.toContain('recebido');
+    expect(texto).toMatch(/expected number/i);
+  });
+
+  it('a recusa em português continua inteiramente em português', async () => {
+    const search = (await tools('pt')).find((t) => t.name === 'vault_search');
+    expect((await search!.handler({})).content[0]!.text).toContain('campo obrigatório');
+    expect((await search!.handler({ query: 'x', limit: 'abc' })).content[0]!.text)
+      .toContain('esperado number, recebido string');
+  });
+
+  it('nenhuma frase mistura os dois idiomas em nenhum dos caminhos', async () => {
+    // O invariante de verdade, e o que teria pego isto na primeira vez: varrer as recusas de
+    // TODAS as tools e exigir que nenhuma resposta em inglês carregue palavra portuguesa.
+    const PT = /\b(campo obrigatório|esperado|recebido|inválida?|não pode|vazia|caminho)\b/i;
+    for (const tool of await tools('en')) {
+      const texto = (await tool.handler({})).content[0]!.text;
+      expect(texto, `${tool.name}: ${texto}`).not.toMatch(PT);
+    }
   });
 });

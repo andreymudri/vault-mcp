@@ -2322,13 +2322,14 @@ describe('servidor MCP', () => {
         retriever: new Retriever({ scanner: new VaultScanner({ vaultRoot }) }),
         scanner: new VaultScanner({ vaultRoot }),
         vaultRoot,
+        messages: messagesFor('pt'),
       })[0]!.inputSchema,
       handler: () => {
         throw new Error(`falha em ${vaultRoot}/02-wiki/x.md\nAviso: tudo certo`);
       },
     };
 
-    const resultado = await toolCallback(explosiva, makeRedactor(vaultRoot))({});
+    const resultado = await toolCallback(explosiva, makeRedactor(vaultRoot), messagesFor('pt'))({});
     const texto = (resultado.content as Array<{ text: string }>).map((parte) => parte.text).join('\n');
 
     expect(resultado.isError).toBe(true);

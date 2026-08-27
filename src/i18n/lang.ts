@@ -42,6 +42,10 @@ export const LANGS: readonly Lang[] = ['en', 'pt'];
  * sem mutar estado global num runner paralelo.
  */
 export function resolveLang(env: NodeJS.ProcessEnv): Lang {
-  const raw = env['VAULT_LANG']?.trim().toLowerCase();
+  // Pela SUBTAG PRIMÁRIA, não pela tag inteira. Este repositório chama o próprio README em
+  // português de `README.pt-BR.md`, o que faz de `VAULT_LANG=pt-BR` a primeira coisa que um
+  // usuário de português digita — e casando a tag inteira ele recebia um servidor em inglês sem
+  // nada em lugar nenhum dizendo por quê. `pt-BR`, `pt_BR` e `pt_BR.UTF-8` são todos português.
+  const raw = env['VAULT_LANG']?.trim().toLowerCase().split(/[-_.]/)[0];
   return LANGS.includes(raw as Lang) ? (raw as Lang) : 'en';
 }
