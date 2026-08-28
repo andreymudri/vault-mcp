@@ -148,7 +148,7 @@ npm test
 - **Running the suite takes more than that:** `test/frontmatter.test.ts` executes the real
   `parseFile` in a child process pinned to a timezone, and that child is `node <file>.ts` — it
   depends on Node's own type stripping. CI pins 26, which is the version this is developed on
-- The suite has 21 files with 1,217 tests and takes ~10 s. `npm test` runs the typecheck
+- The suite has 21 files with 1,222 tests and takes ~10 s. `npm test` runs the typecheck
   (`pretest`) first and bounds the suite by the clock: a hung suite exits 124, never with no exit code
 
 ## Configuration
@@ -266,7 +266,7 @@ turned on:
 
 | Tool | Input | When to Call |
 |------|-------|--------------|
-| `vault_search` | `query` (required); `limit`, `tipo`, `folder`, `include_raw` (optional) | Before answering about the user's decisions, patterns, gotchas or history. Default result: 6 snippets. Notes in `01-raw/` excluded by default. |
+| `vault_search` | `query` (required); `limit`, `tipo`, `folder`, `tags`, `status`, `include_raw` (optional) | Before answering about the user's decisions, patterns, gotchas or history. Default result: 6 snippets. Notes in `01-raw/` excluded by default. `tags` is conjunctive and case-insensitive, and `status` reads the frontmatter — the same filters `vault_list` has, by the same rule. |
 | `vault_get_note` | `path` (relative path, e.g. `02-wiki/nestjs/auth-guard.md`); `offset` (optional) | After `vault_search` when the snippet is not enough, or before editing a note. Returns the note with frontmatter, resolved links and broken links. The body is capped at 20,000 characters per answer; a larger note is marked with `[…note cut at 20000 of <total> characters; continue with offset: <next>]`, and that `offset` reads the rest — page by page, never splitting a surrogate pair. A continuation page repeats the path, not the frontmatter. |
 | `vault_list` | `tipo`, `tags`, `status`, `folder` (all optional) | Inventory of notes by metadata (e.g. "which projects are active?", "which notes carry the jwt tag?"). Does not search content — use `vault_search` for that. |
 | `vault_backlinks` | `path` (relative path) | Measure how connected a subject is, find the MOC that indexes a note, assess the impact of a change. Deduplicates links: a note that links the target twice counts as one backlink. |

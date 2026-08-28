@@ -156,6 +156,8 @@ const PT = {
       limit: 'Máximo de trechos devolvidos (padrão 6).',
       tipo: 'Filtra pelo `tipo` do frontmatter: wiki, moc, projeto, daily.',
       folder: 'Restringe a uma pasta do vault, ex.: `02-wiki/nestjs`.',
+      tags: 'Filtra por tags do frontmatter. A nota tem de ter TODAS; a caixa não importa.',
+      status: 'Filtra por `status` do frontmatter, ex.: `ativo`.',
       include_raw: 'Inclui `01-raw/` (captura crua), fora dos resultados por padrão.',
     },
     vault_get_note: {
@@ -401,6 +403,8 @@ const EN: Messages = {
       limit: 'Maximum snippets returned (default 6).',
       tipo: 'Filter by the frontmatter `tipo`: wiki, moc, projeto, daily.',
       folder: 'Restrict to a vault folder, e.g. `02-wiki/nestjs`.',
+      tags: 'Filters by frontmatter tags. A note must carry ALL of them; case does not matter.',
+      status: 'Filters by the frontmatter `status`, e.g. `ativo`.',
       include_raw: 'Include `01-raw/` (unvetted capture), left out of results by default.',
     },
     vault_get_note: {

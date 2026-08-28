@@ -25,6 +25,10 @@ export interface SearchOptions {
   tipo?: string;
   /** Keeps only chunks under this vault-relative folder, matched at path-segment boundaries. */
   folder?: string;
+  /** Keeps only chunks whose note carries EVERY one of these tags, compared case-insensitively. */
+  tags?: string[];
+  /** Keeps only chunks whose note declares this `status` in its frontmatter. */
+  status?: string;
   /** `01-raw/` is capture, not knowledge: excluded unless explicitly asked for. */
   includeRaw?: boolean;
 }
@@ -139,16 +143,46 @@ function noteTipo(note: Note): string | undefined {
   return typeof tipo === 'string' ? tipo : undefined;
 }
 
+function noteStatus(note: Note | undefined): string | undefined {
+  const status = note?.frontmatter.status;
+  return typeof status === 'string' ? status : undefined;
+}
+
 function noteTags(note: Note): string[] {
   const tags = note.frontmatter.tags;
   return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string') : [];
 }
 
 /**
+ * True when `has` carries EVERY tag in `wanted`, ignoring case on both sides.
+ *
+ * Exported because `vault_list` in `src/server/tools.ts` asks the same question and used to carry
+ * its own copy of the answer. Two copies of a matching rule is one copy plus a divergence waiting
+ * to happen — the same shape as the duplicated `INVISIBLE_CHARS` this project already
+ * consolidated — and here the divergence would be silent: the two tools would disagree about what
+ * `tags: ['NestJS']` selects, with nothing failing.
+ *
+ * Case-insensitive for the reason `vault_list` wrote down first: the vault writes `nestjs` and an
+ * agent routinely asks for `NestJS`, and a filter that answers "no notes" to a tag that exists is
+ * read as an empty vault rather than as a case mismatch.
+ *
+ * Conjunctive, not "any of": two tags name a narrower set than one, which is what a caller who
+ * typed two of them is asking for.
+ */
+export function hasAllTags(has: readonly string[], wanted: readonly string[]): boolean {
+  if (wanted.length === 0) return true;
+  const owned = new Set(has.map((tag) => tag.toLowerCase()));
+  return wanted.every((tag) => owned.has(tag.toLowerCase()));
+}
+
+/**
  * Folder match on whole path segments. A plain `startsWith(folder)` would let `02-wiki/dock`
  * select `02-wiki/docker/`, silently returning notes from a folder the caller did not name.
+ *
+ * Exported for `src/server/tools.ts`, which applies the same rule to `vault_list` — see
+ * `hasAllTags` for why the second copy had to go.
  */
-function inFolder(path: string, folder: string): boolean {
+export function inFolder(path: string, folder: string): boolean {
   const normalized = folder.replace(/^\/+/, '').replace(/\/+$/, '');
   if (normalized === '') return true;
   return path.startsWith(`${normalized}/`);
@@ -350,11 +384,19 @@ export class Retriever {
   }
 
   private predicate(options: SearchOptions): (chunk: Chunk) => boolean {
-    const { tipo, folder, includeRaw } = options;
+    const { tipo, folder, tags, status, includeRaw } = options;
     return (chunk) => {
       if (includeRaw !== true && chunk.path.startsWith(RAW_PREFIX)) return false;
       if (tipo !== undefined && chunk.tipo !== tipo) return false;
       if (folder !== undefined && !inFolder(chunk.path, folder)) return false;
+      if (tags !== undefined && !hasAllTags(chunk.tags, tags)) return false;
+      // `status` é o único destes que o chunk NÃO carrega, e de propósito: `tipo` e `tags` estão
+      // ali porque o BM25 os pontua (peso por tipo de nota, campo `tags`), enquanto `status` só
+      // filtra. Pô-lo no chunk seria engordar cada unidade do índice por causa de um filtro; a
+      // nota é um `Map.get` no scanner, que a busca já sincronizou uma linha antes.
+      if (status !== undefined && noteStatus(this.scanner.getNote(chunk.path)) !== status) {
+        return false;
+      }
       return true;
     };
   }

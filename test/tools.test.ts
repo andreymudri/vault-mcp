@@ -2520,7 +2520,7 @@ describe('servidor MCP', () => {
     expect(search?.inputSchema.type).toBe('object');
     expect(search?.inputSchema['required']).toEqual(['query']);
     expect(Object.keys((search?.inputSchema['properties'] ?? {}) as Record<string, unknown>).sort()).toEqual(
-      ['folder', 'include_raw', 'limit', 'query', 'tipo'].sort(),
+      ['folder', 'include_raw', 'limit', 'query', 'status', 'tags', 'tipo'].sort(),
     );
 
     await client.close();
@@ -2572,6 +2572,27 @@ describe('servidor MCP', () => {
  * ilegível, diretório não listável e frontmatter malformado sumiam em silêncio absoluto: um vault
  * restaurado com `cp -al` responderia "nenhum resultado" sem nada explicando por quê.
  */
+describe('vault_search: filtros de tags e status', () => {
+  it('aceita `tags` e `status`, os mesmos filtros que o `vault_list` já tinha', async () => {
+    const vaultRoot = await makeVault();
+    const { text, call } = makeTools(vaultRoot);
+
+    // A assimetria custava uma volta inteira: "busque jwt só entre as notas com a tag X" não se
+    // expressava, e era preciso listar por tag e buscar de novo à mão.
+    const porTag = await text('vault_search', { query: 'nestjs', tags: ['bullmq'] });
+    expect(porTag).toContain(BULLMQ);
+    expect(porTag).not.toContain(AUTH_GUARD);
+
+    const porStatus = await text('vault_search', { query: 'potentia', status: 'ativo' });
+    expect(porStatus).toContain(POTENTIA);
+
+    // Um status que nenhuma nota tem é "nenhum resultado", não erro.
+    const semNada = await call('vault_search', { query: 'potentia', status: 'arquivado' });
+    expect(semNada.isError).toBeUndefined();
+    expect(textOf(semNada)).toContain('Nenhum resultado');
+  });
+});
+
 describe('diagnósticos do vault na saída das tools', () => {
   it('a busca avisa sobre o arquivo que o scanner não conseguiu indexar direito', async () => {
     // `quebrada.md` é do próprio fixture: YAML que não fecha, então a nota entra no índice sem o

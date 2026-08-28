@@ -8,7 +8,7 @@ import { LinkGraph } from '../graph/graph.js';
 import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
 import { messagesFor, type Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
-import type { Retriever } from '../retrieval/retrieval.js';
+import { hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { LearnError, learn } from '../write/learn.js';
@@ -507,12 +507,6 @@ function define<Shape extends z.ZodRawShape>(
       }
     },
   };
-}
-
-/** Folder match on whole path segments, so `02-wiki/nest` never selects `02-wiki/nestjs/`. */
-function inFolder(path: string, folder: string): boolean {
-  const normalized = folder.replace(/^\/+/, '').replace(/\/+$/, '');
-  return normalized === '' ? true : path.startsWith(`${normalized}/`);
 }
 
 /** Frontmatter comes from files nobody validated, so every field may be any YAML scalar. */
@@ -1291,6 +1285,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .describe(m.tools.vault_search.limit),
       tipo: z.string().optional().describe(m.tools.vault_search.tipo),
       folder: z.string().optional().describe(m.tools.vault_search.folder),
+      tags: z.array(z.string()).optional().describe(m.tools.vault_search.tags),
+      status: z.string().optional().describe(m.tools.vault_search.status),
       include_raw: z
         .boolean()
         .optional()
@@ -1302,6 +1298,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         ...(input.limit === undefined ? {} : { limit: input.limit }),
         ...(input.tipo === undefined ? {} : { tipo: input.tipo }),
         ...(input.folder === undefined ? {} : { folder: input.folder }),
+        ...(input.tags === undefined ? {} : { tags: input.tags }),
+        ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.include_raw === undefined ? {} : { includeRaw: input.include_raw }),
       });
 
@@ -1435,20 +1433,17 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
     async (input) => {
       refreshVault(deps);
-      // Tags are compared case-insensitively: the vault writes `nestjs` and an agent routinely
-      // asks for `NestJS`, and a filter that answers "nenhuma nota" to a tag that exists is read
-      // as an empty vault rather than as a case mismatch.
-      const wanted = (input.tags ?? []).map((tag) => tag.toLowerCase());
+      // A regra de tags é a do `hasAllTags` (src/retrieval/retrieval.ts), a MESMA que o
+      // `vault_search` aplica: duas cópias dela discordariam em silêncio sobre o que
+      // `tags: ['NestJS']` seleciona.
+      const wanted = input.tags ?? [];
       const notes = deps.scanner
         .allNotes()
         .filter((note) => {
           if (input.tipo !== undefined && stringField(note, 'tipo') !== input.tipo) return false;
           if (input.status !== undefined && stringField(note, 'status') !== input.status) return false;
           if (input.folder !== undefined && !inFolder(note.path, input.folder)) return false;
-          if (wanted.length > 0) {
-            const tags = noteTags(note).map((tag) => tag.toLowerCase());
-            if (!wanted.every((tag) => tags.includes(tag))) return false;
-          }
+          if (!hasAllTags(noteTags(note), wanted)) return false;
           return true;
         })
         .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));

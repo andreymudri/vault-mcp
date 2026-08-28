@@ -7,7 +7,7 @@ rodando `vault_move` contra uma cópia do vault real). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.217 testes em 21 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+A suíte passa com 1.222 testes em 21 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
 o handshake MCP com as nove tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando

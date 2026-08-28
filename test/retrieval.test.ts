@@ -365,6 +365,67 @@ describe('Retriever.search — filtros', () => {
     expect(paths(unfiltered.results)).toContain(CACHE_WRAPPER);
   });
 
+  it('`tags` é conjuntivo: a nota tem de ter TODAS as pedidas', () => {
+    const retriever = diskRetriever();
+    const { results } = retriever.search({ query: 'nestjs', tags: ['bullmq'], limit: 20 });
+
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) expect(result.chunk.path).toBe(BULLMQ);
+
+    // Duas tags que nenhuma nota tem juntas: conjuntivo, e não "qualquer uma delas".
+    expect(retriever.search({ query: 'nestjs', tags: ['bullmq', 'auth'], limit: 20 }).results).toEqual(
+      [],
+    );
+
+    // Sem o filtro a mesma query traz as outras notas de nestjs — senão a asserção acima
+    // passaria com a busca inteira quebrada.
+    expect(paths(retriever.search({ query: 'nestjs', limit: 20 }).results)).toContain(AUTH_GUARD);
+  });
+
+  it('`tags` casa sem diferenciar maiúscula, como o `vault_list` já fazia', () => {
+    const retriever = diskRetriever();
+
+    // O vault escreve `nestjs` e um agente pede `NestJS` de rotina. Um filtro que responde
+    // "nenhuma nota" a uma tag que existe é lido como vault vazio, e não como caixa trocada.
+    const { results } = retriever.search({ query: 'nestjs', tags: ['BullMQ'], limit: 20 });
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) expect(result.chunk.path).toBe(BULLMQ);
+  });
+
+  it('`tags` vale contra a expansão de grafo, e não só contra o acerto direto', () => {
+    const retriever = diskRetriever();
+
+    // `auth-guard` linka `bullmq-worker`, então a expansão o traz junto...
+    expect(paths(retriever.search({ query: 'jwt', limit: 20 }).results)).toContain(BULLMQ);
+    // ...e ele não tem a tag `auth`. Um filtro que só rodasse antes do merge o devolveria aqui.
+    const { results } = retriever.search({ query: 'jwt', tags: ['auth'], limit: 20 });
+    expect(results.length).toBeGreaterThan(0);
+    expect(paths(results)).not.toContain(BULLMQ);
+    for (const result of results) expect(result.chunk.path).toBe(AUTH_GUARD);
+  });
+
+  it('`status` filtra pelo frontmatter da nota, que o chunk não carrega', () => {
+    const { retriever, fs } = memoryRetriever();
+    for (const [nome, status] of [
+      ['ativo', 'ativo'],
+      ['parado', 'pausado'],
+    ] as const) {
+      fs.write(
+        `03-projects/${nome}/README.md`,
+        ['---', 'tipo: projeto', `status: ${status}`, '---', '', `# ${nome}`, '', 'Termo: statusexclusivo.', ''].join('\n'),
+      );
+    }
+
+    const { results } = retriever.search({ query: 'statusexclusivo', status: 'ativo', limit: 20 });
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) expect(result.chunk.path).toBe('03-projects/ativo/README.md');
+
+    // Sem o filtro, as duas aparecem.
+    const sem = paths(retriever.search({ query: 'statusexclusivo', limit: 20 }).results);
+    expect(sem).toContain('03-projects/ativo/README.md');
+    expect(sem).toContain('03-projects/parado/README.md');
+  });
+
   it('`folder` restringe o conjunto devolvido, inclusive contra vizinhos de fora', () => {
     const retriever = diskRetriever();
     const { results } = retriever.search({
