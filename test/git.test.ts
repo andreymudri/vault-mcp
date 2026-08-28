@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { commitFiles, headBlobState, headSha } from '../src/write/git.js';
-import { NO_HOSTILE_FILENAMES } from './platform.js';
+import { NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +37,16 @@ async function initScratchRepo(repoRoot: string): Promise<void> {
  */
 async function removeTree(dir: string): Promise<void> {
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+/**
+ * Instala um `pre-commit` que roda `body` — o único jeito portátil-o-bastante de fazer o git
+ * deste módulo travar ou revelar o ambiente em que ele foi chamado.
+ */
+async function installPreCommitHook(repoRoot: string, body: string): Promise<void> {
+  const hook = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
+  await fs.writeFile(hook, `#!/bin/sh\n${body}\n`, 'utf8');
+  await fs.chmod(hook, 0o755);
 }
 
 describe('commitFiles', () => {
@@ -753,5 +763,62 @@ describe('headSha', () => {
     // Sem isso, a frase de desfazer que a tool devolve sairia com um `undefined` no meio, o
     // que é pior do que não oferecer desfazer nenhum: é um comando que o usuário vai colar.
     expect(await headSha(repoRoot)).toBeUndefined();
+  });
+});
+
+
+/**
+ * O git deste módulo roda CÓDIGO DO USUÁRIO — um `pre-commit`, um `commit-msg` — e fala com o
+ * mundo de dentro de um servidor stdio de uma thread só. O `pushBranch` já dizia isso no
+ * docblock ("um push sem limite é um servidor que para de responder — a mesma classe de trava que
+ * uma leitura bloqueante") e era o ÚNICO dos sete `execFile` do arquivo a ser limitado. O
+ * `commit` é justamente o que roda hook e o que abre pinentry quando `commit.gpgsign` está ligado
+ * e não há agente: os dois penduram a chamada para sempre. O slot da `WriteQueue` expira em 60 s
+ * e avisa os próximos, mas quem chamou continua esperando — que é exatamente o que o limite do
+ * push existe para impedir.
+ */
+describe('commitFiles: nenhum git sem limite, nenhum git que pergunta', () => {
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-git-timeout-'));
+    await initScratchRepo(repoRoot);
+    await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+    await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+  });
+
+  afterEach(async () => {
+    await removeTree(repoRoot);
+  });
+
+  it.skipIf(NO_SHELL_HOOKS)('um hook que trava vira aviso, e não uma espera sem fim', async () => {
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+    await installPreCommitHook(repoRoot, 'sleep 5');
+
+    const antes = Date.now();
+    const result = await commitFiles(repoRoot, [absPath], 'docs: nota', { timeoutMs: 300 });
+    const decorrido = Date.now() - antes;
+
+    // O hook dorme 5 s: chegar aqui antes disso é a prova de que o limite matou o git em vez de
+    // esperar por ele.
+    expect(decorrido).toBeLessThan(4_000);
+    expect(result.committed).toBe(false);
+    expect(result.warning).toMatch(/falha ao commitar/);
+  });
+
+  it.skipIf(NO_SHELL_HOOKS)('nenhum git deste módulo pode perguntar algo ao terminal', async () => {
+    const absPath = path.join(repoRoot, 'nota.md');
+    await fs.writeFile(absPath, '# Nota\n', 'utf8');
+    const marca = path.join(repoRoot, 'ambiente.txt');
+    // O hook roda dentro do `git commit`, então o ambiente que ele vê é o que o módulo passou.
+    await installPreCommitHook(repoRoot, `printf '%s' "\${GIT_TERMINAL_PROMPT:-vazio}" > '${marca}'`);
+
+    const result = await commitFiles(repoRoot, [absPath], 'docs: nota');
+
+    expect(result.committed).toBe(true);
+    // Um servidor iniciado por um cliente MCP não tem terminal para responder prompt nenhum:
+    // perguntar é travar. `pushBranch` já fechava isso; o `commit` não.
+    expect(await fs.readFile(marca, 'utf8')).toBe('0');
   });
 });

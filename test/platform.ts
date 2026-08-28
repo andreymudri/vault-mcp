@@ -35,3 +35,15 @@ export const NO_FIFO = IS_WINDOWS;
 
 /** Bits de permissão POSIX, que o NTFS não tem. Ver o comentário acima. */
 export const NO_POSIX_MODES = IS_WINDOWS;
+
+/**
+ * Hooks de git escritos em `sh`.
+ *
+ * No Windows os hooks rodam sob o `sh` que o Git for Windows empacota, e esta suíte não pode
+ * assumi-lo: um `git` instalado por winget ou Scoop sem o bundle de bash não tem shell nenhum
+ * para rodá-los. O que os dois testes guardados por esta flag PROVAM — que uma invocação de git
+ * é limitada por relógio e não pode perguntar nada ao terminal — é a opção `timeout` e a variável
+ * `GIT_TERMINAL_PROMPT` do `execFile`, que não têm nada de específico de plataforma. O que não é
+ * portátil é o único jeito de fazer o git TRAVAR de propósito.
+ */
+export const NO_SHELL_HOOKS = IS_WINDOWS;

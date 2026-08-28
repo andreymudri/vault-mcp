@@ -25,16 +25,49 @@ export interface CommitOptions {
    * prevent.
    */
   push?: boolean;
+  /**
+   * Quanto tempo cada `git` desta chamada pode levar. Existe como opção, e não só como constante,
+   * pela mesma razão que `WriteQueue` recebe o seu: um limite que não dá para encurtar é um
+   * limite que nenhum teste consegue ver disparar, e a prova de que ele existe passaria a ser a
+   * leitura do código.
+   */
+  timeoutMs?: number;
 }
 
 /**
- * How long a push may take before it is killed.
+ * How long ANY git of this module may take before it is killed.
  *
- * A push talks to the network from inside a single-threaded stdio server, so an unbounded one is a
- * server that stops answering — the same wedge class as a blocking read. Generous enough for a slow
- * link and a large pack, short enough that the caller gets an answer.
+ * It started as the push's own bound, and the reason written for it was already general: a git
+ * that talks to the network from inside a single-threaded stdio server is a server that stops
+ * answering — the same wedge class as a blocking read. What was missing is that the push is not
+ * the only git here that can hang, nor the most exposed one.
+ *
+ * `git commit` runs USER CODE: a `pre-commit` or `commit-msg` hook, whatever the owner of the
+ * vault put there, and a hook that waits for something never returns. It also signs, and
+ * `commit.gpgsign = true` with a passphrase-protected key and no live agent opens a pinentry —
+ * a prompt on a server that has no terminal to answer it on. Either one pinned the call forever:
+ * the `WriteQueue` slot expires after 60 s and warns the writes behind it, but the caller of THIS
+ * one keeps waiting, which is precisely what the bound exists to prevent.
+ *
+ * One constant for every invocation, and not one per site: two numbers that must agree drift, and
+ * a site added later inherits the bound instead of forgetting it.
  */
-const PUSH_TIMEOUT_MS = 30_000;
+const GIT_TIMEOUT_MS = 30_000;
+
+/**
+ * Every `git` this module runs: bounded by the clock, and unable to ask anything.
+ *
+ * `GIT_TERMINAL_PROMPT=0` was on the push alone, with the right reason attached to it — a server
+ * started by an MCP client has no terminal to answer a prompt on, so a prompt IS a hang. The
+ * reason never had anything to do with the network: it is about where this process runs, so it
+ * holds for every git here.
+ */
+function runGit(args: string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<{ stdout: string }> {
+  return execFileAsync('git', args, {
+    timeout: timeoutMs,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  });
+}
 
 /** `VAULT_AUTO_PUSH=1` (or `true`) turns the push on for every write. Anything else is off. */
 function autoPushEnabled(): boolean {
@@ -69,8 +102,10 @@ export async function commitFiles(
     return { committed: false, warning: 'nada a commitar: nenhum arquivo informado' };
   }
 
+  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+
   try {
-    await execFileAsync('git', ['-C', repoRoot, '--literal-pathspecs', 'add', '--', ...absPaths]);
+    await runGit(['-C', repoRoot, '--literal-pathspecs', 'add', '--', ...absPaths], timeoutMs);
   } catch (err) {
     return { committed: false, warning: `falha ao adicionar arquivos ao git: ${errorMessage(err)}` };
   }
@@ -98,16 +133,10 @@ export async function commitFiles(
   // the safe direction, since the benign classification is only ever granted
   // by a check that positively observed an empty staged diff.
   try {
-    await execFileAsync('git', [
-      '-C',
-      repoRoot,
-      '--literal-pathspecs',
-      'diff',
-      '--cached',
-      '--quiet',
-      '--',
-      ...absPaths,
-    ]);
+    await runGit(
+      ['-C', repoRoot, '--literal-pathspecs', 'diff', '--cached', '--quiet', '--', ...absPaths],
+      timeoutMs,
+    );
     // Exit 0: no staged difference for these paths. The benign no-op.
     return { committed: false, warning: 'nada a commitar: arquivos sem alteração' };
   } catch (err) {
@@ -122,16 +151,10 @@ export async function commitFiles(
   }
 
   try {
-    await execFileAsync('git', [
-      '-C',
-      repoRoot,
-      '--literal-pathspecs',
-      'commit',
-      '-m',
-      message,
-      '--',
-      ...absPaths,
-    ]);
+    await runGit(
+      ['-C', repoRoot, '--literal-pathspecs', 'commit', '-m', message, '--', ...absPaths],
+      timeoutMs,
+    );
   } catch (err) {
     // There *was* something staged, so a failure here is real: a rejecting
     // hook, an unset identity, a locked index. Surface the diagnostic.
@@ -139,7 +162,7 @@ export async function commitFiles(
   }
 
   if (!(options.push ?? autoPushEnabled())) return { committed: true };
-  return { committed: true, ...(await pushBranch(repoRoot)) };
+  return { committed: true, ...(await pushBranch(repoRoot, timeoutMs)) };
 }
 
 /**
@@ -179,22 +202,13 @@ export interface HeadBlobState {
 
 export async function headBlobState(repoRoot: string, relPath: string): Promise<HeadBlobState> {
   try {
-    await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--verify', `HEAD:${relPath}`]);
+    await runGit(['-C', repoRoot, 'rev-parse', '--verify', `HEAD:${relPath}`]);
   } catch (err) {
     return { inHead: false, modified: false, reason: errorMessage(err) };
   }
 
   try {
-    await execFileAsync('git', [
-      '-C',
-      repoRoot,
-      '--literal-pathspecs',
-      'diff',
-      '--quiet',
-      'HEAD',
-      '--',
-      relPath,
-    ]);
+    await runGit(['-C', repoRoot, '--literal-pathspecs', 'diff', '--quiet', 'HEAD', '--', relPath]);
     return { inHead: true, modified: false };
   } catch (err) {
     // Exit 1 is `--quiet`'s "there are differences". Anything else is git failing to answer,
@@ -217,7 +231,7 @@ export async function headBlobState(repoRoot: string, relPath: string): Promise<
  */
 export async function headSha(repoRoot: string): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', repoRoot, 'rev-parse', 'HEAD']);
+    const { stdout } = await runGit(['-C', repoRoot, 'rev-parse', 'HEAD']);
     const sha = stdout.trim();
     return sha === '' ? undefined : sha;
   } catch {
@@ -242,18 +256,16 @@ export async function headSha(repoRoot: string): Promise<string | undefined> {
  * a rebase or a merge, and every one of those rewrites the user's knowledge base — a decision that
  * is theirs and not a side effect of writing one note. The warning names the situation and stops.
  */
-async function pushBranch(repoRoot: string): Promise<{ pushed: boolean; warning?: string }> {
+async function pushBranch(
+  repoRoot: string,
+  timeoutMs: number,
+): Promise<{ pushed: boolean; warning?: string }> {
   try {
-    await execFileAsync('git', ['-C', repoRoot, 'push'], {
-      timeout: PUSH_TIMEOUT_MS,
-      // No credential prompt: a server started by an MCP client has no terminal to answer one on,
-      // so a prompt is a hang. Failing immediately turns that into a warning the user can read.
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    });
+    await runGit(['-C', repoRoot, 'push'], timeoutMs);
     return { pushed: true };
   } catch (err) {
     const detail = timedOut(err)
-      ? `o push passou de ${PUSH_TIMEOUT_MS} ms e foi encerrado`
+      ? `o push passou de ${timeoutMs} ms e foi encerrado`
       : errorMessage(err);
     return {
       pushed: false,
