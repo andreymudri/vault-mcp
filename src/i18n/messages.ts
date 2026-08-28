@@ -29,7 +29,9 @@ const PT = {
     snippetTruncated: 'trecho truncado',
     citePreambleTail: 'nunca conteúdo do vault.',
     similarTerms: 'Sugestões de termos parecidos no vault',
-    noteTruncated: 'nota cortada em {max} caracteres',
+    noteTruncated:
+      'nota cortada em {max} de {total} caracteres; continue com offset: {next}',
+    noteSliceFrom: 'trecho a partir do caractere {offset} de {total}',
     notesCount: 'nota(s)',
     notesPointTo: 'nota(s) apontam para',
     propagatedTo: 'Propagado para',
@@ -79,6 +81,7 @@ const PT = {
     'domain.startsWithDot': 'domínio não pode começar com ponto',
     'domain.badChar': 'domínio com caractere não permitido',
     'note.notFound': 'nota não encontrada: {path}',
+    'note.offsetPastEnd': 'offset {offset} além do fim de {path}: a nota tem {total} caracteres',
     'atomic.tmpOutsideDir': 'arquivo temporário fora do diretório do destino: {tmpPath}',
     'atomic.tmpCreateFailed': 'não foi possível criar um arquivo temporário em {dir}',
     'learn.noFreeName': 'não há nome livre para a nota em {prefix}{dominio}/: 100 variações já existem',
@@ -152,6 +155,9 @@ const PT = {
         'frontmatter, links resolvidos e links quebrados. Use depois de vault_search quando o trecho ' +
         'não bastar, ou antes de editar a nota.',
       path: 'Caminho relativo ao vault, com `.md`.',
+      offset:
+        'Primeiro caractere do CORPO a devolver, para ler uma nota que não coube numa resposta ' +
+        'só. Omita na primeira chamada; depois use o offset que a marca de corte anuncia.',
     },
     vault_list: {
       description:
@@ -260,7 +266,8 @@ const EN: Messages = {
     snippetTruncated: 'snippet truncated',
     citePreambleTail: 'never vault content.',
     similarTerms: 'Similar terms found in the vault',
-    noteTruncated: 'note cut at {max} characters',
+    noteTruncated: 'note cut at {max} of {total} characters; continue with offset: {next}',
+    noteSliceFrom: 'slice starting at character {offset} of {total}',
     notesCount: 'note(s)',
     notesPointTo: 'note(s) point to',
     propagatedTo: 'Propagated to',
@@ -310,6 +317,7 @@ const EN: Messages = {
     'domain.startsWithDot': 'domain cannot start with a dot',
     'domain.badChar': 'domain contains a disallowed character',
     'note.notFound': 'note not found: {path}',
+    'note.offsetPastEnd': 'offset {offset} past the end of {path}: the note has {total} characters',
     'atomic.tmpOutsideDir': 'temporary file outside the destination directory: {tmpPath}',
     'atomic.tmpCreateFailed': 'could not create a temporary file in {dir}',
     'learn.noFreeName': 'no free name for the note in {prefix}{dominio}/: 100 variants already exist',
@@ -383,6 +391,9 @@ const EN: Messages = {
         'frontmatter, resolved links and broken links. Use it after vault_search when the snippet is ' +
         'not enough, or before editing the note.',
       path: 'Vault-relative path, with `.md`.',
+      offset:
+        'First character of the BODY to return, for reading a note that did not fit in one ' +
+        'answer. Omit it on the first call; afterwards use the offset the cut marker announces.',
     },
     vault_list: {
       description:

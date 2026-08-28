@@ -1027,6 +1027,132 @@ describe('vault_get_note', () => {
     expect(umAMais).toContain('nota cortada');
   });
 
+  /**
+   * O `offset` que a marca de corte anuncia, ou `undefined` quando a página não foi cortada.
+   *
+   * Lido da própria saída da tool, e não calculado pelo teste: se a marca anunciar um ponto que
+   * não é onde o corte parou, é o teste que tem de quebrar. Um teste que recalculasse o offset
+   * pelo mesmo `MAX_NOTE_CHARS` da implementação concordaria com ela por construção — inclusive
+   * quando os dois estivessem errados.
+   */
+  const nextOffsetOf = (page: string): number | undefined => {
+    const match = /offset: (\d+)/.exec(page);
+    return match?.[1] === undefined ? undefined : Number(match[1]);
+  };
+
+  it('uma nota maior que o limite é legível até o fim por offset, sem buraco nem sobreposição', async () => {
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+
+    // Duas páginas e um resto: o caso real é `02-wiki/performance/api-efficiency-big-levers.md`,
+    // 38.990 bytes no vault do autor, de que metade não saía por tool nenhuma.
+    const corpo = Array.from(
+      { length: 3_000 },
+      (_, i) => `linha ${String(i).padStart(5, '0')} do corpo comprido`,
+    ).join('\n');
+    expect(corpo.length).toBeGreaterThan(MAX_NOTE_CHARS * 2);
+    await write(vaultRoot, '02-wiki/docker/longa.md', corpo);
+
+    let offset = 0;
+    const pages: number[] = [];
+    for (let guard = 0; guard < 10; guard++) {
+      const page = await text('vault_get_note', {
+        path: '02-wiki/docker/longa.md',
+        ...(offset === 0 ? {} : { offset }),
+      });
+      pages.push(offset);
+      const next = nextOffsetOf(page);
+      if (next === undefined) {
+        // A última página vai até o fim do corpo, e nada nela diz que foi cortada.
+        expect(page).toContain(corpo.slice(offset));
+        expect(page).not.toContain('nota cortada');
+        break;
+      }
+      // Esta página carrega EXATAMENTE [offset, next): tudo que cabe, e nada além.
+      expect(next).toBeGreaterThan(offset);
+      expect(page).toContain(corpo.slice(offset, next));
+      expect(page).not.toContain(corpo.slice(next, next + 30));
+      offset = next;
+    }
+
+    // As páginas se encaixam ponta a ponta e cobrem o corpo inteiro, e a primeira é a chamada
+    // sem argumento nenhum: quem não passa `offset` continua vendo o que sempre viu.
+    expect(pages).toEqual(
+      Array.from({ length: Math.ceil(corpo.length / MAX_NOTE_CHARS) }, (_, i) => i * MAX_NOTE_CHARS),
+    );
+  });
+
+  it('a marca de corte diz o tamanho total, e não só onde cortou', async () => {
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+
+    const corpo = 'x'.repeat(MAX_NOTE_CHARS + 4_321);
+    await write(vaultRoot, '02-wiki/docker/tamanho.md', corpo);
+
+    // Sem o total, a marca não distingue "faltam 20 caracteres" de "falta metade da nota", e
+    // quem lê não tem como decidir se vale continuar.
+    const rendered = await text('vault_get_note', { path: '02-wiki/docker/tamanho.md' });
+    expect(rendered).toContain(String(corpo.length));
+  });
+
+  it('nem o corte nem a continuação partem um par surrogate', async () => {
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+
+    // O emoji COMEÇA no último caractere que caberia, então cortar no limite exato o partiria.
+    const corpo = `${'a'.repeat(MAX_NOTE_CHARS - 1)}😀zzfimintacto`;
+    await write(vaultRoot, '02-wiki/docker/emoji.md', corpo);
+
+    const primeira = await text('vault_get_note', { path: '02-wiki/docker/emoji.md' });
+    expect(primeira).not.toContain('\ud83d');
+    const next = nextOffsetOf(primeira);
+    expect(next).toBe(MAX_NOTE_CHARS - 1);
+
+    // E a página seguinte traz o emoji INTEIRO, que é a metade que o corte recuou.
+    const segunda = await text('vault_get_note', { path: '02-wiki/docker/emoji.md', offset: next });
+    expect(segunda).toContain('😀zzfimintacto');
+
+    // Um offset escrito à mão bem no meio do par recua para o começo dele: o par nunca é
+    // partido nem pelo corte nem pela continuação.
+    const meio = await text('vault_get_note', {
+      path: '02-wiki/docker/emoji.md',
+      offset: MAX_NOTE_CHARS,
+    });
+    expect(meio).toContain('😀zzfimintacto');
+    expect(meio).not.toContain('\udfff');
+  });
+
+  it('um offset além do fim é recusado dizendo o tamanho da nota', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+
+    const corpo = 'y'.repeat(500);
+    await write(vaultRoot, '02-wiki/docker/curta.md', corpo);
+
+    // Devolver vazio em silêncio faria "já li tudo" e "pedi o lugar errado" terem a mesma cara.
+    const result = await call('vault_get_note', { path: '02-wiki/docker/curta.md', offset: 900 });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('500');
+  });
+
+  it('a continuação se identifica sem repetir o cabeçalho da primeira página', async () => {
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+
+    const corpo = `# Título\n\n${'z'.repeat(MAX_NOTE_CHARS + 100)}`;
+    await write(vaultRoot, '02-wiki/docker/continua.md', `---\ntipo: wiki\n---\n\n${corpo}`);
+
+    const segunda = await text('vault_get_note', {
+      path: '02-wiki/docker/continua.md',
+      offset: MAX_NOTE_CHARS,
+    });
+    // O caminho continua na página, senão o trecho fica órfão de citação.
+    expect(segunda).toContain('02-wiki/docker/continua.md');
+    // O frontmatter, não: ele já saiu inteiro na primeira página, e repeti-lo em cada página é
+    // gastar a resposta com o que o chamador já tem.
+    expect(segunda).not.toContain('Frontmatter');
+  });
+
   it('a fronteira do limite do frontmatter é exata', async () => {
     const vaultRoot = await makeVault();
     const { text } = makeTools(vaultRoot);
@@ -1063,7 +1189,12 @@ describe('vault_get_note', () => {
     const { text } = makeTools(vaultRoot);
     const rendered = await text('vault_get_note', { path: '02-wiki/docker/gigante.md' });
 
-    expect(rendered).toContain(`nota cortada em ${MAX_NOTE_CHARS} caracteres`);
+    // O corpo do arquivo é o que vem depois do `# Gigante\n\n` do frontmatter-less: a marca
+    // conta o corpo, não o arquivo.
+    const corpoDaNota = corpo;
+    expect(rendered).toContain(
+      `nota cortada em ${MAX_NOTE_CHARS} de ${corpoDaNota.length} caracteres; continue com offset: ${MAX_NOTE_CHARS}`,
+    );
     expect(rendered).not.toContain('zzfimcortado');
     expect(rendered.length).toBeLessThan(MAX_NOTE_CHARS + 1_000);
   });

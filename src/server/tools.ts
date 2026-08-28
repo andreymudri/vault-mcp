@@ -135,6 +135,23 @@ export function makeRedactor(vaultRoot: string): (text: string) => string {
 export const MAX_NOTE_CHARS = 20_000;
 
 /**
+ * `index` recuado até o começo do ponto de código que o contém.
+ *
+ * O par de `sliceAtCodePointBoundary`, que cuida do FIM de uma fatia: aqui o que se protege é o
+ * COMEÇO. Os offsets que este servidor anuncia caem sempre em fronteira, então o recuo só entra
+ * quando alguém escreve um offset à mão — e é exatamente aí que ele importa, porque começar num
+ * surrogate BAIXO devolve meio par, que não é caractere nenhum e que qualquer camada por cima
+ * substitui por U+FFFD antes de o leitor ver.
+ *
+ * Recuar, e não avançar: avançar descartaria em silêncio o caractere que o chamador pediu.
+ */
+function snapToCodePointStart(text: string, index: number): number {
+  if (index <= 0) return 0;
+  const code = text.charCodeAt(index);
+  return code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
+}
+
+/**
  * Brings the vault up to date THROUGH the retriever, which is the only component allowed to
  * consume the scanner's delta.
  *
@@ -1247,7 +1264,10 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     m,
     'vault_get_note',
     m.tools.vault_get_note.description,
-    { path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_get_note.path) },
+    {
+      path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_get_note.path),
+      offset: z.number().int().min(0).optional().describe(m.tools.vault_get_note.offset),
+    },
     async (input) => {
       refreshVault(deps);
       const note = deps.scanner.getNote(input.path);
@@ -1255,7 +1275,22 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         throw coded(new ToolError(`nota não encontrada: ${forMessage(input.path)}`), 'note.notFound', { path: forMessage(input.path) });
       }
 
-      const frontmatter = renderFrontmatterBlock(note.frontmatter);
+      const asked = input.offset ?? 0;
+      // Um offset no fim ou além dele é RECUSADO, não atendido com vazio. As duas situações que
+      // ele confunde — "já li a nota inteira" e "pedi o lugar errado" — pedem coisas opostas de
+      // quem chamou, e uma resposta vazia não distingue as duas. `asked === 0` fica de fora
+      // porque é a chamada padrão: uma nota de corpo vazio não é um erro.
+      if (asked > 0 && asked >= note.body.length) {
+        throw coded(
+          new ToolError(
+            `offset ${asked} além do fim de ${forMessage(input.path)}: a nota tem ${note.body.length} caracteres`,
+          ),
+          'note.offsetPastEnd',
+          { offset: asked, path: forMessage(input.path), total: note.body.length },
+        );
+      }
+      const offset = snapToCodePointStart(note.body, asked);
+
       // The body is relayed RAW — no `sanitizeQuoted`, no `> ` — and that is a decision, not an
       // omission. `vault_edit_note` locates `old_text` as an EXACT substring of the file, so an
       // agent that reads a note here and then edits a piece of it must be handed the bytes that are
@@ -1264,22 +1299,51 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       // one note, with no per-line prefix contract and no citation lines a body could forge. The
       // surfaces that DO make such a claim — the search snippet and the relayed diff — are
       // sanitised, and this one is bounded instead (`MAX_NOTE_CHARS`).
+      // O corte é o mesmo de sempre; o que mudou é que ele agora ANUNCIA onde parou. Sem isso o
+      // limite era um teto sem porta: uma nota de 39 KB — e existe uma — saía pela metade, e a
+      // outra metade não era alcançável por tool nenhuma. Pior, `vault_edit_note` casa `old_text`
+      // como substring EXATA do arquivo e o trecho do `vault_search` é sanitizado de propósito,
+      // então não havia caminho para obter os bytes da cauda: ela era ilegível E inalterável.
+      const rest = note.body.slice(offset);
+      const shown = sliceAtCodePointBoundary(rest, MAX_NOTE_CHARS);
+      // `sliceAtCodePointBoundary` devolve o próprio texto quando ele cabe, então comparar os
+      // comprimentos responde "cortou?" exatamente — sem procurar a marca dentro do texto, que é
+      // prosa comum e uma nota pode conter.
       const body =
-        note.body.length <= MAX_NOTE_CHARS
-          ? note.body
-          : `${sliceAtCodePointBoundary(note.body, MAX_NOTE_CHARS)}\n[…${renderTemplate(m.results.noteTruncated, { max: MAX_NOTE_CHARS })}]`;
+        shown.length === rest.length
+          ? shown
+          : `${shown}\n[…${renderTemplate(m.results.noteTruncated, {
+              max: MAX_NOTE_CHARS,
+              total: note.body.length,
+              // O ponto onde o corte REALMENTE parou, e não `offset + MAX_NOTE_CHARS`: os dois
+              // divergem em um quando recuar de um par surrogate encolheu a fatia, e um offset
+              // anunciado que não é o do corte deixa um caractere para trás a cada página.
+              next: offset + shown.length,
+            })}]`;
 
-      return [
-        forMessage(`${note.path} — ${note.title}`),
-        `${m.results.frontmatter}:`,
-        frontmatter === '' ? `  ${m.results.none}` : frontmatter,
-        `${m.results.links}: ${note.links.length === 0 ? m.results.none : forMessage(note.links.join(', '))}`,
-        `${m.results.brokenLinks}: ${
-          note.brokenLinks.length === 0 ? m.results.none : forMessage(note.brokenLinks.join(', '))
-        }`,
-        '',
-        body,
-      ].join('\n');
+      // A continuação não repete frontmatter, links e links quebrados: eles saíram inteiros na
+      // primeira página e não mudam entre as páginas de uma mesma leitura. O caminho fica, porque
+      // um trecho sem ele é um trecho que ninguém consegue citar.
+      const head =
+        offset === 0
+          ? [
+              forMessage(`${note.path} — ${note.title}`),
+              `${m.results.frontmatter}:`,
+              // Renderizado DENTRO do ramo que o mostra: o resumo de frontmatter é a parte cara
+              // desta tool (um mapa com alias expande muito além do que o YAML pesa em disco), e
+              // pagá-lo numa página de continuação seria pagá-lo para descartar.
+              renderFrontmatterBlock(note.frontmatter) || `  ${m.results.none}`,
+              `${m.results.links}: ${note.links.length === 0 ? m.results.none : forMessage(note.links.join(', '))}`,
+              `${m.results.brokenLinks}: ${
+                note.brokenLinks.length === 0 ? m.results.none : forMessage(note.brokenLinks.join(', '))
+              }`,
+            ]
+          : [
+              forMessage(`${note.path} — ${note.title}`),
+              `[${renderTemplate(m.results.noteSliceFrom, { offset, total: note.body.length })}]`,
+            ];
+
+      return [...head, '', body].join('\n');
     },
   );
 
