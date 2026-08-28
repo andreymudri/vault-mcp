@@ -78,4 +78,12 @@ export interface SearchResult {
 export interface Diagnostic {
   path: string;
   message: string;
+  /**
+   * Chave em `messages.errorCodes`, e o mesmo mecanismo que `src/i18n/errors.ts` dá aos erros da
+   * escrita, pela mesma razão: um diagnóstico NASCE no scanner e no parser de frontmatter, que
+   * não têm catálogo de idioma nenhum e não deveriam ter. Ausente = relatado como veio.
+   */
+  code?: string;
+  /** Valores para os `{placeholders}` do template. */
+  params?: Readonly<Record<string, string | number>>;
 }

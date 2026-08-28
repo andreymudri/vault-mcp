@@ -120,7 +120,12 @@ export class VaultScanner {
       } catch (err) {
         // The file was listed a moment ago and is unreachable now — deleted mid-walk, or a
         // permission change. Treating it as absent lets the removal path clean up after it.
-        walkDiagnostics.push({ path, message: `não foi possível ler metadados: ${message(err)}` });
+        walkDiagnostics.push({
+          path,
+          message: `não foi possível ler metadados: ${message(err)}`,
+          code: 'diag.statFailed',
+          params: { detail: message(err) },
+        });
         continue;
       }
 
@@ -137,6 +142,7 @@ export class VaultScanner {
           message:
             'ignorado: é um hard link (nlink > 1), e o conteúdo pode viver fora do vault. ' +
             'Substitua por uma cópia real (`cp --reflink=never`) para indexar.',
+          code: 'diag.hardLink',
         });
         continue;
       }
@@ -155,7 +161,12 @@ export class VaultScanner {
         // Unreadable is not fatal: one bad file must not cost the whole vault. It drops out of
         // the map (a stale copy of a file we can no longer verify is worse than none) and is
         // reported. Not marked as seen, so a previously indexed copy is removed below.
-        walkDiagnostics.push({ path, message: `não foi possível ler o arquivo: ${message(err)}` });
+        walkDiagnostics.push({
+          path,
+          message: `não foi possível ler o arquivo: ${message(err)}`,
+          code: 'diag.readFailed',
+          params: { detail: message(err) },
+        });
         continue;
       }
 
@@ -221,6 +232,8 @@ export class VaultScanner {
       diagnostics.push({
         path: relativeDir,
         message: `não foi possível listar o diretório: ${message(err)}`,
+        code: 'diag.readdirFailed',
+        params: { detail: message(err) },
       });
       return;
     }

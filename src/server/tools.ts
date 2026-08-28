@@ -9,7 +9,7 @@ import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
 import { messagesFor, type Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
-import type { Frontmatter, Note, ScoredChunk } from '../types.js';
+import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { LearnError, learn } from '../write/learn.js';
 import { INVISIBLE_CHARS } from '../write/paths.js';
@@ -408,6 +408,71 @@ function translateError(err: unknown, m: Messages): string {
   const hintTemplate = hint === undefined ? undefined : codes[hint.code];
   if (hint === undefined || hintTemplate === undefined) return text;
   return `${text}; ${renderTemplate(hintTemplate, hint.params)}`;
+}
+
+/**
+ * Quantos arquivos com problema o rodapé NOMEIA antes de virar contagem.
+ *
+ * Um vault restaurado com `cp -al` põe todas as notas fora do índice de uma vez, e listar as 104
+ * empurraria para fora da tela a resposta que foi pedida — o aviso passaria a esconder aquilo
+ * sobre o que ele avisa. Três nomes bastam para o leitor reconhecer a CLASSE do problema, e a
+ * contagem diz o tamanho dele.
+ */
+const MAX_DIAGNOSTIC_LINES = 3;
+
+/**
+ * A mensagem de um diagnóstico no idioma do catálogo, ou a original quando ele não traz código.
+ * A mesma regra de `translateError`, e pela mesma razão — ver `src/i18n/errors.ts`.
+ */
+function translateDiagnostic(diagnostic: Diagnostic, m: Messages): string {
+  const codes = m.errorCodes as Record<string, string | undefined>;
+  const template = diagnostic.code === undefined ? undefined : codes[diagnostic.code];
+  return template === undefined
+    ? diagnostic.message
+    : renderTemplate(template, diagnostic.params ?? {});
+}
+
+/**
+ * O que o scanner descobriu de errado, anexado à resposta de uma tool que varre o vault inteiro.
+ *
+ * `VaultScanner.diagnostics` era um beco sem saída: nada fora do scanner o lia. Isso tornava
+ * FALSA a justificativa de três decisões documentadas — dropar hard link do índice foi defendido
+ * porque a nota sai "de forma RUIDOSA, um diagnostic por nota", e o `catch` do arquivo ilegível
+ * diz "reported". Na prática, um vault restaurado com `cp -al` respondia "nenhum resultado" e
+ * nada explicava por quê.
+ *
+ * Vai nas duas tools que respondem "o que existe no vault" (`vault_search`, `vault_list`), e em
+ * TODOS os caminhos de saída delas — inclusive o "nenhum resultado", que é justamente onde a
+ * explicação vale mais.
+ *
+ * As linhas são REDIGIDAS antes de escapadas, na mesma ordem que `define` usa: o detalhe de um
+ * erro de `stat` traz o caminho absoluto que a raiz do vault não deve vazar, e o nome do arquivo
+ * vem do disco — um nome com quebra de linha forjaria uma linha do servidor sem o escape.
+ */
+function diagnosticsFooter(deps: ToolDeps, redact: (text: string) => string, m: Messages): string {
+  const diagnostics = deps.scanner.diagnostics;
+  if (diagnostics.length === 0) return '';
+  const shown = diagnostics.slice(0, MAX_DIAGNOSTIC_LINES);
+  const rest = diagnostics.length - shown.length;
+  return [
+    `${m.results.warning}: ${renderTemplate(m.results.diagnosticsHeader, { count: diagnostics.length })}`,
+    ...shown.map(
+      (diagnostic) =>
+        `  ${forMessage(redact(`${diagnostic.path}: ${translateDiagnostic(diagnostic, m)}`))}`,
+    ),
+    ...(rest > 0 ? [`  ${renderTemplate(m.results.diagnosticsMore, { count: rest })}`] : []),
+  ].join('\n');
+}
+
+/** `text` com o rodapé de diagnósticos, quando há algum. */
+function withDiagnostics(
+  text: string,
+  deps: ToolDeps,
+  redact: (text: string) => string,
+  m: Messages,
+): string {
+  const footer = diagnosticsFooter(deps, redact, m);
+  return footer === '' ? text : `${text}\n\n${footer}`;
 }
 
 function define<Shape extends z.ZodRawShape>(
@@ -1246,16 +1311,26 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       const query = forMessage(input.query);
       if (results.length === 0) {
         const head = `${m.results.noResultsFor} "${query}".`;
-        return suggestions === undefined
-          ? head
-          : `${head}\n${m.results.similarTerms}: ${forMessage(suggestions.join(', '))}`;
+        return withDiagnostics(
+          suggestions === undefined
+            ? head
+            : `${head}\n${m.results.similarTerms}: ${forMessage(suggestions.join(', '))}`,
+          deps,
+          redact,
+          m,
+        );
       }
 
       const head =
         `${results.length} ${m.results.resultsFor} "${query}". ` +
         m.results.citePreamble +
         m.results.citePreambleTail;
-      return [head, ...results.map((item) => renderResult(item, m))].join('\n\n');
+      return withDiagnostics(
+        [head, ...results.map((item) => renderResult(item, m))].join('\n\n'),
+        deps,
+        redact,
+        m,
+      );
     },
   );
 
@@ -1378,8 +1453,15 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         })
         .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
-      if (notes.length === 0) return m.results.noNotesMatchingFilters;
-      return [`${notes.length} ${m.results.notesCount}:`, ...notes.map(renderNoteLine)].join('\n');
+      if (notes.length === 0) {
+        return withDiagnostics(m.results.noNotesMatchingFilters, deps, redact, m);
+      }
+      return withDiagnostics(
+        [`${notes.length} ${m.results.notesCount}:`, ...notes.map(renderNoteLine)].join('\n'),
+        deps,
+        redact,
+        m,
+      );
     },
   );
 

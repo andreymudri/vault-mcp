@@ -21,7 +21,12 @@ export function parseFile(path: string, raw: string): ParsedFile {
     return {
       frontmatter: {},
       body: stripFrontmatterBlock(raw),
-      diagnostic: { path, message: `frontmatter inválido: ${message}` },
+      diagnostic: {
+        path,
+        message: `frontmatter inválido: ${message}`,
+        code: 'diag.frontmatterInvalid',
+        params: { detail: message },
+      },
     };
   }
 }

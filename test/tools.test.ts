@@ -2561,3 +2561,102 @@ describe('servidor MCP', () => {
     await server.close();
   });
 });
+
+/**
+ * O que o scanner descobre de errado, e por que ele TEM de chegar ao usuário.
+ *
+ * `VaultScanner.diagnostics` existia desde o começo e ninguém fora do scanner o lia — nem
+ * `tools.ts`, nem `index.ts`. Isso tornava falsa a justificativa de três decisões documentadas:
+ * dropar hard link do índice foi defendido porque a nota sai "de forma RUIDOSA, um diagnostic por
+ * nota", e o `catch` do arquivo ilegível diz "reported". Na prática, nota com hard link, arquivo
+ * ilegível, diretório não listável e frontmatter malformado sumiam em silêncio absoluto: um vault
+ * restaurado com `cp -al` responderia "nenhum resultado" sem nada explicando por quê.
+ */
+describe('diagnósticos do vault na saída das tools', () => {
+  it('a busca avisa sobre o arquivo que o scanner não conseguiu indexar direito', async () => {
+    // `quebrada.md` é do próprio fixture: YAML que não fecha, então a nota entra no índice sem o
+    // `tipo` que ela declara e todo filtro por tipo passa longe dela, em silêncio.
+    const vaultRoot = await makeVault();
+    const { text } = makeTools(vaultRoot);
+
+    const rendered = await text('vault_search', { query: 'docker' });
+    expect(rendered).toContain('quebrada.md');
+    expect(rendered).toMatch(/frontmatter inválido/i);
+
+    // O detalhe vem do js-yaml e tem TRÊS linhas (a mensagem, o trecho ofensivo e o `^` que
+    // aponta a coluna). Cru, ele forjaria duas linhas de servidor dentro de um bloco que afirma
+    // "um arquivo por linha" — a mesma classe que `forMessage` fecha nas outras superfícies.
+    const linhas = rendered.split('\n');
+    const inicio = linhas.findIndex((line) => /indexação/.test(line));
+    expect(inicio).toBeGreaterThan(-1);
+    expect(linhas.slice(inicio)).toHaveLength(2);
+  });
+
+  it('a listagem avisa sobre a nota que ficou de FORA do índice', async () => {
+    const vaultRoot = await makeVault();
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-fora-'));
+    trash.push(outside);
+    const secret = path.join(outside, 'segredo.pem');
+    await fs.writeFile(secret, '-----BEGIN PRIVATE KEY-----\nnão pertence ao vault\n');
+    await fs.link(secret, path.join(vaultRoot, '02-wiki', 'vazamento.md'));
+
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_list', { tipo: 'wiki' });
+
+    // A recusa em indexar já estava certa; o que faltava era ela ser AUDÍVEL.
+    expect(rendered).toContain('02-wiki/vazamento.md');
+    expect(rendered).toMatch(/hard link/i);
+    // E o conteúdo do arquivo recusado continua fora da resposta.
+    expect(rendered).not.toContain('BEGIN PRIVATE KEY');
+  });
+
+  it('um vault sadio não ganha nenhuma linha de aviso', async () => {
+    const vaultRoot = await makeVault();
+    // Sem a nota malformada do fixture, este vault não tem nada a reportar.
+    await fs.rm(path.join(vaultRoot, 'quebrada.md'));
+    const { text } = makeTools(vaultRoot);
+
+    // O contrapeso: um aviso que aparece quando nada está errado ensina a ignorar o aviso.
+    const busca = await text('vault_search', { query: 'jwt' });
+    const lista = await text('vault_list', { tipo: 'wiki' });
+    expect(busca).not.toMatch(/indexação/i);
+    expect(lista).not.toMatch(/indexação/i);
+  });
+
+  it('muitos arquivos com problema viram poucas linhas mais uma contagem', async () => {
+    const vaultRoot = await makeVault();
+    // Fora a do fixture, para a contagem ser exatamente a dos doze criados aqui.
+    await fs.rm(path.join(vaultRoot, 'quebrada.md'));
+    const { text } = makeTools(vaultRoot);
+
+    for (let i = 0; i < 12; i++) {
+      await write(vaultRoot, `02-wiki/docker/ruim-${i}.md`, '---\ntipo: [wiki\n---\n\n# Ruim\n');
+    }
+
+    const rendered = await text('vault_list', { tipo: 'wiki' });
+    // Doze linhas de aviso empurrariam para fora da tela a resposta que foi pedida. O aviso diz
+    // QUANTOS são e mostra alguns; quem quiser a lista inteira tem os caminhos para olhar.
+    const avisadas = rendered.split('\n').filter((line) => /ruim-\d+\.md/.test(line));
+    expect(avisadas.length).toBeLessThanOrEqual(3);
+    expect(rendered).toContain('12');
+  });
+
+  it('o aviso sai no idioma do catálogo, e não em português cru', async () => {
+    const vaultRoot = await makeVault();
+    const scanner = new VaultScanner({ vaultRoot });
+    const tools = createTools({
+      retriever: new Retriever({ scanner }),
+      scanner,
+      vaultRoot,
+      messages: messagesFor('en'),
+    });
+    const list = tools.find((tool) => tool.name === 'vault_list');
+    if (list === undefined) throw new Error('tool ausente: vault_list');
+    const rendered = textOf(await list.handler({ tipo: 'wiki' }));
+
+    // As mensagens nascem fundo no scanner, que não tem catálogo nenhum — a mesma fronteira que
+    // `errors.ts` já resolve para os erros da escrita, agora também para os diagnósticos.
+    expect(rendered).toMatch(/invalid frontmatter/i);
+    expect(rendered).not.toMatch(/inválido/i);
+  });
+});

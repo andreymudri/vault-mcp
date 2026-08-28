@@ -32,6 +32,8 @@ const PT = {
     noteTruncated:
       'nota cortada em {max} de {total} caracteres; continue com offset: {next}',
     noteSliceFrom: 'trecho a partir do caractere {offset} de {total}',
+    diagnosticsHeader: '{count} arquivo(s) com problema de indexação',
+    diagnosticsMore: '… e mais {count}',
     notesCount: 'nota(s)',
     notesPointTo: 'nota(s) apontam para',
     propagatedTo: 'Propagado para',
@@ -81,6 +83,13 @@ const PT = {
     'domain.startsWithDot': 'domínio não pode começar com ponto',
     'domain.badChar': 'domínio com caractere não permitido',
     'note.notFound': 'nota não encontrada: {path}',
+    'diag.frontmatterInvalid': 'frontmatter inválido: {detail}',
+    'diag.hardLink':
+      'fora do índice: é um hard link (nlink > 1), e o conteúdo pode viver fora do vault. '
+      + 'Substitua por uma cópia real (`cp --reflink=never`) para indexar.',
+    'diag.statFailed': 'fora do índice: não foi possível ler metadados: {detail}',
+    'diag.readFailed': 'fora do índice: não foi possível ler o arquivo: {detail}',
+    'diag.readdirFailed': 'não foi possível listar o diretório: {detail}',
     'note.offsetPastEnd': 'offset {offset} além do fim de {path}: a nota tem {total} caracteres',
     'atomic.tmpOutsideDir': 'arquivo temporário fora do diretório do destino: {tmpPath}',
     'atomic.tmpCreateFailed': 'não foi possível criar um arquivo temporário em {dir}',
@@ -268,6 +277,8 @@ const EN: Messages = {
     similarTerms: 'Similar terms found in the vault',
     noteTruncated: 'note cut at {max} of {total} characters; continue with offset: {next}',
     noteSliceFrom: 'slice starting at character {offset} of {total}',
+    diagnosticsHeader: '{count} file(s) with an indexing problem',
+    diagnosticsMore: '… and {count} more',
     notesCount: 'note(s)',
     notesPointTo: 'note(s) point to',
     propagatedTo: 'Propagated to',
@@ -317,6 +328,13 @@ const EN: Messages = {
     'domain.startsWithDot': 'domain cannot start with a dot',
     'domain.badChar': 'domain contains a disallowed character',
     'note.notFound': 'note not found: {path}',
+    'diag.frontmatterInvalid': 'invalid frontmatter: {detail}',
+    'diag.hardLink':
+      'left out of the index: it is a hard link (nlink > 1), so its content may live outside '
+      + 'the vault. Replace it with a real copy (`cp --reflink=never`) to index it.',
+    'diag.statFailed': 'left out of the index: could not read its metadata: {detail}',
+    'diag.readFailed': 'left out of the index: could not read the file: {detail}',
+    'diag.readdirFailed': 'could not list the directory: {detail}',
     'note.offsetPastEnd': 'offset {offset} past the end of {path}: the note has {total} characters',
     'atomic.tmpOutsideDir': 'temporary file outside the destination directory: {tmpPath}',
     'atomic.tmpCreateFailed': 'could not create a temporary file in {dir}',
