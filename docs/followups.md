@@ -7,7 +7,7 @@ rodando `vault_move` contra uma cópia do vault real). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.155 testes em 19 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
+A suíte passa com 1.217 testes em 21 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
 o handshake MCP com as nove tools.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
@@ -74,9 +74,10 @@ parcial" é a garantia que este módulo existe para dar. O perdedor recebe `Writ
 
 ## 4. `package.json` sem `private`, com nome já publicado — CORRIGIDO
 
-`"private": true` está no `package.json`: um `npm publish` acidental falha aqui e não no registry. O
-nome `vault-mcp` continua sendo de outro autor no npm (`vault-mcp@0.0.1`, 443 bytes, por ars923);
-publicar um dia exige renomear com escopo. O README, a mensagem de erro do servidor e o docblock de
+`"private": true` estava no `package.json` até a publicação: um `npm publish` acidental falhava ali
+e não no registry. O nome `vault-mcp` é de outro autor no npm (`vault-mcp@0.0.1`, 443 bytes, por
+ars923), então a publicação foi feita com escopo — `@andreymudri/vault-mcp` —, que é o que a
+`private` estava protegendo até existir uma decisão. O README, a mensagem de erro do servidor e o docblock de
 `src/server/index.ts` dizem todos o caminho absoluto, nunca `npx vault-mcp`.
 
 **Fixado por:** `test/package.test.ts`.
@@ -342,6 +343,78 @@ chamada outra coisa. É a classe "lê como uma coisa, é outra" que este projeto
 reescrita. A regra é estreita de propósito e não toca em alias que é prosa: `|o guard de JWT]]` é
 uma frase escrita para um leitor, e trocá-la seria a ferramenta editando texto que não é dela.
 Fixado nos dois sentidos em `test/rewrite-links.test.ts`.
+
+## 17. `vault_get_note` cortava em 20.000 caracteres sem porta de saída — CORRIGIDO
+
+Achado varrendo o próprio código a pedido do usuário, e confirmado no vault real:
+`02-wiki/performance/api-efficiency-big-levers.md` tem 38.207 caracteres de corpo, e metade dela
+não saía por tool nenhuma. A marca de corte não dizia nem quanto faltava, e `vault_get_note`
+recebia só `path`.
+
+O efeito compunha com a escrita, e é o que faz disso um defeito e não um limite: `vault_edit_note`
+casa `old_text` como substring EXATA do arquivo, e a única outra superfície que mostra aquele texto
+— o trecho do `vault_search` — é sanitizada de propósito. Não existia caminho para obter os bytes
+da metade de baixo: ela era ilegível **e** inalterável.
+
+**Correção:** a marca virou `cortada em {max} de {total}; continue com offset: {next}`, e o
+`offset` opcional devolve o resto. O `next` é onde o corte REALMENTE parou, não `offset + max` —
+os dois divergem em um quando recuar de um par surrogate encolhe a fatia. `snapToCodePointStart` é
+o par de `sliceAtCodePointBoundary` (um cuida do fim da fatia, o outro do começo) e recua em vez de
+avançar, porque avançar descartaria em silêncio o caractere pedido. Offset no fim ou além é
+RECUSADO com o tamanho da nota: vazio faria "já li tudo" e "pedi o lugar errado" terem a mesma cara.
+
+**Fixado por:** `test/tools.test.ts`, cinco casos — o percurso de página em página com fatia exata
+nos dois sentidos, a marca com o total, o par surrogate no corte e num offset escrito à mão no meio
+dele, a recusa além do fim, e o cabeçalho da continuação.
+
+## 18. `VaultScanner.diagnostics` não era lido por ninguém — CORRIGIDO
+
+`grep -rn diagnostics src/` fora do scanner devolvia UM acerto, e era um comentário no `git.ts`.
+Nada em `tools.ts`, nada em `index.ts`.
+
+Isso tornava falsa a justificativa de três decisões deste próprio documento e do código: o item 2
+acima defende dropar hard link do índice porque a nota sai "de forma RUIDOSA: um diagnostic por
+nota"; o `catch` do arquivo ilegível diz "reported"; o comentário de `test/scanner.test.ts` diz
+"silenciar seria pior que recusar". Na prática, nota com hard link, arquivo ilegível, diretório não
+listável e frontmatter malformado sumiam em silêncio absoluto — um vault restaurado com `cp -al`
+responderia "nenhum resultado" sem uma palavra sobre o porquê.
+
+**Correção:** um rodapé nas duas tools que respondem "o que existe no vault" (`vault_search`,
+`vault_list`), em TODOS os caminhos de saída delas — inclusive o "nenhum resultado", que é onde a
+explicação vale mais. `Diagnostic` passou a carregar `code`+`params` e quem resolve é a fronteira
+da tool, exatamente como `src/i18n/errors.ts` já fazia com os erros da escrita: surfacar sem isso
+trocaria o silêncio por um vazamento de português no catálogo inglês. Limitado a três nomes mais a
+contagem, e redigido antes de escapado — o detalhe do js-yaml tem três linhas e forjaria linhas de
+servidor num bloco que afirma um arquivo por linha.
+
+**Fixado por:** `test/tools.test.ts`, cinco casos, dois deles verificados por mutação: tirar o
+`forMessage` quebra o do detalhe multilinha, e alargar o limite quebra o dos doze arquivos. O
+contrapeso — vault sadio não ganha linha nenhuma — é o que impede o aviso de virar ruído de fundo.
+
+## 19. Dos sete `git`, só o `push` era limitado — CORRIGIDO
+
+`pushBranch` tinha `timeout` e `GIT_TERMINAL_PROMPT=0`, com a razão certa escrita no docblock: "um
+push sem limite é um servidor que para de responder — a mesma classe de trava que uma leitura
+bloqueante". A regra estava certa e aplicada a um sítio só, e não ao mais exposto.
+
+`git commit` roda CÓDIGO DO USUÁRIO — `pre-commit`, `commit-msg` — e assina: com
+`commit.gpgsign = true`, chave com passphrase e nenhum agente vivo, abre um pinentry num processo
+que não tem terminal para responder. Os dois penduram a chamada para sempre. O slot da
+`WriteQueue` expira em 60 s e avisa as escritas atrás, mas quem chamou continua esperando — que é
+exatamente o que o limite do push existe para impedir.
+
+**Correção:** um `runGit` só, com o limite e o ambiente, e os sete sítios passando por ele.
+`PUSH_TIMEOUT_MS` virou `GIT_TIMEOUT_MS`: a razão escrita nele nunca teve a ver com rede, e sim com
+onde este processo roda. `CommitOptions.timeoutMs` existe pelo mesmo motivo que o da `WriteQueue` —
+um limite que não dá para encurtar é um limite que nenhum teste vê disparar.
+
+**Fixado por:** `test/git.test.ts`, dois casos — um `pre-commit` que dorme 5 s vira aviso em menos
+de 4, e um hook que grava o `GIT_TERMINAL_PROMPT` recebido lê `0`. Verificado por mutação:
+devolver o limite longo só ao `commit` faz o primeiro esperar os 5 s de novo. Ambos
+`skipIf(NO_SHELL_HOOKS)` — o limite não tem nada de específico de plataforma, mas o único jeito de
+fazer o git travar de propósito tem.
+
+---
 
 ## Aceito deliberadamente
 

@@ -84,10 +84,12 @@ const MAX_QUERY_TERMS = 64;
  * all: the cost is in the vocabulary, not in the query. Do not read this constant as closing the
  * query path.
  *
- * The real fix is a per-pair cost budget in `bm25.ts` plus a linear trim and a token-length cap
- * in `tokenizer.ts` — both owned by Task 20, along with the same quadratic trim reached from note
- * CONTENT, which `InvertedIndex.addChunk` tokenizes on every scan (a clipping carrying a long
- * hyphen run slows every indexing pass, with no query sent at all).
+ * That gap is CLOSED, elsewhere and not here: `MAX_LEVENSHTEIN_CELLS` in `bm25.ts` budgets the
+ * Levenshtein matrix by CELLS across all pairs, and `tokenizer.ts` replaced the quadratic edge
+ * trim with a linear scan and caps a token at `MAX_TOKEN_LENGTH` — which also covers the same
+ * trim reached from note CONTENT, tokenized by `InvertedIndex.addChunk` on every scan. This
+ * paragraph stays as the map of which bound answers which dimension: this constant is not one
+ * of the two.
  */
 const MAX_QUERY_CHARS = 1024;
 

@@ -140,7 +140,7 @@ npm test
 - **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
   processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
   próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
-- A suíte tem 19 arquivos com 1.155 testes e leva ~10 segundos. `npm test` roda o typecheck
+- A suíte tem 21 arquivos com 1.217 testes e leva ~10 segundos. `npm test` roda o typecheck
   (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
 
 ## Configuração
@@ -257,7 +257,7 @@ ligado:
 | Tool | Entrada | Quando Chamar |
 |------|---------|---------------|
 | `vault_search` | `query` (obrigatório); `limit`, `tipo`, `folder`, `include_raw` (opcionais) | Antes de responder sobre decisões, padrões, gotchas ou histórico do usuário. Resultado padrão: 6 trechos. Notas em `01-raw/` excluídas por padrão. |
-| `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota com frontmatter, links resolvidos e links quebrados. O corpo é limitado a 20.000 caracteres; notas maiores são marcadas com `[…nota cortada em 20000 caracteres]`. |
+| `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`); `offset` (opcional) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota com frontmatter, links resolvidos e links quebrados. O corpo é limitado a 20.000 caracteres POR RESPOSTA; nota maior é marcada com `[…nota cortada em 20000 de <total> caracteres; continue com offset: <next>]`, e esse `offset` devolve o resto — página a página, sem nunca partir um par surrogate. A página de continuação repete o caminho, não o frontmatter. |
 | `vault_list` | `tipo`, `tags`, `status`, `folder` (todos opcionais) | Inventário de notas por metadado (ex.: "quais projetos ativos?", "quais notas têm a tag jwt?"). Não busca por conteúdo — use `vault_search` para isso. |
 | `vault_backlinks` | `path` (caminho relativo) | Medir conectividade de um assunto, achar o MOC que indexa uma nota, avaliar impacto de mudança. Deduplica links: uma nota que linka o alvo duas vezes conta como um backlink. |
 | `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
