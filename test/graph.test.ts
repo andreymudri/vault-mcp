@@ -143,3 +143,58 @@ describe('LinkGraph.build', () => {
     expect(graph.neighbors(selfLinking.path)).toEqual([]);
   });
 });
+
+describe('LinkGraph.edges', () => {
+  /** Uma nota mínima em memória: só o que `build` lê importa. */
+  function note(path: string, links: string[], brokenLinks: string[] = []): Note {
+    return { path, title: path, frontmatter: {}, body: '', links, brokenLinks, bodyStartLine: 1, mtimeMs: 0 };
+  }
+
+  it('uma nota que linka o mesmo alvo duas vezes dá UMA aresta', () => {
+    const graph = new LinkGraph();
+    graph.build([note('a.md', ['b.md', 'b.md']), note('b.md', [])]);
+    expect(graph.edges()).toEqual([['a.md', 'b.md']]);
+  });
+
+  it('link quebrado nunca vira aresta', () => {
+    const graph = new LinkGraph();
+    graph.build(scanner.allNotes());
+    const note = scanner.getNote(AUTH_GUARD);
+    expect(note?.brokenLinks).toContain('nota-que-nao-existe');
+    for (const [source, target] of graph.edges()) {
+      expect(target).not.toContain('nota-que-nao-existe');
+      expect(scanner.getNote(source)).toBeDefined();
+      expect(scanner.getNote(target)).toBeDefined();
+    }
+  });
+
+  it('a ordem é determinística (origem, depois alvo) qualquer que seja a ordem das notas', () => {
+    const notes = [
+      note('c.md', ['a.md', 'b.md']),
+      note('a.md', ['c.md', 'b.md']),
+      note('b.md', ['a.md']),
+    ];
+    const forward = new LinkGraph();
+    forward.build(notes);
+    const backward = new LinkGraph();
+    backward.build([...notes].reverse().map((n) => ({ ...n, links: [...n.links].reverse() })));
+
+    const expected: Array<[string, string]> = [
+      ['a.md', 'b.md'],
+      ['a.md', 'c.md'],
+      ['b.md', 'a.md'],
+      ['c.md', 'a.md'],
+      ['c.md', 'b.md'],
+    ];
+    expect(forward.edges()).toEqual(expected);
+    expect(backward.edges()).toEqual(expected);
+  });
+
+  it('edges().length é a soma de outLinks(p).length sobre as notas do vault', () => {
+    const graph = new LinkGraph();
+    graph.build(scanner.allNotes());
+    const total = scanner.allNotes().reduce((sum, n) => sum + graph.outLinks(n.path).length, 0);
+    expect(total).toBeGreaterThan(0);
+    expect(graph.edges()).toHaveLength(total);
+  });
+});

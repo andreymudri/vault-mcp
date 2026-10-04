@@ -36,6 +36,21 @@ export class LinkGraph {
     return [...(this.outgoing.get(path) ?? [])];
   }
 
+  /**
+   * Every directed edge as `[source, target]`, one per pair (the Sets already deduplicate a note
+   * that links the same target twice), sorted by source and then target in code-unit order.
+   *
+   * Sorted so two builds over the same notes answer the same list whatever order the scanner
+   * handed them in: `vault_graph` returns this to a client that diffs and draws it.
+   */
+  edges(): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    for (const [source, targets] of this.outgoing) {
+      for (const target of targets) out.push([source, target]);
+    }
+    return out.sort((a, b) => compare(a[0], b[0]) || compare(a[1], b[1]));
+  }
+
   /** Union of `outLinks(path)` and `backlinks(path)`, deduplicated, excluding `path` itself. */
   neighbors(path: string): string[] {
     const seen = new Set<string>();
@@ -53,4 +68,9 @@ function addEdge(map: Map<string, Set<string>>, from: string, to: string): void 
   const bucket = map.get(from);
   if (bucket === undefined) map.set(from, new Set([to]));
   else bucket.add(to);
+}
+
+/** Code-unit order, the same on every platform and locale (`localeCompare` is neither). */
+function compare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
