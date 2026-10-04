@@ -17,7 +17,7 @@ import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolRe
 /**
  * The process a user starts: `npx @andreymudri/vault-mcp`, or `node
  * <caminho-absoluto>/dist/server/index.js` from a clone. It wires a `VaultScanner`, a `Retriever`
- * and the nine tools of `tools.ts` onto an MCP server speaking over stdio.
+ * and the ten tools of `tools.ts` onto an MCP server speaking over stdio.
  *
  * The package is SCOPED for a concrete reason: the bare `vault-mcp` on npm belongs to somebody else
  * (`vault-mcp@0.0.1`, 443 bytes, a namespace placeholder by another author), so a plain
@@ -84,12 +84,14 @@ export function resolveVaultPath(env: NodeJS.ProcessEnv): string {
 /**
  * A tool answer in the SDK's own result shape.
  *
- * `ToolResult` is deliberately the narrower type — text blocks only — so `tools.ts` never has to
- * import the protocol types; this is the one place the two shapes meet.
+ * `ToolResult` is deliberately the narrower type — text blocks, plus `structuredContent` on the
+ * tools that declare an `outputSchema` — so `tools.ts` never has to import the protocol types; this
+ * is the one place the two shapes meet.
  */
 function toCallToolResult(result: ToolResult): CallToolResult {
   return {
     content: result.content.map((part) => ({ type: 'text' as const, text: part.text })),
+    ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
     ...(result.isError === undefined ? {} : { isError: result.isError }),
   };
 }
@@ -125,7 +127,7 @@ export function toolCallback(
 }
 
 /**
- * The server with the nine tools registered, ready for any transport.
+ * The server with the ten tools registered, ready for any transport.
  *
  * `McpServer` is the SDK's registration front end over its own `Server` (it is reachable as
  * `.server`); it takes the zod schema each tool already carries, publishes the JSON Schema that
@@ -149,7 +151,12 @@ export function createVaultServer(vaultRoot: string, lang: Lang = 'en'): McpServ
   for (const tool of createTools({ retriever, scanner, vaultRoot, messages })) {
     server.registerTool(
       tool.name,
-      { description: tool.description, inputSchema: tool.inputSchema },
+      {
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        // Only `vault_graph` has one; the SDK publishes it and validates each successful answer.
+        ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
+      },
       toolCallback(tool, redact, messages),
     );
   }

@@ -62,6 +62,7 @@ const PT = {
     brokenLinks: 'Links quebrados',
     noNotesMatchingFilters: 'Nenhuma nota com os filtros informados.',
     noNotesPointTo: 'Nenhuma nota aponta para',
+    graphSummary: '{notes} nota(s), {edges} link(s), {orphans} órfã(s).',
     noteCreated: 'Nota criada',
     noteReplaced: 'Nota substituída',
     noteEdited: 'Nota editada',
@@ -186,6 +187,24 @@ const PT = {
         'conectado, achar o MOC que indexa a nota, ou avaliar o impacto de mudar/renomear uma nota.',
       path: 'Caminho relativo ao vault, com `.md`.',
     },
+    vault_graph: {
+      description:
+        'Devolve o grafo de wiki-links do vault: as notas como nós (caminho, título, tipo, status, ' +
+        'tags, área, domínio, graus) e os links entre elas como arestas, também como dado estruturado ' +
+        'para um cliente que desenha o grafo. Use para uma visão geral de como as notas se conectam ' +
+        '(órfãs, aglomerados, o que um filtro abrange), não para responder pergunta: para assunto use ' +
+        'vault_search, e para quem aponta para UMA nota use vault_backlinks. Os filtros escolhem os ' +
+        'nós, e uma aresta só vem quando as duas pontas vêm.',
+      folder: 'Pasta do vault, casada em fronteira de segmento, como em vault_list.',
+      tipo: '`tipo` do frontmatter: wiki, moc, projeto, daily.',
+      tags: 'Todas estas tags precisam estar na nota; a caixa não importa.',
+      status: '`status` do frontmatter, ex.: ativo, pausado.',
+      include_raw: 'Inclui `01-raw/` (captura crua), fora do grafo por padrão.',
+      include_broken: 'Inclui a lista de links quebrados (alvo cru) das notas devolvidas.',
+      max_nodes:
+        'Máximo de notas devolvidas, em ordem de caminho (padrão 2000, até 5000); ' +
+        'acima disso a resposta vem marcada como truncada.',
+    },
     vault_write_note: {
       description:
         'Cria ou substitui uma nota inteira, com frontmatter garantido, e commita no git do vault. ' +
@@ -309,6 +328,7 @@ const EN: Messages = {
     brokenLinks: 'Broken links',
     noNotesMatchingFilters: 'No notes match those filters.',
     noNotesPointTo: 'No notes point to',
+    graphSummary: '{notes} note(s), {edges} link(s), {orphans} orphan(s).',
     noteCreated: 'Note created',
     noteReplaced: 'Note replaced',
     noteEdited: 'Note edited',
@@ -432,6 +452,24 @@ const EN: Messages = {
         'Lists the notes pointing at the given note. Use it to gauge how connected a subject is, to ' +
         'find the MOC that indexes the note, or to weigh the impact of changing or renaming it.',
       path: 'Vault-relative path, with `.md`.',
+    },
+    vault_graph: {
+      description:
+        'Returns the vault\'s wiki-link graph: notes as nodes (path, title, tipo, status, tags, area, ' +
+        'domain, degrees) and the links between them as edges, also as structured data for a client ' +
+        'that draws the graph. Use it for an overview of how notes connect (orphans, clusters, what a ' +
+        'filter covers), not to answer a question: for a subject use vault_search, and for who points ' +
+        'at ONE note use vault_backlinks. Filters pick the nodes, and an edge comes back only when ' +
+        'both of its ends do.',
+      folder: 'Vault folder, matched on a segment boundary, as in vault_list.',
+      tipo: 'Frontmatter `tipo`: wiki, moc, projeto, daily.',
+      tags: 'Every one of these tags must be on the note; case does not matter.',
+      status: 'Frontmatter `status`, e.g. ativo, pausado.',
+      include_raw: 'Include `01-raw/` (unvetted capture), left out of the graph by default.',
+      include_broken: 'Include the list of broken links (raw target) of the returned notes.',
+      max_nodes:
+        'Maximum notes returned, in path order (default 2000, up to 5000); ' +
+        'beyond that the answer is marked as truncated.',
     },
     vault_write_note: {
       description:

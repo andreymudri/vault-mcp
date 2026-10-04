@@ -23,12 +23,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The nine tools, by name: the contract `tools/list` has to answer with. */
+/** The ten tools, by name: the contract `tools/list` has to answer with. */
 const EXPECTED = [
   'vault_search',
   'vault_get_note',
   'vault_list',
   'vault_backlinks',
+  'vault_graph',
   'vault_write_note',
   'vault_edit_note',
   'vault_learn',
@@ -134,7 +135,7 @@ const missing = EXPECTED.filter((name) => !names.includes(name));
 const extra = names.filter((name) => !EXPECTED.includes(name));
 if (missing.length > 0 || extra.length > 0) {
   fail(
-    `tools/list não bate com as nove tools.${missing.length > 0 ? ` Faltando: ${missing.join(', ')}.` : ''}` +
+    `tools/list não bate com as dez tools.${missing.length > 0 ? ` Faltando: ${missing.join(', ')}.` : ''}` +
       `${extra.length > 0 ? ` Sobrando: ${extra.join(', ')}.` : ''}`,
   );
 }

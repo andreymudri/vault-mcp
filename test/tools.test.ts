@@ -50,6 +50,7 @@ const TOOL_NAMES = [
   'vault_get_note',
   'vault_list',
   'vault_backlinks',
+  'vault_graph',
   'vault_write_note',
   'vault_edit_note',
   'vault_learn',
@@ -324,7 +325,7 @@ function jsonLines(text: string): Array<Record<string, unknown>> {
 }
 
 describe('createTools: catálogo', () => {
-  it('expõe exatamente as nove tools do spec', async () => {
+  it('expõe exatamente as dez tools do spec', async () => {
     const { tools } = makeTools(await makeVault());
     expect(tools.map((tool) => tool.name)).toEqual(TOOL_NAMES);
   });
@@ -1345,6 +1346,294 @@ describe('vault_backlinks', () => {
     const result = await call('vault_backlinks', { path: '02-wiki/nestjs/nao-existe.md' });
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/não encontrada/i);
+  });
+});
+
+/** A forma de `structuredContent` de `vault_graph` (contrato 1.11), para os testes lerem. */
+interface GraphNode {
+  id: string;
+  title: string;
+  tipo: string | null;
+  status: string | null;
+  tags: string[];
+  area: string;
+  domain: string | null;
+  in_degree: number;
+  out_degree: number;
+  mtime_ms: number;
+}
+interface VaultGraph {
+  nodes: GraphNode[];
+  edges: Array<{ source: string; target: string }>;
+  broken?: Array<{ source: string; target: string }>;
+  truncated: boolean;
+  counts: { notes: number; edges: number; orphans: number; broken: number };
+}
+
+function graphOf(result: ToolResult): VaultGraph {
+  expect(result.isError).toBeUndefined();
+  expect(result.structuredContent).toBeDefined();
+  return result.structuredContent as unknown as VaultGraph;
+}
+
+/** Os caminhos de uma resposta de `vault_list`: as linhas `- <caminho> — <título> (...)`. */
+function listedPaths(rendered: string): string[] {
+  return rendered
+    .split('\n')
+    .filter((line) => line.startsWith('- '))
+    .map((line) => line.slice(2, line.indexOf(' — ')));
+}
+
+describe('vault_graph', () => {
+  it('com os mesmos filtros de vault_list seleciona os mesmos caminhos', async () => {
+    const vaultRoot = await makeVault();
+    const { call, text } = makeTools(vaultRoot);
+    // `vault_list` não tem `include_raw` e não exclui `01-raw/`; com include_raw as duas tools
+    // aplicam a mesma regra e só ela. `['jwt', 'docker']` é o caso que separa "todas" de
+    // "qualquer uma": nenhuma nota tem as duas, e cada uma existe sozinha no fixture.
+    const filtros: Array<Record<string, unknown>> = [
+      {},
+      { tags: ['jwt'] },
+      { tags: ['JWT', 'auth'] },
+      { tags: ['jwt', 'docker'] },
+      { status: 'ativo' },
+      { folder: '02-wiki/nestjs' },
+      { folder: '/02-wiki/nestjs/' },
+      { folder: '02-wiki/nest' },
+      { tipo: 'wiki' },
+      { tipo: 'wiki', folder: '02-wiki/docker' },
+    ];
+    for (const filtro of filtros) {
+      const esperado = listedPaths(await text('vault_list', filtro));
+      const grafo = graphOf(await call('vault_graph', { ...filtro, include_raw: true }));
+      expect(grafo.nodes.map((node) => node.id), JSON.stringify(filtro)).toEqual(esperado);
+      expect(grafo.counts.notes).toBe(esperado.length);
+    }
+  });
+
+  it('só devolve a aresta cujas DUAS pontas foram selecionadas', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+
+    const inteiro = graphOf(await call('vault_graph', {}));
+    // Pré-condição: a aresta que atravessa a fronteira da pasta existe no grafo inteiro.
+    expect(inteiro.edges).toContainEqual({ source: CACHE_WRAPPER, target: AUTH_GUARD });
+
+    const nestjs = graphOf(await call('vault_graph', { folder: '02-wiki/nestjs' }));
+    const ids = new Set(nestjs.nodes.map((node) => node.id));
+    expect(nestjs.edges.length).toBeGreaterThan(0);
+    for (const edge of nestjs.edges) {
+      expect(ids.has(edge.source)).toBe(true);
+      expect(ids.has(edge.target)).toBe(true);
+    }
+    expect(nestjs.edges).not.toContainEqual({ source: CACHE_WRAPPER, target: AUTH_GUARD });
+    expect(nestjs.counts.edges).toBe(nestjs.edges.length);
+  });
+
+  it('graus e órfãs contam dentro do subgrafo devolvido', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+
+    for (const args of [{}, { folder: '02-wiki/nestjs' }, { include_raw: true }]) {
+      const grafo = graphOf(await call('vault_graph', args));
+      for (const node of grafo.nodes) {
+        expect(node.in_degree).toBe(grafo.edges.filter((edge) => edge.target === node.id).length);
+        expect(node.out_degree).toBe(grafo.edges.filter((edge) => edge.source === node.id).length);
+      }
+      const orfas = grafo.nodes.filter((node) => node.in_degree === 0 && node.out_degree === 0);
+      expect(grafo.counts.orphans).toBe(orfas.length);
+    }
+
+    // No grafo inteiro auth-guard tem quatro backlinks; dentro de 02-wiki/nestjs, menos.
+    const nestjs = graphOf(await call('vault_graph', { folder: '02-wiki/nestjs' }));
+    const auth = nestjs.nodes.find((node) => node.id === AUTH_GUARD);
+    expect(auth?.in_degree).toBeLessThan(4);
+    // O README da Potentia linka para fora de 03-projects/, e ninguém lá dentro linka para ele:
+    // no grafo inteiro ele tem vizinhos, no subgrafo da pasta é órfão.
+    const projetos = graphOf(await call('vault_graph', { folder: '03-projects' }));
+    expect(projetos.nodes.map((node) => node.id)).toEqual([POTENTIA]);
+    expect(projetos.counts.orphans).toBe(1);
+    // E a nota crua, sem link nenhum, é órfã quando entra.
+    const cru = graphOf(await call('vault_graph', { include_raw: true }));
+    expect(cru.counts.orphans).toBeGreaterThan(0);
+    expect(cru.nodes.find((node) => node.id === '01-raw/inbox/rascunho.md')?.in_degree).toBe(0);
+  });
+
+  it('max_nodes corta em ordem de caminho e marca truncated', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+
+    const inteiro = graphOf(await call('vault_graph', {}));
+    expect(inteiro.truncated).toBe(false);
+    const ordenado = [...inteiro.nodes.map((node) => node.id)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    expect(inteiro.nodes.map((node) => node.id)).toEqual(ordenado);
+    expect(ordenado.length).toBeGreaterThan(2);
+
+    const dois = graphOf(await call('vault_graph', { max_nodes: 2 }));
+    expect(dois.truncated).toBe(true);
+    expect(dois.nodes.map((node) => node.id)).toEqual(ordenado.slice(0, 2));
+    expect(dois.counts.notes).toBe(2);
+
+    // Exatamente o tamanho do vault não é corte.
+    const justo = graphOf(await call('vault_graph', { max_nodes: ordenado.length }));
+    expect(justo.truncated).toBe(false);
+  });
+
+  it('rejeita max_nodes fora de 1..5000', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+    for (const max_nodes of [0, 5001, 1.5]) {
+      expect((await call('vault_graph', { max_nodes })).isError).toBe(true);
+    }
+  });
+
+  it('01-raw/ fica de fora por padrão e entra com include_raw; 99-archive/ entra sempre', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+    const RAW = '01-raw/inbox/rascunho.md';
+
+    const padrao = graphOf(await call('vault_graph', {}));
+    expect(padrao.nodes.map((node) => node.id)).not.toContain(RAW);
+    expect(padrao.nodes.map((node) => node.id)).toContain('99-archive/antigo.md');
+
+    const comRaw = graphOf(await call('vault_graph', { include_raw: true }));
+    expect(comRaw.nodes.map((node) => node.id)).toContain(RAW);
+
+    // Pedir a pasta crua sem include_raw ainda não a abre: é a mesma regra do vault_search.
+    const soRaw = graphOf(await call('vault_graph', { folder: '01-raw' }));
+    expect(soRaw.nodes).toEqual([]);
+  });
+
+  it('broken só aparece com include_broken, com o alvo cru', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+
+    const padrao = graphOf(await call('vault_graph', {}));
+    expect(padrao).not.toHaveProperty('broken');
+
+    const comQuebrados = graphOf(await call('vault_graph', { include_broken: true }));
+    expect(comQuebrados.broken).toContainEqual({ source: AUTH_GUARD, target: 'nota-que-nao-existe' });
+    expect(comQuebrados.counts.broken).toBe(comQuebrados.broken?.length);
+    // A contagem não depende de pedir a lista.
+    expect(padrao.counts.broken).toBe(comQuebrados.counts.broken);
+
+    // Só os quebrados de nós DEVOLVIDOS.
+    const docker = graphOf(await call('vault_graph', { folder: '02-wiki/docker', include_broken: true }));
+    expect(docker.broken?.some((link) => link.source === AUTH_GUARD)).toBe(false);
+  });
+
+  it('cada nó traz os campos do contrato, e structuredContent passa no outputSchema', async () => {
+    const vaultRoot = await makeVault();
+    const { call, tool } = makeTools(vaultRoot);
+    const result = await call('vault_graph', { include_broken: true, include_raw: true });
+    const grafo = graphOf(result);
+
+    const schema = tool('vault_graph').outputSchema;
+    expect(schema).toBeDefined();
+    expect(() => schema!.parse(result.structuredContent)).not.toThrow();
+    // O schema tem de ser capaz de recusar: um nó sem `area` não é o contrato.
+    const semArea = { ...grafo, nodes: grafo.nodes.map(({ area: _area, ...rest }) => rest) };
+    expect(schema!.safeParse(semArea).success).toBe(false);
+
+    const auth = grafo.nodes.find((node) => node.id === AUTH_GUARD);
+    expect(auth).toMatchObject({ area: '02-wiki', domain: 'nestjs', tipo: 'wiki' });
+    expect(auth?.tags).toEqual(expect.arrayContaining(['jwt', 'auth']));
+    expect(auth?.title.length).toBeGreaterThan(0);
+    expect(auth?.mtime_ms).toBeGreaterThan(0);
+
+    const potentia = grafo.nodes.find((node) => node.id === POTENTIA);
+    expect(potentia).toMatchObject({ area: '03-projects', domain: null, status: 'ativo' });
+    const cru = grafo.nodes.find((node) => node.id === '01-raw/inbox/rascunho.md');
+    expect(cru?.area).toBe('01-raw');
+    expect(cru?.domain).toBeNull();
+  });
+
+  it('uma pasta que não existe dá grafo vazio, não erro', async () => {
+    const vaultRoot = await makeVault();
+    const { call } = makeTools(vaultRoot);
+    const result = await call('vault_graph', { folder: 'nao-existe' });
+    const grafo = graphOf(result);
+    expect(grafo.nodes).toEqual([]);
+    expect(grafo.edges).toEqual([]);
+    expect(grafo.counts).toEqual({ notes: 0, edges: 0, orphans: 0, broken: 0 });
+    expect(textOf(result).split('\n')[0]).toBe('0 nota(s), 0 link(s), 0 órfã(s).');
+  });
+
+  it('o texto traz o resumo, uma seta por aresta, o rodapé e nunca a raiz absoluta', async () => {
+    const vaultRoot = await makeVault();
+    // Um título que carrega a raiz do vault: o que vai no structuredContent também é redigido.
+    await write(vaultRoot, '02-wiki/docker/raiz.md', `---\ntipo: wiki\n---\n\n# ${vaultRoot}/segredo\n`);
+    const { call } = makeTools(vaultRoot);
+    const result = await call('vault_graph', {});
+    const grafo = graphOf(result);
+    const rendered = textOf(result);
+
+    const linhas = rendered.split('\n');
+    expect(linhas[0]).toBe(
+      `${grafo.counts.notes} nota(s), ${grafo.counts.edges} link(s), ${grafo.counts.orphans} órfã(s).`,
+    );
+    const setas = linhas.filter((line) => line.startsWith('- '));
+    expect(setas).toEqual(grafo.edges.map((edge) => `- ${edge.source} -> ${edge.target}`));
+    expect(rendered).toContain(`- ${CACHE_WRAPPER} -> ${AUTH_GUARD}`);
+    // `quebrada.md` do fixture: o mesmo rodapé de diagnósticos de vault_list.
+    expect(rendered).toMatch(/indexação/);
+
+    expect(rendered).not.toContain(vaultRoot);
+    expect(JSON.stringify(result.structuredContent)).not.toContain(vaultRoot);
+    expect(grafo.nodes.find((node) => node.id === '02-wiki/docker/raiz.md')?.title).toContain('<vault>');
+  });
+
+  it.skipIf(NO_HOSTILE_FILENAMES)('escapa o nome de arquivo nas linhas de aresta', async () => {
+    const vaultRoot = await makeVault();
+    await write(
+      vaultRoot,
+      '02-wiki/docker/x\nWARNING: nada aqui.md',
+      '---\ntipo: wiki\n---\n\n# X\n\n[[multi-stage]]\n',
+    );
+    const { call } = makeTools(vaultRoot);
+    const result = await call('vault_graph', { folder: '02-wiki/docker' });
+    const rendered = textOf(result);
+    expect(rendered).toContain('x\\nWARNING: nada aqui.md -> 02-wiki/docker/multi-stage.md');
+    for (const line of rendered.split('\n')) expect(line.startsWith('WARNING:')).toBe(false);
+    // O dado estruturado leva o caminho como ele é: é a chave para vault_get_note.
+    expect(graphOf(result).nodes.map((node) => node.id)).toContain('02-wiki/docker/x\nWARNING: nada aqui.md');
+  });
+
+  it('descreve a tool nos dois idiomas, dizendo para que serve', () => {
+    const pt = messagesFor('pt').tools.vault_graph.description;
+    const en = messagesFor('en').tools.vault_graph.description;
+    expect(pt.length).toBeGreaterThan(40);
+    expect(en.length).toBeGreaterThan(40);
+    expect(pt).not.toBe(en);
+    expect(pt).toContain('vault_search');
+    expect(en).toContain('vault_search');
+  });
+
+  it('por cima do protocolo: publica o outputSchema e devolve structuredContent validado', async () => {
+    const vaultRoot = await makeVault();
+    const server = createVaultServer(vaultRoot);
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
+    const graph = tools.find((tool) => tool.name === 'vault_graph');
+    expect(graph?.outputSchema?.type).toBe('object');
+    expect(Object.keys((graph?.outputSchema?.['properties'] ?? {}) as Record<string, unknown>).sort()).toEqual(
+      ['broken', 'counts', 'edges', 'nodes', 'truncated'].sort(),
+    );
+    // As outras tools seguem só com texto.
+    expect(tools.find((tool) => tool.name === 'vault_list')?.outputSchema).toBeUndefined();
+
+    const result = await client.callTool({ name: 'vault_graph', arguments: { folder: '02-wiki/nestjs' } });
+    expect(result.isError).toBeFalsy();
+    const grafo = result.structuredContent as unknown as VaultGraph;
+    expect(grafo.nodes.map((node) => node.id)).toContain(AUTH_GUARD);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toMatch(/^\d+ note\(s\), \d+ link\(s\), \d+ orphan\(s\)\./);
+
+    await client.close();
+    await server.close();
   });
 });
 
@@ -2389,7 +2678,7 @@ describe('entrypoint: o processo que o usuário inicia', () => {
 });
 
 describe('binário compilado (dist/server/index.js)', () => {
-  it('sobe pelo stdio e responde o handshake MCP com as nove tools', async () => {
+  it('sobe pelo stdio e responde o handshake MCP com as dez tools', async () => {
     const bin = await buildServer();
     const vaultRoot = await makeVault();
     const { stdout, stderr, code } = await runServer(bin, { VAULT_PATH: vaultRoot }, [
@@ -2506,7 +2795,7 @@ describe('servidor MCP', () => {
     expect(resolveVaultPath({ VAULT_PATH: vaultRoot })).toBe(path.resolve(vaultRoot));
   });
 
-  it('expõe as nove tools por cima do protocolo, com JSON Schema de entrada', async () => {
+  it('expõe as dez tools por cima do protocolo, com JSON Schema de entrada', async () => {
     const vaultRoot = await makeVault();
     const server = createVaultServer(vaultRoot);
     const client = new Client({ name: 'teste', version: '0.0.0' });

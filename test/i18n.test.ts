@@ -94,10 +94,10 @@ describe('catálogos', () => {
     for (const lang of LANGS) walk(messagesFor(lang), lang);
   });
 
-  it('as nove tools têm descrição nos dois idiomas', () => {
+  it('as dez tools têm descrição nos dois idiomas', () => {
     for (const lang of LANGS) {
       const { tools: t } = messagesFor(lang);
-      expect(Object.keys(t)).toHaveLength(9);
+      expect(Object.keys(t)).toHaveLength(10);
     }
   });
 });

@@ -37,8 +37,10 @@ export interface SearchOptions {
  * Notes under this prefix are unprocessed capture (clippings, inbox scraps). They are indexed —
  * a user who knows what they are looking for must be able to find them — but they stay out of
  * ordinary results, where they would compete with curated notes on raw term frequency alone.
+ *
+ * Exported for `vault_graph` in `src/server/tools.ts`, which leaves `01-raw/` out by the same rule.
  */
-const RAW_PREFIX = '01-raw/';
+export const RAW_PREFIX = '01-raw/';
 
 /**
  * Ceiling on how many query terms reach the index, applied here because `search` in

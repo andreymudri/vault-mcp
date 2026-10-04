@@ -8,7 +8,7 @@ import { LinkGraph } from '../graph/graph.js';
 import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
 import { messagesFor, type Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
-import { hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
+import { RAW_PREFIX, hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { LearnError, learn } from '../write/learn.js';
@@ -17,8 +17,10 @@ import { deleteNote, moveNote, type DeleteResult, type MoveResult } from '../wri
 import { EditError, editNote, writeNote, type WriteResult } from '../write/writer.js';
 
 /**
- * The nine tools the MCP server exposes, as plain objects: a name, a description written for an
- * agent to route on, a zod schema and a handler that answers with TEXT.
+ * The ten tools the MCP server exposes, as plain objects: a name, a description written for an
+ * agent to route on, a zod schema and a handler that answers with TEXT. One of them, `vault_graph`,
+ * also answers `structuredContent` under an `outputSchema`, because its reader is a program that
+ * draws the graph rather than an agent that reads it.
  *
  * Nothing here talks to a transport. `createTools` is handed the same `VaultScanner` the
  * `Retriever` owns and returns definitions whose handlers can be called directly, which is what
@@ -30,6 +32,8 @@ export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
   /** True for a refusal the agent should read and react to, never for a crash. */
   isError?: boolean;
+  /** The same answer as data, for the tools that declare an `outputSchema`. Never on an error. */
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface ToolDefinition {
@@ -37,6 +41,11 @@ export interface ToolDefinition {
   description: string;
   /** A zod object schema. `index.ts` converts it to JSON Schema for `tools/list`. */
   inputSchema: z.AnyZodObject;
+  /**
+   * A zod object schema for `structuredContent`, on the tools that answer data as well as text.
+   * `index.ts` publishes it in `tools/list`, and the SDK validates every successful answer with it.
+   */
+  outputSchema?: z.AnyZodObject;
   handler: (args: unknown) => Promise<ToolResult>;
 }
 
@@ -483,18 +492,64 @@ function define<Shape extends z.ZodRawShape>(
   shape: Shape,
   run: (input: z.infer<z.ZodObject<Shape>>) => Promise<string>,
 ): ToolDefinition {
+  return defineStructured(redact, m, name, description, shape, undefined, async (input) => ({
+    text: await run(input),
+  }));
+}
+
+/**
+ * Every string inside `value` passed through `redact`, at any depth.
+ *
+ * `structuredContent` is JSON, so a newline in it forges nothing and `forMessage` would only corrupt
+ * a path a client uses as a key. The absolute root is a different matter: it leaks the same way in
+ * a JSON string as in a line of text, so redaction applies to both channels.
+ */
+function redactDeep(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map((item) => redactDeep(item, redact));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v, redact)]));
+  }
+  return value;
+}
+
+/**
+ * `define` for a tool that answers data as well as text: `run` returns both, the text goes out as
+ * every other tool's does and the data as `structuredContent`, under `outputSchema`.
+ *
+ * `define` delegates here with no schema, so the tools that answer only text keep exactly the
+ * path they had. Errors take the same route in both: an `isError` answer carries text only, which
+ * is also what the SDK expects (it skips output validation on errors).
+ */
+function defineStructured<Shape extends z.ZodRawShape>(
+  redact: (text: string) => string,
+  m: Messages,
+  name: string,
+  description: string,
+  shape: Shape,
+  outputSchema: z.AnyZodObject | undefined,
+  run: (
+    input: z.infer<z.ZodObject<Shape>>,
+  ) => Promise<{ text: string; structured?: Record<string, unknown> }>,
+): ToolDefinition {
   const inputSchema = z.object(shape);
   return {
     name,
     description,
     inputSchema,
+    ...(outputSchema === undefined ? {} : { outputSchema }),
     handler: async (args) => {
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
         return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m))}`);
       }
       try {
-        return ok(await run(parsed.data));
+        const { text, structured } = await run(parsed.data);
+        if (structured === undefined) return ok(text);
+        return {
+          ...ok(text),
+          structuredContent: redactDeep(structured, redact) as Record<string, unknown>,
+        };
       } catch (err) {
         // Redacted BEFORE escaping: the errors that carry an absolute root come from `paths.ts` and
         // `git.ts`, which build it from the real filesystem, so the root reaches here unescaped.
@@ -518,6 +573,33 @@ function stringField(note: Note, key: string): string | undefined {
 function noteTags(note: Note): string[] {
   const tags = note.frontmatter.tags;
   return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string') : [];
+}
+
+/** The metadata filters `vault_list` and `vault_graph` share. */
+interface NoteFilters {
+  tipo?: string | undefined;
+  status?: string | undefined;
+  folder?: string | undefined;
+  tags?: string[] | undefined;
+}
+
+/**
+ * Whether `note` passes the metadata filters: the one rule `vault_list` and `vault_graph` both
+ * apply. The tag rule inside it is `hasAllTags` (src/retrieval/retrieval.ts), the SAME one
+ * `vault_search` applies: two copies would disagree in silence about what `tags: ['NestJS']`
+ * selects, and a graph drawing a different set of notes than the list for the same filters would
+ * be exactly that bug.
+ */
+function matchesFilters(note: Note, filters: NoteFilters): boolean {
+  if (filters.tipo !== undefined && stringField(note, 'tipo') !== filters.tipo) return false;
+  if (filters.status !== undefined && stringField(note, 'status') !== filters.status) return false;
+  if (filters.folder !== undefined && !inFolder(note.path, filters.folder)) return false;
+  return hasAllTags(noteTags(note), filters.tags ?? []);
+}
+
+/** Code-unit order, the same on every platform and locale. */
+function byPath(a: Note, b: Note): number {
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 }
 
 /**
@@ -1264,6 +1346,52 @@ async function withWriteDetail<T>(
   }
 }
 
+/** Default and ceiling of `vault_graph`'s `max_nodes` (contract 1.11). */
+const DEFAULT_GRAPH_NODES = 2000;
+const MAX_GRAPH_NODES = 5000;
+
+const GRAPH_LINK = z.object({ source: z.string(), target: z.string() }).strict();
+
+/**
+ * The `structuredContent` of `vault_graph`, as fleetmates deck contract 1.11 fixes it.
+ *
+ * Strict objects: a client drawing the graph reads these keys by name, so a field that drifts is a
+ * schema failure in the SDK, not a node that silently loses its colour. `broken` is present only
+ * with `include_broken`; `counts.broken` is always the number of broken links of the returned
+ * nodes, so a client can show it without asking for the list.
+ */
+const VAULT_GRAPH_OUTPUT = z
+  .object({
+    nodes: z.array(
+      z
+        .object({
+          id: z.string(),
+          title: z.string(),
+          tipo: z.string().nullable(),
+          status: z.string().nullable(),
+          tags: z.array(z.string()),
+          area: z.string(),
+          domain: z.string().nullable(),
+          in_degree: z.number().int().nonnegative(),
+          out_degree: z.number().int().nonnegative(),
+          mtime_ms: z.number(),
+        })
+        .strict(),
+    ),
+    edges: z.array(GRAPH_LINK),
+    broken: z.array(GRAPH_LINK).optional(),
+    truncated: z.boolean(),
+    counts: z
+      .object({
+        notes: z.number().int().nonnegative(),
+        edges: z.number().int().nonnegative(),
+        orphans: z.number().int().nonnegative(),
+        broken: z.number().int().nonnegative(),
+      })
+      .strict(),
+  })
+  .strict();
+
 export function createTools(deps: ToolDeps): ToolDefinition[] {
   const m = deps.messages;
   const writes = new WriteQueue();
@@ -1433,20 +1561,12 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
     async (input) => {
       refreshVault(deps);
-      // A regra de tags é a do `hasAllTags` (src/retrieval/retrieval.ts), a MESMA que o
-      // `vault_search` aplica: duas cópias dela discordariam em silêncio sobre o que
-      // `tags: ['NestJS']` seleciona.
-      const wanted = input.tags ?? [];
+      // A regra é a de `matchesFilters`, a MESMA que o `vault_graph` aplica; a de tags dentro
+      // dela é a do `vault_search` (`hasAllTags`).
       const notes = deps.scanner
         .allNotes()
-        .filter((note) => {
-          if (input.tipo !== undefined && stringField(note, 'tipo') !== input.tipo) return false;
-          if (input.status !== undefined && stringField(note, 'status') !== input.status) return false;
-          if (input.folder !== undefined && !inFolder(note.path, input.folder)) return false;
-          if (!hasAllTags(noteTags(note), wanted)) return false;
-          return true;
-        })
-        .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+        .filter((note) => matchesFilters(note, input))
+        .sort(byPath);
 
       if (notes.length === 0) {
         return withDiagnostics(m.results.noNotesMatchingFilters, deps, redact, m);
@@ -1493,6 +1613,102 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         return forMessage(`- ${path}${note === undefined ? '' : ` — ${note.title}`}`);
       });
       return [`${backlinks.length} ${m.results.notesPointTo} ${forMessage(target.path)}:`, ...lines].join('\n');
+    },
+  );
+
+  const vaultGraph = defineStructured(
+    redact,
+    m,
+    'vault_graph',
+    m.tools.vault_graph.description,
+    {
+      folder: z.string().optional().describe(m.tools.vault_graph.folder),
+      tipo: z.string().optional().describe(m.tools.vault_graph.tipo),
+      tags: z.array(z.string()).optional().describe(m.tools.vault_graph.tags),
+      status: z.string().optional().describe(m.tools.vault_graph.status),
+      include_raw: z.boolean().optional().describe(m.tools.vault_graph.include_raw),
+      include_broken: z.boolean().optional().describe(m.tools.vault_graph.include_broken),
+      max_nodes: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_GRAPH_NODES)
+        .optional()
+        .describe(m.tools.vault_graph.max_nodes),
+    },
+    VAULT_GRAPH_OUTPUT,
+    async (input) => {
+      refreshVault(deps);
+      // Rebuilt per call, for the reason `vault_backlinks` gives.
+      const graph = new LinkGraph();
+      graph.build(deps.scanner.allNotes());
+
+      // Filters select NODES, with the rule `vault_list` applies; `01-raw/` is left out unless asked
+      // for, like in `vault_search`, and `99-archive/` stays in (it is findable, only demoted in
+      // ranking).
+      const selected = deps.scanner
+        .allNotes()
+        .filter((note) => input.include_raw === true || !note.path.startsWith(RAW_PREFIX))
+        .filter((note) => matchesFilters(note, input))
+        .sort(byPath);
+      const max = input.max_nodes ?? DEFAULT_GRAPH_NODES;
+      const truncated = selected.length > max;
+      const notes = truncated ? selected.slice(0, max) : selected;
+      const ids = new Set(notes.map((note) => note.path));
+
+      // An edge only when BOTH ends are returned: a filtered view with one end missing would draw
+      // a line to nothing. Degrees count within that subgraph, for the same reason.
+      const edges = graph
+        .edges()
+        .filter(([source, target]) => ids.has(source) && ids.has(target))
+        .map(([source, target]) => ({ source, target }));
+      const inDegree = new Map<string, number>();
+      const outDegree = new Map<string, number>();
+      for (const { source, target } of edges) {
+        outDegree.set(source, (outDegree.get(source) ?? 0) + 1);
+        inDegree.set(target, (inDegree.get(target) ?? 0) + 1);
+      }
+
+      const nodes = notes.map((note) => {
+        const segments = note.path.split('/');
+        return {
+          id: note.path,
+          title: note.title,
+          tipo: stringField(note, 'tipo') ?? null,
+          status: stringField(note, 'status') ?? null,
+          tags: noteTags(note),
+          // A note at the vault root has no area: its first segment is its own file name.
+          area: segments.length > 1 ? segments[0]! : '',
+          domain: segments.length > 2 && segments[0] === '02-wiki' ? segments[1]! : null,
+          in_degree: inDegree.get(note.path) ?? 0,
+          out_degree: outDegree.get(note.path) ?? 0,
+          mtime_ms: note.mtimeMs,
+        };
+      });
+      const broken = notes.flatMap((note) =>
+        note.brokenLinks.map((target) => ({ source: note.path, target })),
+      );
+      const orphans = nodes.filter((node) => node.in_degree === 0 && node.out_degree === 0).length;
+      const counts = { notes: nodes.length, edges: edges.length, orphans, broken: broken.length };
+
+      const text = [
+        renderTemplate(m.results.graphSummary, {
+          notes: counts.notes,
+          edges: counts.edges,
+          orphans: counts.orphans,
+        }),
+        ...edges.map(({ source, target }) => forMessage(`- ${source} -> ${target}`)),
+      ].join('\n');
+      return {
+        text: withDiagnostics(text, deps, redact, m),
+        structured: {
+          nodes,
+          edges,
+          ...(input.include_broken === true ? { broken } : {}),
+          truncated,
+          counts,
+        },
+      };
     },
   );
 
@@ -1709,6 +1925,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     vaultGetNote,
     vaultList,
     vaultBacklinks,
+    vaultGraph,
     vaultWriteNote,
     vaultEditNote,
     vaultLearn,
