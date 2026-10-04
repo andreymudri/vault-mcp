@@ -262,7 +262,7 @@ turned on:
   credential prompt, so a prompt would be a hang. Credentials have to come from a helper (for example
   `gh auth git-credential`) or from an SSH key
 
-## The Nine Tools
+## The Ten Tools
 
 | Tool | Input | When to Call |
 |------|-------|--------------|
@@ -270,6 +270,7 @@ turned on:
 | `vault_get_note` | `path` (relative path, e.g. `02-wiki/nestjs/auth-guard.md`); `offset` (optional) | After `vault_search` when the snippet is not enough, or before editing a note. Returns the note with frontmatter, resolved links and broken links. The body is capped at 20,000 characters per answer; a larger note is marked with `[…note cut at 20000 of <total> characters; continue with offset: <next>]`, and that `offset` reads the rest — page by page, never splitting a surrogate pair. A continuation page repeats the path, not the frontmatter. |
 | `vault_list` | `tipo`, `tags`, `status`, `folder` (all optional) | Inventory of notes by metadata (e.g. "which projects are active?", "which notes carry the jwt tag?"). Does not search content — use `vault_search` for that. |
 | `vault_backlinks` | `path` (relative path) | Measure how connected a subject is, find the MOC that indexes a note, assess the impact of a change. Deduplicates links: a note that links the target twice counts as one backlink. |
+| `vault_graph` | `folder`, `tipo`, `tags`, `status`, `include_raw`, `include_broken`, `max_nodes` (all optional) | An overview of how notes connect — orphans, clusters, what a filter covers — for a client that draws the graph, not to answer a question (use `vault_search` for a subject, `vault_backlinks` for who points at one note). Filters pick the nodes by the same rule as `vault_list`; `01-raw/` is left out unless `include_raw`, `99-archive/` stays in. An edge comes back only when both of its ends do, and degrees count within that subgraph. Besides the text (`<n> note(s), <m> link(s), <k> orphan(s).` and one `- source -> target` line per edge), it answers `structuredContent` under a published `outputSchema`: `nodes` (path, title, tipo, status, tags, area, domain, in/out degree, mtime), `edges`, `broken` (only with `include_broken`), `counts` and a `truncated` flag, set when `max_nodes` (default 2000, up to 5000, in path order) cut the list. |
 | `vault_write_note` | `path`, `content` (required); `frontmatter` (optional) | Create or replace a whole note. Frontmatter is guaranteed. Commits automatically. To change a passage, use `vault_edit_note`; to record a learning, use `vault_learn`. |
 | `vault_edit_note` | `path`, `old_text`, `new_text` (required) | Replace an exact passage of a note. Fails if the passage does not exist or appears more than once — in that case, include more context in `old_text`. |
 | `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (required); `projeto`, `tags`, `links`, `confirm_novo_dominio` (optional) | Record a learning during the session (architecture decision, pattern, gotcha, trap). Do not ask where to save — the server decides. Shows the diff to the user. **If the domain does not exist in `02-wiki/`, the call fails; use `confirm_novo_dominio: true` to create it.** |
@@ -392,7 +393,7 @@ After a change to the code:
 npm run build     # Compiles TypeScript (src/ only, emits dist/)
 npm run typecheck # tsc over src/ AND test/, without emitting
 npm test          # Runs the typecheck (pretest) and then the vitest suite
-npm run smoke     # Starts the built dist/ and demands the nine tools over stdio
+npm run smoke     # Starts the built dist/ and demands the ten tools over stdio
 npm run dev       # Watch mode (if needed)
 ```
 
@@ -408,7 +409,7 @@ not an indefinite stall with no exit code at all.
 
 `npm run smoke` is the check the suite cannot be: it spawns the compiled `dist/server/index.js` as a
 program against a throwaway vault, completes the MCP handshake and requires `tools/list` to answer
-with exactly the nine tools. It covers the entrypoint deciding it is a library and starting nothing —
+with exactly the ten tools. It covers the entrypoint deciding it is a library and starting nothing —
 a clean exit 0 to a shell, an eternal wait to a client — and it is what makes `engines.node >= 20` a
 verified claim: CI runs it on Node 20 as well as on the pinned 26, since the suite itself cannot run
 on 20 (`test/frontmatter.test.ts` depends on the runtime's type stripping) while compiled JavaScript

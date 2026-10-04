@@ -252,7 +252,7 @@ ligado:
   prompt de credencial, então um prompt seria um travamento. As credenciais precisam vir de um
   helper (por exemplo `gh auth git-credential`) ou de uma chave SSH
 
-## As Nove Tools
+## As Dez Tools
 
 | Tool | Entrada | Quando Chamar |
 |------|---------|---------------|
@@ -260,6 +260,7 @@ ligado:
 | `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`); `offset` (opcional) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota com frontmatter, links resolvidos e links quebrados. O corpo é limitado a 20.000 caracteres POR RESPOSTA; nota maior é marcada com `[…nota cortada em 20000 de <total> caracteres; continue com offset: <next>]`, e esse `offset` devolve o resto — página a página, sem nunca partir um par surrogate. A página de continuação repete o caminho, não o frontmatter. |
 | `vault_list` | `tipo`, `tags`, `status`, `folder` (todos opcionais) | Inventário de notas por metadado (ex.: "quais projetos ativos?", "quais notas têm a tag jwt?"). Não busca por conteúdo — use `vault_search` para isso. |
 | `vault_backlinks` | `path` (caminho relativo) | Medir conectividade de um assunto, achar o MOC que indexa uma nota, avaliar impacto de mudança. Deduplica links: uma nota que linka o alvo duas vezes conta como um backlink. |
+| `vault_graph` | `folder`, `tipo`, `tags`, `status`, `include_raw`, `include_broken`, `max_nodes` (todos opcionais) | Visão geral de como as notas se conectam — órfãs, aglomerados, o que um filtro abrange — para um cliente que desenha o grafo, não para responder pergunta (para assunto use `vault_search`; para quem aponta para uma nota, `vault_backlinks`). Os filtros escolhem os nós pela mesma regra do `vault_list`; `01-raw/` fica de fora salvo `include_raw`, e `99-archive/` entra. Uma aresta só vem quando as duas pontas vêm, e os graus contam dentro desse subgrafo. Além do texto (`<n> nota(s), <m> link(s), <k> órfã(s).` e uma linha `- origem -> destino` por aresta), responde `structuredContent` sob um `outputSchema` publicado: `nodes` (caminho, título, tipo, status, tags, área, domínio, graus de entrada e saída, mtime), `edges`, `broken` (só com `include_broken`), `counts` e a marca `truncated`, ligada quando `max_nodes` (padrão 2000, até 5000, em ordem de caminho) cortou a lista. |
 | `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
 | `vault_edit_note` | `path`, `old_text`, `new_text` (obrigatórios) | Substituir um trecho exato de uma nota. Falha se o trecho não existir ou aparecer mais de uma vez — nesse caso, inclua mais contexto em `old_text`. |
 | `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (obrigatórios); `projeto`, `tags`, `links`, `confirm_novo_dominio` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. **Se o domínio não existe em `02-wiki/`, a chamada falha; use `confirm_novo_dominio: true` para criar.** |
@@ -381,7 +382,7 @@ Depois de uma mudança no código:
 npm run build     # Compila TypeScript (só src/, emite dist/)
 npm run typecheck # tsc sobre src/ E test/, sem emitir
 npm test          # Roda o typecheck (pretest) e depois os testes vitest
-npm run smoke     # Sobe o dist/ compilado e exige as nove tools por stdio
+npm run smoke     # Sobe o dist/ compilado e exige as dez tools por stdio
 npm run dev       # Watch mode (se necessário)
 ```
 
@@ -397,7 +398,7 @@ suíte travada vira exit 124, e não uma parada indefinida sem exit code nenhum.
 
 O `npm run smoke` é a checagem que a suíte não consegue ser: sobe o `dist/server/index.js` compilado
 como PROGRAMA contra um vault descartável, completa o handshake do MCP e exige que o `tools/list`
-responda exatamente as nove tools. Cobre o entrypoint que se acha biblioteca e não inicia nada — um
+responda exatamente as dez tools. Cobre o entrypoint que se acha biblioteca e não inicia nada — um
 exit 0 limpo para o shell, uma espera eterna para o cliente — e é o que torna `engines.node >= 20`
 uma afirmação verificada: o CI o roda no Node 20 além do 26 fixado, já que a suíte não roda no 20
 (`test/frontmatter.test.ts` depende do type stripping do runtime) e JavaScript compilado roda.
