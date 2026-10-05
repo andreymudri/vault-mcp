@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 
+import type { PlannedChange } from './preview.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
 import {
@@ -575,6 +576,8 @@ function dominioProblem(dominio: string): string | undefined {
 }
 
 export interface PropagateOptions {
+  preview?: boolean;
+  overlay?: Map<string, string>;
   vaultRoot: string;
   dominio: string;
   slug: string;
@@ -593,6 +596,7 @@ export interface PropagateResult {
   written: string[];
   diffs: string[];
   warnings: string[];
+  changes?: PlannedChange[];
 }
 
 /** Everything one target needs, so the read/transform/write/report dance lives in one place. */
@@ -618,6 +622,7 @@ async function applyTarget(
   vaultRoot: string,
   target: Target,
   result: PropagateResult,
+  opts: PropagateOptions,
 ): Promise<void> {
   try {
     const absPath = await guardedPath(vaultRoot, target.relPath);
@@ -635,9 +640,9 @@ async function applyTarget(
       throw coded(new PathGuardError('alvo não é um arquivo comum (link, diretório ou dispositivo)'), 'path.notARegularFile');
     }
 
-    let before = '';
-    let exists = kind === 'file';
-    if (exists) {
+    let before = opts.overlay?.get(absPath) ?? '';
+    let exists = opts.overlay?.has(absPath) || kind === 'file';
+    if (exists && !opts.overlay?.has(absPath)) {
       try {
         before = await fs.readFile(absPath, 'utf8');
       } catch (err) {
@@ -659,7 +664,8 @@ async function applyTarget(
     const after = target.transform(before, hasContent);
     if (after === before) return;
 
-    await atomicWrite(absPath, after);
+    if (opts.preview !== true) await atomicWrite(absPath, after);
+    else (result.changes ??= []).push({ path: target.relPath, before, after, diff: unifiedDiff(before, after, target.relPath) });
     result.written.push(absPath);
     result.diffs.push(unifiedDiff(before, after, target.relPath));
   } catch (err) {
@@ -714,7 +720,7 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
           return bumpAtualizado(text, date);
         },
       },
-      result,
+      result, opts,
     );
 
     // 2. The knowledge index, ONLY for a domain that did not exist before. A domain
@@ -734,7 +740,7 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
             return bumpAtualizado(text, date);
           },
         },
-        result,
+        result, opts,
       );
     }
   }
@@ -752,7 +758,7 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
       transform: (before, hasContent) =>
         insertUnderSection(hasContent ? before : buildDaily(date), '## Capturas', capture),
     },
-    result,
+    result, opts,
   );
 
   return result;

@@ -1,4 +1,6 @@
 import { promises as fs } from 'node:fs';
+import { previewRevision, type PlannedChange } from './preview.js';
+import { unifiedDiff } from './diff.js';
 import { StringDecoder } from 'node:string_decoder';
 import { basename, join, relative, sep } from 'node:path';
 
@@ -253,6 +255,9 @@ export function decideDuplicate(
 }
 
 export interface LearnOptions {
+  preview?: boolean;
+  forceNew?: boolean;
+  expectedRevision?: string;
   vaultRoot: string;
   retriever: Retriever;
   titulo: string;
@@ -268,6 +273,9 @@ export interface LearnOptions {
 
 export interface LearnResult {
   action: 'appended' | 'created';
+  preview?: boolean;
+  revision?: string;
+  files?: PlannedChange[];
   path: string;
   reason: string;
   /** Concatenated diff of every file touched: the note plus each propagation target. */
@@ -629,6 +637,7 @@ async function appendSection(
     path: relPath,
     oldText: before,
     newText: `${before.trimEnd()}${eol}${eol}${section}`,
+    preview: opts.preview,
     deferCommit: true,
   });
 }
@@ -737,6 +746,10 @@ async function freeNotePath(
  * a rollback: the note is what the user asked for.
  */
 export async function learn(opts: LearnOptions): Promise<LearnResult> {
+  if (!opts.preview && opts.expectedRevision !== undefined) {
+    const planned = await learn({ ...opts, preview: true, expectedRevision: undefined });
+    if (planned.revision !== opts.expectedRevision) throw Object.assign(new LearnError('preview_stale: vault changed since the approved preview'), { code: 'preview_stale' });
+  }
   const titulo = oneLine(opts.titulo);
   const noteSlug = slug(titulo);
   if (noteSlug === '') {
@@ -782,7 +795,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const date = formatLocal(opts.now, 'YYYY-MM-DD');
   let newRelPath = `${WIKI_PREFIX}${opts.dominio}/${noteSlug}.md`;
 
-  const targetPath = decision.targetPath;
+  const targetPath = opts.forceNew ? undefined : decision.targetPath;
   const firstRelPath = newRelPath;
   const newAbsPath = resolveWritePath(opts.vaultRoot, newRelPath);
   let reason = decision.reason;
@@ -815,7 +828,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   if (!isWritable(collision)) {
     // A directory, a FIFO or a socket standing on the name is not something to append to and not
     // something to write over: `foreign` goes straight to a free name, and nothing opens it.
-    if (newRelPath !== targetPath && collision === 'note') {
+    if (!opts.forceNew && newRelPath !== targetPath && collision === 'note') {
       const attempt = await attemptAppend(opts, newRelPath, titulo, date);
       if (attempt.write !== undefined) {
         write = attempt.write;
@@ -895,6 +908,8 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
           // name has to be a slug, the heading a reader sees does not.
           title: titulo,
           answeredSections: answered,
+          preview: opts.preview,
+          ...(opts.preview || opts.expectedRevision || opts.forceNew ? { now: opts.now } : {}),
           deferCommit: true,
         });
         break;
@@ -917,6 +932,8 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const projeto = opts.projeto === undefined ? '' : indexText(opts.projeto);
 
   const prop = await propagate({
+    preview: opts.preview,
+    ...(write.change ? { overlay: new Map([[write.absPath, write.change.after]]) } : {}),
     vaultRoot: opts.vaultRoot,
     dominio: opts.dominio,
     // Always the name of the file actually written, never the slug this call started from: an
@@ -935,6 +952,19 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   // One commit for the set. The list is deduplicated because a title can name the domain's own
   // MOC, in which case the note and a propagation target are the same file.
   const files = [...new Set([write.absPath, ...prop.written])];
+  if (opts.preview) {
+    if (prop.warnings.length) throw new LearnError('preview_failed: ' + prop.warnings.join('; '));
+    const changes = new Map<string, PlannedChange>();
+    if (write.change) changes.set(write.path, write.change);
+    for (const change of prop.changes ?? []) {
+      const existing = changes.get(change.path);
+      const before = existing?.before ?? change.before;
+      changes.set(change.path, { ...change, before, diff: unifiedDiff(before, change.after, change.path) });
+    }
+    const planned = [...changes.values()];
+    const input = { titulo: opts.titulo, insight: opts.insight, contexto: opts.contexto, dominio: opts.dominio, tags: opts.tags ?? [], links: opts.links ?? [], projeto: opts.projeto ?? null, forceNew: opts.forceNew ?? false, confirmNovoDominio: opts.confirmNovoDominio ?? false, at: opts.now.toISOString() };
+    return { action, path: write.path, reason, diff: planned.map(file => file.diff).join('\n'), propagated: prop.written.map(absPath => toVaultRelative(opts.vaultRoot, absPath)), committed: false, preview: true, revision: previewRevision(input, planned), files: planned, ...(prop.warnings.length ? { warning: prop.warnings.join('; ') } : {}) };
+  }
   const commit = await commitFiles(opts.vaultRoot, files, `docs(vault): ${titulo}`);
 
   const diff = [write.diff, ...prop.diffs]

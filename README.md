@@ -423,3 +423,20 @@ English, with `src/index/bm25.ts` left in Portuguese from the first pass.
 ## License
 
 [MIT](LICENSE) © 2026 Andrey Mudri
+
+
+## Reviewed learning (0.5.0 release candidate)
+
+`vault_learn` accepts `preview: true` to compute the note, domain MOC, knowledge
+index and daily-note changes without writing files, creating directories,
+committing or pushing. Its structured result includes `files` with relative
+paths, before/after text and diffs, a revision hash and `previewTime`.
+
+For an approved save, repeat exactly the same inputs, omit `preview`, pass the
+returned `previewTime` as `preview_time` and the revision as `expected_revision`.
+A changed plan returns the structured error code `preview_stale` before writing.
+`force_new: true` creates a new linked note even when a matching note exists.
+A new domain still requires `confirm_novo_dominio: true`, including for preview.
+A preview with unsafe or failed propagation is refused instead of offering a
+partial plan. A normal write without these optional fields keeps its existing
+behavior. Publishing this candidate is an owner release step.

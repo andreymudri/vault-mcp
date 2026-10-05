@@ -15,6 +15,7 @@ import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
 import { commitFiles } from './git.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
+import type { PlannedChange } from './preview.js';
 import { coded } from '../i18n/errors.js';
 
 /** Thrown when `editNote` cannot locate exactly one occurrence of the text to replace. */
@@ -54,6 +55,7 @@ export interface WriteResult {
   pushed?: boolean;
   warning?: string;
   diff: string;
+  change?: PlannedChange;
 }
 
 export interface WriteNoteOptions {
@@ -85,6 +87,8 @@ export interface WriteNoteOptions {
    */
   answeredSections?: readonly string[];
   /** Write but do not commit, so a caller can batch several writes into one commit. */
+  preview?: boolean;
+  now?: Date;
   deferCommit?: boolean;
 }
 
@@ -93,6 +97,8 @@ export interface EditNoteOptions {
   path: string;
   oldText: string;
   newText: string;
+  preview?: boolean;
+  now?: Date;
   deferCommit?: boolean;
 }
 
@@ -338,12 +344,15 @@ async function writeAndCommit(
     before: string;
     after: string;
     created: boolean;
-    deferCommit?: boolean;
+    preview?: boolean;
+  now?: Date;
+  deferCommit?: boolean;
     message: string;
   },
   extraWarning?: string
 ): Promise<WriteResult> {
   const { diff, warning: diffWarning } = safeDiff(opts.before, opts.after, opts.relPath);
+  if (opts.preview === true) return { path: opts.relPath, absPath: opts.absPath, created: opts.created, committed: false, diff, change: { path: opts.relPath, before: opts.before, after: opts.after, diff }, ...(extraWarning === undefined ? {} : { warning: extraWarning }) };
   try {
     // `exclusive` exactly when the caller established there was no file here. `created` is read
     // off the read above, so this is the same fact the whole call is built on — and publishing
@@ -425,7 +434,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
     created = true;
   }
 
-  const now = new Date();
+  const now = opts.now ?? new Date();
   let text = opts.content;
   let templateWarning: string | undefined;
 
@@ -483,6 +492,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
       before,
       after,
       created,
+      ...(opts.preview === undefined ? {} : { preview: opts.preview }),
       ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
       message: `docs(vault): ${titleFromPath(opts.path)}`,
     },
@@ -641,7 +651,8 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
     before,
     after,
     created: false,
-    ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
+    ...(opts.preview === undefined ? {} : { preview: opts.preview }),
+      ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
     message: `docs(vault): atualizar ${titleFromPath(opts.path)}`,
   });
 }
