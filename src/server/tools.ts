@@ -557,6 +557,7 @@ function defineStructured<Shape extends z.ZodRawShape>(
         // `paths.ts` ou `relocate.ts` — que não tem catálogo nenhum, nem deveria ter — sai no
         // idioma pedido. Sem código, sai como veio, que é o comportamento de sempre.
         const text = translateError(err, m);
+        if (err instanceof Error && 'code' in err && err.code === 'preview_stale') return { ...fail(forMessage(redact(text))), structuredContent: { error: { code: 'preview_stale' } } };
         if (err instanceof ToolError) return fail(forMessage(redact(text)));
         return fail(`${name} ${m.errors.toolFailed}: ${forMessage(redact(text))}`);
       }
@@ -1772,12 +1773,16 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
   );
 
-  const vaultLearn = define(
+  const vaultLearn = defineStructured(
     redact,
     m,
     'vault_learn',
     m.tools.vault_learn.description,
     {
+      preview: z.boolean().optional().describe('Compute the exact diff without writing, committing or pushing.'),
+      force_new: z.boolean().optional().describe('Create a linked sibling note even when this topic already exists.'),
+      preview_time: z.string().datetime().optional().describe('Use the timestamp returned by the approved preview.'),
+      expected_revision: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('Refuse a write if the approved preview is stale.'),
       titulo: z.string().min(1, m.validation.tituloEmpty).describe(m.tools.vault_learn.titulo),
       insight: z.string().min(1, m.validation.insightEmpty).describe(m.tools.vault_learn.insight),
       contexto: z.string().min(1, m.validation.contextoEmpty).describe(m.tools.vault_learn.contexto),
@@ -1796,7 +1801,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .optional()
         .describe(m.tools.vault_learn.confirm_novo_dominio),
     },
+    z.object({
+      action: z.enum(['created', 'appended']), path: z.string(), reason: z.string(), diff: z.string(),
+      propagated: z.array(z.string()), committed: z.boolean(), pushed: z.boolean().optional(), warning: z.string().optional(),
+      preview: z.boolean().optional(), revision: z.string().optional(), previewTime: z.string(),
+      files: z.array(z.object({ path: z.string(), before: z.string(), after: z.string(), diff: z.string() })).optional(),
+    }),
     async (input) => {
+      const at = input.preview_time ? new Date(input.preview_time) : new Date();
       const { value: result, warning: queueWarning } = await writes.runExclusive(() =>
         learn({
           vaultRoot: deps.vaultRoot,
@@ -1813,7 +1825,10 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           ...(input.confirm_novo_dominio === undefined
             ? {}
             : { confirmNovoDominio: input.confirm_novo_dominio }),
-          now: new Date(),
+          preview: input.preview,
+          forceNew: input.force_new,
+          expectedRevision: input.expected_revision,
+          now: at,
         }),
       );
 
@@ -1835,7 +1850,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         if (aviso !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(aviso))}`);
       }
       lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff));
-      return lines.join('\n');
+      return { text: lines.join('\n'), structured: { ...result, previewTime: at.toISOString() } };
     },
   );
 
