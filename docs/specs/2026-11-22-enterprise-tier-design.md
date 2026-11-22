@@ -104,10 +104,13 @@ diagnósticos do scanner, modo somente-leitura. É a superfície de operação q
 - **Desligamento limpo**: SIGTERM/SIGINT esperam a escrita em curso (até 5 s), soltam o lock e saem.
 - **Somente leitura**: `VAULT_READ_ONLY=1` não registra tool de escrita; `VAULT_DISABLED_TOOLS`
   tira tools pelo nome.
-- **Erro com código** em `structuredContent.error` em toda recusa que tem código. Saída
-  estruturada em `vault_list`, `vault_backlinks` e `vault_status`. **`vault_search` e
+- **Erro com código** em `structuredContent.error` em toda falha: o código do catálogo, o errno de
+  um erro de sistema de arquivos, `input.invalid` ou `unknown`. Saída estruturada de sucesso só em
+  `vault_status`, além das que já existiam (`vault_graph`, `vault_learn`). **`vault_search` e
   `vault_get_note` continuam só texto, de propósito**: o texto citado e escapado é a defesa contra
   conteúdo do vault se passar por instrução, e um cliente que preferisse o JSON a perderia.
+  `vault_list` e `vault_backlinks` também: a saída estruturada dobraria, para o modelo, uma
+  resposta que acabou de ganhar teto, e o inventário para programa já existe no `vault_graph`.
 - **Fora:** resources e prompts do MCP. As tools já leem tudo, e um resource devolveria o corpo
   sem orçamento e sem o escape.
 

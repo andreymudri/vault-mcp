@@ -123,7 +123,16 @@ export function toolCallback(
       // One line per call, at `info`: which tool, how long, and whether it answered or refused. A
       // refusal is ordinary operation — a path that names no note — so it is not a warning; what
       // an operator wants from this line is the duration and the rate of each.
-      logger.info('tool.call', { tool: tool.name, ms: elapsed(), ok: result.isError !== true });
+      const code =
+        result.isError === true
+          ? (result.structuredContent as { error?: { code?: unknown } } | undefined)?.error?.code
+          : undefined;
+      logger.info('tool.call', {
+        tool: tool.name,
+        ms: elapsed(),
+        ok: result.isError !== true,
+        ...(typeof code === 'string' ? { code } : {}),
+      });
       return toCallToolResult(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

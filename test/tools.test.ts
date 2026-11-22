@@ -3608,3 +3608,87 @@ describe('modo somente leitura e tools desligadas', () => {
     expect(names.sort()).toEqual(READ_TOOLS);
   });
 });
+
+describe('código de erro estruturado', () => {
+  const errorOf = (result: ToolResult): { code?: string; params?: Record<string, unknown> } | undefined =>
+    (result.structuredContent as { error?: { code?: string; params?: Record<string, unknown> } } | undefined)?.error;
+
+  it('toda recusa carrega o código que a explica, além do texto', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+
+    const fora = await call('vault_write_note', { path: '../fora.md', content: 'x' });
+    expect(fora.isError).toBe(true);
+    expect(errorOf(fora)).toMatchObject({ code: 'path.outsideVault', params: { relPath: '../fora.md' } });
+
+    const ausente = await call('vault_get_note', { path: 'nao-existe.md' });
+    expect(errorOf(ausente)).toMatchObject({ code: 'note.notFound' });
+
+    const arquivo = await call('vault_write_note', { path: '99-archive/x.md', content: 'x' });
+    expect(errorOf(arquivo)?.code).toBe('path.readOnlyArea');
+
+    const offset = await call('vault_list', { tipo: 'wiki', offset: 9_999 });
+    expect(errorOf(offset)?.code).toBe('list.offsetPastEnd');
+  });
+
+  it('entrada inválida tem código próprio, e um erro do sistema de arquivos leva o errno', async () => {
+    const { call } = makeTools(await makeVault(true));
+
+    expect(errorOf(await call('vault_search', {}))).toEqual({ code: 'input.invalid' });
+    expect(errorOf(await call('vault_search', { query: 'x', pasta: 'y' }))).toEqual({ code: 'input.invalid' });
+
+    const semArquivo = await call('vault_edit_note', { path: '02-wiki/docker/nao-existe.md', old_text: 'a', new_text: 'b' });
+    expect(semArquivo.isError).toBe(true);
+    expect(errorOf(semArquivo)?.code).toBe('ENOENT');
+  });
+
+  it('os parâmetros do erro não devolvem a raiz absoluta do vault', async () => {
+    const vaultRoot = await makeVault(true);
+    const scanner = new VaultScanner({ vaultRoot });
+    // Um lock que outro "processo" segura: a escrita espera 60 ms e é recusada.
+    const lockPath = await lockPathFor(vaultRoot);
+    const release = await new VaultLock({ lockPath }).acquire();
+    try {
+      const tools = createTools({
+        retriever: new Retriever({ scanner }),
+        scanner,
+        vaultRoot,
+        messages: messagesFor('pt'),
+        lockTimeoutMs: 60,
+      });
+      const result = await tools
+        .find((candidate) => candidate.name === 'vault_write_note')!
+        .handler({ path: '02-wiki/docker/espera.md', content: '# Espera\n' });
+
+      expect(result.isError).toBe(true);
+      expect(errorOf(result)).toMatchObject({ code: 'lock.timeout', params: { ms: 60, pid: process.pid } });
+      expect(JSON.stringify(result.structuredContent)).not.toContain(vaultRoot);
+      await expect(fs.access(path.join(vaultRoot, '02-wiki/docker/espera.md'))).rejects.toThrow();
+    } finally {
+      await release();
+    }
+  });
+
+  it('chega ao cliente pelo protocolo, e ao log da chamada', async () => {
+    const entries: LogEntry[] = [];
+    const logger = createLogger({ level: 'debug', write: () => undefined });
+    logger.addSink((entry) => entries.push(entry));
+    const server = createVaultServer(await makeVault(true), 'pt', { logger });
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const result = await client.callTool({ name: 'vault_get_note', arguments: { path: 'nao-existe.md' } });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ error: { code: 'note.notFound' } });
+    expect(entries.find((entry) => entry.event === 'tool.call')?.fields).toMatchObject({
+      tool: 'vault_get_note',
+      ok: false,
+      code: 'note.notFound',
+    });
+
+    await client.close();
+    await server.close();
+  });
+});

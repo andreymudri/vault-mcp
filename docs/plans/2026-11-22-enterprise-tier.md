@@ -271,8 +271,8 @@ consegue usar o servidor com nomes de parâmetro em inglês.
 
 **Depends:** T5
 
-- [ ] **Step 1:** Testes: recusa por caminho fora do vault traz `structuredContent.error.code = 'path.outsideVault'`; `vault_list` e `vault_backlinks` trazem `structuredContent` que valida no `outputSchema`.
-- [ ] **Step 2:** Em `defineStructured`, todo erro com código vira `{ error: { code, params } }`; schemas de saída das duas tools.
+- [ ] **Step 1:** Testes: recusa por caminho fora do vault traz `structuredContent.error.code = 'path.outsideVault'`; entrada inválida traz `input.invalid`; erro de sistema de arquivos traz o errno; os parâmetros saem redigidos.
+- [ ] **Step 2:** Em `defineStructured`, toda falha vira `{ error: { code, params } }`. `vault_list` e `vault_backlinks` NÃO ganham saída estruturada: ela dobraria, para o modelo, uma resposta que acabou de ganhar teto, e o inventário para programa já existe no `vault_graph`.
 
 ### Task 19: validade adaptativa do scan
 

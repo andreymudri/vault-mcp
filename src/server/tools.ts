@@ -676,8 +676,9 @@ function redactDeep(value: unknown, redact: (text: string) => string): unknown {
  * every other tool's does and the data as `structuredContent`, under `outputSchema`.
  *
  * `define` delegates here with no schema, so the tools that answer only text keep exactly the
- * path they had. Errors take the same route in both: an `isError` answer carries text only, which
- * is also what the SDK expects (it skips output validation on errors).
+ * path they had. Errors take the same route in both: an `isError` answer carries the text and, as
+ * `structuredContent.error`, the code of the refusal — the SDK skips output validation on errors,
+ * so that shape is free of each tool's own `outputSchema`.
  */
 function defineStructured<Shape extends z.ZodRawShape>(
   redact: (text: string) => string,
@@ -711,7 +712,10 @@ function defineStructured<Shape extends z.ZodRawShape>(
     handler: async (args) => {
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
-        return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m, args))}`);
+        return {
+          ...fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m, args))}`),
+          structuredContent: { error: { code: 'input.invalid' } },
+        };
       }
       try {
         const { text, structured } = await run(parsed.data);
@@ -727,9 +731,28 @@ function defineStructured<Shape extends z.ZodRawShape>(
         // `paths.ts` ou `relocate.ts` — que não tem catálogo nenhum, nem deveria ter — sai no
         // idioma pedido. Sem código, sai como veio, que é o comportamento de sempre.
         const text = translateError(err, m);
-        if (err instanceof Error && 'code' in err && err.code === 'preview_stale') return { ...fail(forMessage(redact(text))), structuredContent: { error: { code: 'preview_stale' } } };
-        if (err instanceof ToolError) return fail(forMessage(redact(text)));
-        return fail(`${name} ${m.errors.toolFailed}: ${forMessage(redact(text))}`);
+        const { code, params } = errorContext(err);
+        // A refusal the caller is meant to read comes out as it is; anything else is prefixed with
+        // the tool that failed. `preview_stale` is the first kind.
+        const bare = err instanceof ToolError || code === 'preview_stale';
+        const body = bare
+          ? forMessage(redact(text))
+          : `${name} ${m.errors.toolFailed}: ${forMessage(redact(text))}`;
+        // The same refusal as DATA. The text is written for a model and in the server's language;
+        // a program deciding what to do next — retry a `lock.timeout`, re-preview a
+        // `preview_stale`, give up on a `path.outsideVault` — should not have to parse either. A
+        // filesystem error carries its errno here, and one with no code at all says `unknown`.
+        return {
+          ...fail(body),
+          structuredContent: {
+            error: {
+              code: code ?? 'unknown',
+              ...(params === undefined || Object.keys(params).length === 0
+                ? {}
+                : { params: redactDeep(params, redact) }),
+            },
+          },
+        };
       }
     },
   };
