@@ -5,6 +5,7 @@ import { unifiedDiff } from './diff.js';
 import { StringDecoder } from 'node:string_decoder';
 import { basename, join, relative, sep } from 'node:path';
 
+import { DEFAULT_LAYOUT, heading, type Layout } from '../config/layout.js';
 import { coded } from '../i18n/errors.js';
 import { tokenize } from '../index/tokenizer.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
@@ -214,7 +215,12 @@ export interface DuplicateDecision {
  * matched BM25 directly keeps `viaGraph: false` even when a neighbour's damped score raises its
  * number.
  */
-export function decideDuplicate(results: ScoredChunk[], dominio: string): DuplicateDecision {
+export function decideDuplicate(
+  results: ScoredChunk[],
+  dominio: string,
+  /** `<wiki>/` of the vault's layout. */
+  wikiPrefix: string = WIKI_PREFIX,
+): DuplicateDecision {
   const top = results[0];
   if (!top) return { isDuplicate: false, reason: 'nenhum match' };
 
@@ -223,8 +229,8 @@ export function decideDuplicate(results: ScoredChunk[], dominio: string): Duplic
   // appending to each is wrong in its own way — `99-archive/` and `_templates/` are read-only
   // areas the write guard refuses outright, so routing there does not merely misfile the insight,
   // it is the one path that could throw it away.
-  if (!top.chunk.path.startsWith(WIKI_PREFIX)) {
-    return { isDuplicate: false, reason: `topo fora de ${WIKI_PREFIX}: ${top.chunk.path}` };
+  if (!top.chunk.path.startsWith(wikiPrefix)) {
+    return { isDuplicate: false, reason: `topo fora de ${wikiPrefix}: ${top.chunk.path}` };
   }
 
   // UNREACHABLE as retrieval stands, and kept as an assertion rather than as a live branch: a
@@ -248,7 +254,7 @@ export function decideDuplicate(results: ScoredChunk[], dominio: string): Duplic
   }
 
   // The trailing slash makes this a whole path segment: `patternsX/` is not `patterns/`.
-  if (!top.chunk.path.startsWith(`${WIKI_PREFIX}${dominio}/`)) {
+  if (!top.chunk.path.startsWith(`${wikiPrefix}${dominio}/`)) {
     return { isDuplicate: false, reason: `nota parecida em outro domínio: ${top.chunk.path}` };
   }
 
@@ -270,6 +276,8 @@ export interface LearnOptions {
   links?: string[];
   confirmNovoDominio?: boolean;
   now: Date;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
   /**
    * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
    * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
@@ -324,9 +332,9 @@ function dominioProblem(dominio: string): string | undefined {
 }
 
 /** Directory names under `02-wiki/`, which are the vault's domains. */
-async function existingDomains(vaultRoot: string): Promise<string[]> {
+async function existingDomains(vaultRoot: string, layout: Layout): Promise<string[]> {
   try {
-    const entries = await fs.readdir(join(vaultRoot, '02-wiki'), { withFileTypes: true });
+    const entries = await fs.readdir(join(vaultRoot, layout.folders.wiki), { withFileTypes: true });
     return entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
@@ -477,7 +485,7 @@ async function skeletonContent(
   titulo: string,
   answered: readonly string[],
 ): Promise<{ content: string; warning?: string }> {
-  const templatePath = join(opts.vaultRoot, '_templates', 'wiki.md');
+  const templatePath = join(opts.vaultRoot, layoutOf(opts).folders.templates, 'wiki.md');
   // Classified BEFORE it is opened, by the same `pathState` the note path goes through.
   // `readFile` on a FIFO never returns, and this path is not caller-supplied but it is inside
   // a directory the user syncs: `mkfifo <vault>/_templates/wiki.md` left this promise pending
@@ -531,10 +539,14 @@ function linkName(raw: string): string {
  * A new note with no link is a note the one-hop graph expansion can never reach, so this is what
  * keeps the graph dense as the vault grows.
  */
-function renderLinks(links: string[] | undefined, eol: string): string | undefined {
+function renderLinks(
+  links: string[] | undefined,
+  eol: string,
+  layout: Layout = DEFAULT_LAYOUT,
+): string | undefined {
   const names = (links ?? []).map(linkName).filter((name) => name !== '');
   if (names.length === 0) return undefined;
-  return ['## Links', '', ...names.map((name) => `- [[${name}]]`)].join(eol);
+  return [heading(layout.sections.links), '', ...names.map((name) => `- [[${name}]]`)].join(eol);
 }
 
 /** Rewrites every line ending as `eol`, so an append never mixes CRLF and LF in one file. */
@@ -556,10 +568,16 @@ function buildBody(opts: LearnOptions, eol: string): string {
   const insight = withEol(blockText(opts.insight), eol).trim();
   if (insight !== '') blocks.push(insight);
   const contexto = oneLine(opts.contexto);
-  if (contexto !== '') blocks.push(`**Contexto:** ${contexto}`);
-  const links = renderLinks(opts.links, eol);
+  const layout = layoutOf(opts);
+  if (contexto !== '') blocks.push(`**${layout.sections.context}:** ${contexto}`);
+  const links = renderLinks(opts.links, eol, layout);
   if (links !== undefined) blocks.push(links);
   return `${blocks.join(`${eol}${eol}`)}${eol}`;
+}
+
+/** The layout a `learn` call runs under: the one it was handed, or the default. */
+function layoutOf(opts: LearnOptions): Layout {
+  return opts.layout ?? DEFAULT_LAYOUT;
 }
 
 /** The dated section an append adds to the end of an existing note. */
@@ -621,7 +639,8 @@ async function appendSection(
   titulo: string,
   date: string,
 ): Promise<WriteResult> {
-  const absPath = resolveWritePath(opts.vaultRoot, relPath);
+  const layout = layoutOf(opts);
+  const absPath = resolveWritePath(opts.vaultRoot, relPath, { layout });
   const before = await fs.readFile(absPath, 'utf8');
   const eol = before.includes('\r\n') ? '\r\n' : '\n';
   const section = buildSection(opts, titulo, date, eol);
@@ -632,6 +651,7 @@ async function appendSection(
     newText: `${before.trimEnd()}${eol}${eol}${section}`,
     preview: opts.preview,
     deferCommit: true,
+    layout,
   });
 }
 
@@ -657,7 +677,7 @@ async function attemptAppend(
 
   let absPath: string;
   try {
-    absPath = resolveWritePath(opts.vaultRoot, relPath);
+    absPath = resolveWritePath(opts.vaultRoot, relPath, { layout: layoutOf(opts) });
   } catch (err) {
     return refusal(oneLine(err instanceof Error ? err.message : String(err)));
   }
@@ -719,15 +739,17 @@ async function freeNotePath(
   dominio: string,
   noteSlug: string,
   date: string,
+  layout: Layout,
 ): Promise<string> {
+  const wikiPrefix = `${layout.folders.wiki}/`;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const suffix = attempt === 0 ? date : `${date}-${attempt + 1}`;
     const room = MAX_SLUG_CHARS - suffix.length - 1;
     const head = (noteSlug.length <= room ? noteSlug : noteSlug.slice(0, room)).replace(/-$/, '');
-    const candidate = `${WIKI_PREFIX}${dominio}/${head}-${suffix}.md`;
-    if (isWritable(await pathState(resolveWritePath(vaultRoot, candidate)))) return candidate;
+    const candidate = `${wikiPrefix}${dominio}/${head}-${suffix}.md`;
+    if (isWritable(await pathState(resolveWritePath(vaultRoot, candidate, { layout })))) return candidate;
   }
-  throw coded(new LearnError(`não há nome livre para a nota em ${WIKI_PREFIX}${dominio}/: 100 variações já existem`), 'learn.noFreeName', { prefix: WIKI_PREFIX, dominio });
+  throw coded(new LearnError(`não há nome livre para a nota em ${wikiPrefix}${dominio}/: 100 variações já existem`), 'learn.noFreeName', { prefix: wikiPrefix, dominio });
 }
 
 /**
@@ -772,25 +794,27 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   // carry a line break or a bidi control, and a warning that can forge a line is worthless.
   if (problem !== undefined) throw coded(new LearnError(`domínio inválido: ${problem}`), 'learn.badDomain', { problem });
 
-  const dominios = await existingDomains(opts.vaultRoot);
+  const layout = layoutOf(opts);
+  const wikiPrefix = `${layout.folders.wiki}/`;
+  const dominios = await existingDomains(opts.vaultRoot, layout);
   const domainIsNew = !dominios.includes(opts.dominio);
   if (domainIsNew && opts.confirmNovoDominio !== true) {
     const validos = dominios.length === 0 ? 'nenhum' : dominios.join(', ');
-    throw coded(new LearnError(`domínio '${opts.dominio}' não existe em 02-wiki/. Domínios válidos: ${validos}. ` +
+    throw coded(new LearnError(`domínio '${opts.dominio}' não existe em ${wikiPrefix}. Domínios válidos: ${validos}. ` +
         'Repita com confirm_new_domain para criar o domínio.'), 'learn.unknownDomain', { dominio: opts.dominio, validos });
   }
 
   const tags = (opts.tags ?? []).filter((tag): tag is string => typeof tag === 'string');
   const { query, truncated } = duplicateQuery(titulo, opts.insight);
   const { results } = opts.retriever.search({ query });
-  const decision = decideDuplicate(results, opts.dominio);
+  const decision = decideDuplicate(results, opts.dominio, wikiPrefix);
 
   const date = formatLocal(opts.now, 'YYYY-MM-DD');
-  let newRelPath = `${WIKI_PREFIX}${opts.dominio}/${noteSlug}.md`;
+  let newRelPath = `${wikiPrefix}${opts.dominio}/${noteSlug}.md`;
 
   const targetPath = opts.forceNew ? undefined : decision.targetPath;
   const firstRelPath = newRelPath;
-  const newAbsPath = resolveWritePath(opts.vaultRoot, newRelPath);
+  const newAbsPath = resolveWritePath(opts.vaultRoot, newRelPath, { layout });
   let reason = decision.reason;
 
   let write: WriteResult | undefined;
@@ -855,7 +879,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     // which is the only outcome here that loses nothing. The name it returns is free or blank, so
     // the write below is a genuine creation either way and the note is born with its skeleton.
     if (write === undefined) {
-      newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date);
+      newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date, layout);
     }
   }
 
@@ -866,15 +890,17 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     // prompts two lines below their own answer. `buildBody` writes `**Contexto:** …` and, when the
     // caller sent links, a `## Links` block of its own.
     const answered = [
-      ...(oneLine(opts.contexto) === '' ? [] : ['Contexto']),
-      ...(renderLinks(opts.links, '\n') === undefined ? [] : ['Links']),
+      ...(oneLine(opts.contexto) === '' ? [] : [layout.sections.context]),
+      ...(renderLinks(opts.links, '\n', layout) === undefined ? [] : [layout.sections.links]),
     ];
     // `writeNote` applies the `_templates/wiki.md` skeleton only when it cannot READ the path, so
     // a blank placeholder standing here would cost the note its `# H1` and its sections. The
     // skeleton is therefore built HERE and handed over complete — the placeholder is written over,
     // never removed.
     let state =
-      newRelPath === firstRelPath ? collision : await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
+      newRelPath === firstRelPath
+        ? collision
+        : await pathState(resolveWritePath(opts.vaultRoot, newRelPath, { layout }));
 
     // Every check above — the duplicate rule, the collision test, `freeNotePath` — asked the
     // filesystem a question and then acted on the answer, and nothing outside this process is
@@ -904,12 +930,13 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
           preview: opts.preview,
           ...(opts.preview || opts.expectedRevision || opts.forceNew ? { now: opts.now } : {}),
           deferCommit: true,
+          layout,
         });
         break;
       } catch (err) {
         if (!(err instanceof WriteRaceError) || attempt >= CREATE_RACE_ATTEMPTS) throw err;
-        newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date);
-        state = await pathState(resolveWritePath(opts.vaultRoot, newRelPath));
+        newRelPath = await freeNotePath(opts.vaultRoot, opts.dominio, noteSlug, date, layout);
+        state = await pathState(resolveWritePath(opts.vaultRoot, newRelPath, { layout }));
       }
     }
   }
@@ -940,6 +967,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     created: action === 'created',
     domainIsNew,
     now: opts.now,
+    layout,
   });
 
   // One commit for the set. The list is deduplicated because a title can name the domain's own

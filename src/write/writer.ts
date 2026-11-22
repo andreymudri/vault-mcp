@@ -12,6 +12,7 @@ import {
   type NodeKind,
 } from './paths.js';
 import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
+import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
 import { commitFiles, commitRecovery } from './git.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
@@ -101,6 +102,8 @@ export interface WriteNoteOptions {
    * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
    */
   push?: boolean;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
 }
 
 export interface EditNoteOptions {
@@ -111,6 +114,8 @@ export interface EditNoteOptions {
   preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
   /**
    * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
    * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
@@ -445,7 +450,8 @@ async function refuseForeign(absPath: string, relPath: string): Promise<NodeKind
  * caller can assemble that list and hand it to `commitFiles` itself.
  */
 export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
-  const absPath = await guardedPath(opts.vaultRoot, opts.path);
+  const layout = opts.layout ?? DEFAULT_LAYOUT;
+  const absPath = await guardedPath(opts.vaultRoot, opts.path, { layout });
   // A FIFO here is `.md`, is inside the vault and is in no denied directory, so every check
   // above passes it — and the read below never returns. `created` still comes from the read,
   // which is the only thing that can distinguish "was not there" from "was there and is gone
@@ -468,7 +474,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
   if (created && opts.tipo !== undefined && TEMPLATED_TIPOS.has(opts.tipo)) {
     // `opts.tipo` is compared against a closed set before it reaches the path, so no
     // caller-controlled segment ever enters this join.
-    const templatePath = join(opts.vaultRoot, '_templates', `${opts.tipo}.md`);
+    const templatePath = join(opts.vaultRoot, layout.folders.templates, `${opts.tipo}.md`);
     let templateText: string | undefined;
     const state = await classifyNode(templatePath);
     if (state === 'foreign') {
@@ -637,7 +643,9 @@ function matchFoldingLineEndings(
  * untouched — which matters because Obsidian and T6's scanner both watch mtime.
  */
 export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
-  const absPath = await guardedPath(opts.vaultRoot, opts.path);
+  const absPath = await guardedPath(opts.vaultRoot, opts.path, {
+    layout: opts.layout ?? DEFAULT_LAYOUT,
+  });
 
   if (opts.oldText === '') {
     // The empty string occurs between every pair of characters, so "exactly one

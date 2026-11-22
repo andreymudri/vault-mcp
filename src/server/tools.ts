@@ -4,11 +4,12 @@ import { resolve, sep } from 'node:path';
 
 import { z } from 'zod';
 
+import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
 import { LinkGraph } from '../graph/graph.js';
 import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
 import type { Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
-import { RAW_PREFIX, hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
+import { hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import type { Logger } from './logger.js';
@@ -139,6 +140,11 @@ export interface ToolDeps {
   logger?: Logger;
   /** True when the server publishes no write tool (`VAULT_READ_ONLY`), for `vault_status` to say so. */
   readOnly?: boolean;
+  /**
+   * The vault's layout (`.vault-mcp.json`): where the wiki, the journal and the archive are. It
+   * MUST be the one the scanner and the retriever were built with. The default one when absent.
+   */
+  layout?: Layout;
 }
 
 /**
@@ -1711,6 +1717,7 @@ export function createToolset(deps: ToolDeps): Toolset {
   const m = deps.messages;
   const writes = new WriteQueue();
   const redact = makeRedactor(deps.vaultRoot);
+  const layout = deps.layout ?? DEFAULT_LAYOUT;
 
   /**
    * The cross-process lock for this vault, asked for on every write rather than once.
@@ -2091,7 +2098,7 @@ export function createToolset(deps: ToolDeps): Toolset {
       // ranking).
       const selected = deps.scanner
         .allNotes()
-        .filter((note) => input.include_raw === true || !note.path.startsWith(RAW_PREFIX))
+        .filter((note) => input.include_raw === true || !note.path.startsWith(`${layout.folders.raw}/`))
         .filter((note) => matchesFilters(note, { ...input, tipo: input.type }))
         .sort(byPath);
       const max = input.max_nodes ?? DEFAULT_GRAPH_NODES;
@@ -2122,7 +2129,7 @@ export function createToolset(deps: ToolDeps): Toolset {
           tags: noteTags(note),
           // A note at the vault root has no area: its first segment is its own file name.
           area: segments.length > 1 ? segments[0]! : '',
-          domain: segments.length > 2 && segments[0] === '02-wiki' ? segments[1]! : null,
+          domain: segments.length > 2 && segments[0] === layout.folders.wiki ? segments[1]! : null,
           in_degree: inDegree.get(note.path) ?? 0,
           out_degree: outDegree.get(note.path) ?? 0,
           mtime_ms: note.mtimeMs,
@@ -2267,6 +2274,7 @@ export function createToolset(deps: ToolDeps): Toolset {
             path: input.path,
             content: input.content,
             ...(frontmatter === undefined ? {} : { frontmatter }),
+            layout,
             ...git,
           }),
         ),
@@ -2300,6 +2308,7 @@ export function createToolset(deps: ToolDeps): Toolset {
             path: input.path,
             oldText: input.old_text,
             newText: input.new_text,
+            layout,
             ...git,
           }),
         ),
@@ -2375,6 +2384,7 @@ export function createToolset(deps: ToolDeps): Toolset {
           forceNew: input.force_new,
           expectedRevision: input.expected_revision,
           now: at,
+          layout,
           ...git,
         });
       const { value: result, warning: queueWarning } =
@@ -2455,6 +2465,7 @@ export function createToolset(deps: ToolDeps): Toolset {
             ? {}
             : { confirmNovoDominio: input.confirm_new_domain }),
           now: new Date(),
+          layout,
           ...git,
         }),
       );
@@ -2488,6 +2499,7 @@ export function createToolset(deps: ToolDeps): Toolset {
           path: input.path,
           ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
           now: new Date(),
+          layout,
           ...git,
         }),
       );

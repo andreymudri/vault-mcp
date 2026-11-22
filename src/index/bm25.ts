@@ -22,6 +22,8 @@ export function search(
   query: string,
   limit: number,
   keep?: (chunk: Chunk) => boolean,
+  /** The vault's archive folder, whose notes are demoted. The default layout's when absent. */
+  archiveFolder?: string,
 ): ScoredChunk[] {
   const terms = tokenize(query);
   const N = index.size();
@@ -44,7 +46,7 @@ export function search(
     const chunk = index.chunks.get(chunkId);
     // Two independent demotions, multiplied: WHAT the note is (a MOC restates its domain) and
     // WHERE it lives (the archive is retired). A MOC inside the archive is both.
-    scores.set(chunkId, score * noteTypeWeight(chunk?.tipo) * pathWeight(chunk?.path));
+    scores.set(chunkId, score * noteTypeWeight(chunk?.tipo) * pathWeight(chunk?.path, archiveFolder));
   }
 
   // Filtra antes de fatiar: um `keep` restritivo aplicado depois do corte devolveria nada sempre

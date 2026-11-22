@@ -153,6 +153,7 @@ const PT = {
     'lock.timeout': 'outro processo está escrevendo no vault há mais de {ms} ms (pid {pid}); nada foi escrito',
     'lock.failed': 'não foi possível criar o lock do vault: {detail}',
     'list.offsetPastEnd': 'offset {offset} além do fim: há {total} nota(s) com esses filtros',
+    'layout.invalid': '.vault-mcp.json inválido: {detail}',
   },
 
   errors: {
@@ -471,6 +472,7 @@ const EN: Messages = {
     'lock.timeout': 'another process has been writing to the vault for more than {ms} ms (pid {pid}); nothing was written',
     'lock.failed': 'could not create the vault lock: {detail}',
     'list.offsetPastEnd': 'offset {offset} is past the end: {total} note(s) match these filters',
+    'layout.invalid': '.vault-mcp.json is invalid: {detail}',
   },
 
   errors: {

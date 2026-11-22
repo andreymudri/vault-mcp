@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
 import type { Diagnostic, Note } from '../types.js';
 import { classifyStat, type StatLike } from '../write/paths.js';
 import { parseFile } from './frontmatter.js';
@@ -45,25 +46,16 @@ const REAL_FS: FsOps = {
 };
 
 /**
- * Directories never descended into. `.git` and `.obsidian` are already covered by the
- * dot-prefix rule below and are named anyway, because they are the two that matter and the
- * cost of stating them is nothing.
+ * Directories never descended into, in any vault. `.git` and `.obsidian` are already covered by
+ * the dot-prefix rule in `walk` and are named anyway, because they are the two that matter and
+ * the cost of stating them is nothing.
  *
- * `_templates` carries no leading dot and would otherwise be indexed like any other folder.
- * It must not be: `_templates/projeto.md` declares `tipo: projeto`, so it would surface in
- * `vault_list` next to real projects, and its body is Templater syntax rather than prose.
+ * The vault's TEMPLATES folder joins them per instance (`_templates` in the default layout): it
+ * carries no leading dot and would otherwise be indexed like any other. It must not be —
+ * `_templates/projeto.md` declares `tipo: projeto`, so it would surface in `vault_list` next to
+ * real projects, and its body is Templater syntax rather than prose.
  */
-const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
-  '.git',
-  '.obsidian',
-  'node_modules',
-  '_templates',
-]);
-
-/** Hidden entries are skipped wholesale — dotfiles are tooling state, not notes. */
-function isIgnored(name: string): boolean {
-  return name.startsWith('.') || IGNORED_DIRECTORIES.has(name);
-}
+const MACHINE_DIRECTORIES: readonly string[] = ['.git', '.obsidian', 'node_modules'];
 
 /**
  * The largest file the scanner reads as a note, unless `VAULT_MAX_NOTE_BYTES` says otherwise.
@@ -90,6 +82,8 @@ function looksBinary(raw: string): boolean {
 export interface VaultScannerOptions {
   vaultRoot: string;
   fs?: FsOps;
+  /** The vault's layout: which folder holds the templates, and so is not walked. */
+  layout?: Layout;
   /** Files larger than this are left out of the index, loudly. Default `DEFAULT_MAX_NOTE_BYTES`. */
   maxNoteBytes?: number;
   /**
@@ -137,6 +131,8 @@ export class VaultScanner {
   diagnostics: Diagnostic[] = [];
 
   private readonly fs: FsOps;
+  /** Directories never descended into: machine state, and this vault's templates folder. */
+  private readonly ignored: ReadonlySet<string>;
   private readonly maxNoteBytes: number;
   private readonly scanTtlMs: number | undefined;
   private readonly now: () => number;
@@ -158,6 +154,7 @@ export class VaultScanner {
   constructor(options: VaultScannerOptions) {
     this.root = options.vaultRoot;
     this.fs = options.fs ?? REAL_FS;
+    this.ignored = new Set([...MACHINE_DIRECTORIES, (options.layout ?? DEFAULT_LAYOUT).folders.templates]);
     this.maxNoteBytes = options.maxNoteBytes ?? DEFAULT_MAX_NOTE_BYTES;
     this.scanTtlMs = options.scanTtlMs;
     this.now = options.now ?? (() => performance.now());
@@ -370,7 +367,8 @@ export class VaultScanner {
     }
 
     for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      if (isIgnored(entry.name)) continue;
+      // Hidden entries are skipped wholesale — dotfiles are tooling state, not notes.
+      if (entry.name.startsWith('.') || this.ignored.has(entry.name)) continue;
       const path = relativeDir === '' ? entry.name : `${relativeDir}/${entry.name}`;
       if (entry.isDirectory()) this.walk(path, out, diagnostics);
       else if (entry.isFile() && entry.name.endsWith('.md')) out.push(path);

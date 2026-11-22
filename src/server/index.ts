@@ -9,6 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
+import { loadLayout, withLayoutNames, type Layout } from '../config/layout.js';
 import { resolveLang, type Lang } from '../i18n/lang.js';
 import { resolveConfig, type ServerConfig } from './config.js';
 import { NULL_LOGGER, createLogger, type LogEntry, type Logger } from './logger.js';
@@ -169,7 +170,11 @@ export function toolCallback(
  * nobody kept in step.
  */
 /** What `createVaultServer` takes beyond the vault and the language: the parsed environment, and a logger. */
-export type ServerOptions = Partial<ServerConfig> & { logger?: Logger };
+export type ServerOptions = Partial<ServerConfig> & {
+  logger?: Logger;
+  /** The vault's layout. Read from the vault's `.vault-mcp.json` when absent. */
+  layout?: Layout;
+};
 
 /** The MCP name of each of this server's log levels. */
 const MCP_LEVEL = { error: 'error', warn: 'warning', info: 'info', debug: 'debug' } as const;
@@ -234,13 +239,19 @@ export function createVaultApp(
   config: ServerOptions = {},
 ): VaultApp {
   const logger = config.logger ?? NULL_LOGGER;
+  // Read once, here, and handed to everything that asks where something lives. A file that is
+  // wrong throws, and the server does not start: see `loadLayout`.
+  const layout = config.layout ?? loadLayout(vaultRoot);
   const scanner = new VaultScanner({
     vaultRoot,
+    layout,
     ...(config.maxNoteBytes === undefined ? {} : { maxNoteBytes: config.maxNoteBytes }),
     ...(config.scanTtlMs === undefined ? {} : { scanTtlMs: config.scanTtlMs }),
   });
-  const retriever = new Retriever({ scanner });
-  const messages = messagesFor(lang);
+  const retriever = new Retriever({ scanner, layout });
+  // The catalog names folders — "a domain under `02-wiki/`" — and a model reads it to decide what
+  // to pass, so it is told the names this vault actually uses.
+  const messages = withLayoutNames(messagesFor(lang), layout);
   const server = new McpServer(
     { name: 'vault-mcp', version: VERSION },
     { capabilities: { tools: {}, logging: {} }, instructions: messages.instructions },
@@ -268,6 +279,7 @@ export function createVaultApp(
     messages,
     version: VERSION,
     logger,
+    layout,
     ...(config.readOnly === true ? { readOnly: true } : {}),
     ...(config.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: config.lockTimeoutMs }),
   });

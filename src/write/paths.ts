@@ -1,8 +1,13 @@
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promises as fs } from 'node:fs';
+import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
 import { coded } from '../i18n/errors.js';
 
-export const DENIED_PREFIXES = ['99-archive', '_templates'] as const;
+/** The read-only areas of the DEFAULT layout. A vault with its own layout has its own two. */
+export const DENIED_PREFIXES: readonly string[] = [
+  DEFAULT_LAYOUT.folders.archive,
+  DEFAULT_LAYOUT.folders.templates,
+];
 
 /**
  * Directory names that are MACHINE STATE, not vault content, matched as a whole path
@@ -148,12 +153,28 @@ export class PathGuardError extends Error {}
  */
 export interface PathGuardOptions {
   allowArchive?: boolean;
+  /** The vault's layout: which folders are the archive and the templates. Default layout when absent. */
+  layout?: Layout;
 }
 
 /** The read-only prefixes still in force under `options`. */
 function deniedPrefixes(options: PathGuardOptions): readonly string[] {
-  const all = DENIED_PREFIXES as readonly string[];
-  return options.allowArchive === true ? all.filter((prefix) => prefix !== '99-archive') : all;
+  const { archive, templates } = (options.layout ?? DEFAULT_LAYOUT).folders;
+  return options.allowArchive === true ? [templates] : [archive, templates];
+}
+
+/**
+ * True for a path segment no write may pass through: machine state, and the templates folder
+ * of this vault's layout — which is denied at ANY depth, like the rest of `DENIED_SEGMENTS`.
+ */
+function isDeniedSegment(segment: string, options: PathGuardOptions): boolean {
+  const templates = options.layout?.folders.templates;
+  if (templates === undefined || templates === DEFAULT_LAYOUT.folders.templates) {
+    return DENIED_SEGMENTS.has(segment);
+  }
+  // With a renamed templates folder, the DEFAULT name is an ordinary folder again.
+  if (segment === normalizeSegment(templates)) return true;
+  return segment !== DEFAULT_LAYOUT.folders.templates && DENIED_SEGMENTS.has(segment);
 }
 
 /**
@@ -396,7 +417,7 @@ export async function guardedPath(
   // prefixes is what keeps an ordinary note at `02-wiki/git/rebase-interativo.md` legal,
   // exactly as `99-archive-notes/` stays legal beside the denied `99-archive/`.
   for (const segment of await pathSegments(vaultRoot, absPath)) {
-    if (DENIED_SEGMENTS.has(normalizeSegment(segment))) {
+    if (isDeniedSegment(normalizeSegment(segment), options)) {
       throw coded(
           new PathGuardError(`escrita negada em ${forMessage(segment)}/ (área interna, não é conteúdo)`),
           'path.internalArea',

@@ -11,6 +11,7 @@ import {
   PathGuardError,
 } from './paths.js';
 import { ensureFrontmatter, formatLocal } from './template.js';
+import { DEFAULT_LAYOUT, heading, type Layout } from '../config/layout.js';
 import { coded } from '../i18n/errors.js';
 
 /**
@@ -467,15 +468,15 @@ function capitalize(dominio: string): string {
  * `## Notas` is born EMPTY on purpose: `insertUnderSection` fills it in the same flow, so
  * there is one code path that appends an entry rather than two that must agree.
  */
-export function buildMoc(dominio: string, date: string): string {
+export function buildMoc(dominio: string, date: string, layout: Layout = DEFAULT_LAYOUT): string {
   const body = [
     `# ${capitalize(dominio)} — Mapa de Conteúdo`,
     '',
-    '## Notas',
+    heading(layout.sections.notes),
     '',
-    '## Relacionados',
+    heading(layout.sections.related),
     '',
-    '- [[../../00-index/index-knowledge|índice de conhecimento]]',
+    `- [[../../${layout.folders.index}/index-knowledge|índice de conhecimento]]`,
     '',
   ].join('\n');
   // SERIALISED, never interpolated. `tags: [${dominio}]` is string concatenation wearing
@@ -495,7 +496,7 @@ export function buildMoc(dominio: string, date: string): string {
 }
 
 /** A brand new daily note, with an empty `## Capturas` for the capture line to land in. */
-export function buildDaily(date: string): string {
+export function buildDaily(date: string, layout: Layout = DEFAULT_LAYOUT): string {
   return [
     '---',
     'tipo: daily',
@@ -504,7 +505,7 @@ export function buildDaily(date: string): string {
     '',
     `# ${date}`,
     '',
-    '## Capturas',
+    heading(layout.sections.captures),
     '',
     '',
   ].join('\n');
@@ -517,7 +518,7 @@ export function buildDaily(date: string): string {
  * exists so that the "new domain" path cannot produce a file WITHOUT frontmatter, which
  * the scanner would then classify as a `nota` and rank as ordinary prose.
  */
-function buildIndex(date: string): string {
+function buildIndex(date: string, layout: Layout): string {
   return [
     '---',
     'tipo: moc',
@@ -527,7 +528,7 @@ function buildIndex(date: string): string {
     '',
     '# Índice de Conhecimento',
     '',
-    '## Domínios',
+    heading(layout.sections.domains),
     '',
     '',
   ].join('\n');
@@ -589,6 +590,8 @@ export interface PropagateOptions {
   /** true when `02-wiki/<dominio>/` did not exist before this operation. */
   domainIsNew: boolean;
   now: Date;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
 }
 
 export interface PropagateResult {
@@ -625,7 +628,9 @@ async function applyTarget(
   opts: PropagateOptions,
 ): Promise<void> {
   try {
-    const absPath = await guardedPath(vaultRoot, target.relPath);
+    const absPath = await guardedPath(vaultRoot, target.relPath, {
+      layout: opts.layout ?? DEFAULT_LAYOUT,
+    });
 
     // Asked BEFORE anything is opened, and by `lstat`, which answers for the NAME rather
     // than for whatever it points at. `readFile` follows a symlink — onto a FIFO it never
@@ -696,6 +701,8 @@ async function applyTarget(
 export async function propagate(opts: PropagateOptions): Promise<PropagateResult> {
   const result: PropagateResult = { written: [], diffs: [], warnings: [] };
 
+  const layout = opts.layout ?? DEFAULT_LAYOUT;
+  const { folders, sections } = layout;
   const date = formatLocal(opts.now, 'YYYY-MM-DD');
   const time = formatLocal(opts.now, 'HH:mm');
   const dominio = opts.dominio;
@@ -713,11 +720,11 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
     await applyTarget(
       opts.vaultRoot,
       {
-        relPath: `02-wiki/${dominio}/${dominio}-moc.md`,
+        relPath: `${folders.wiki}/${dominio}/${dominio}-moc.md`,
         transform: (before, hasContent) => {
-          let text = hasContent ? before : buildMoc(dominio, date);
+          let text = hasContent ? before : buildMoc(dominio, date, layout);
           if (opts.created) {
-            text = insertUnderSection(text, '## Notas', `- [[${slug}]] — ${resumo}`);
+            text = insertUnderSection(text, heading(sections.notes), `- [[${slug}]] — ${resumo}`);
           }
           // Even an append to an existing note moves the MOC's `atualizado:`: the domain
           // did gain knowledge, and the date is what tells the user which areas are alive.
@@ -734,12 +741,12 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
       await applyTarget(
         opts.vaultRoot,
         {
-          relPath: '00-index/index-knowledge.md',
+          relPath: `${folders.index}/index-knowledge.md`,
           transform: (before, hasContent) => {
             const text = insertUnderSection(
-              hasContent ? before : buildIndex(date),
-              '## Domínios',
-              `- [[../02-wiki/${dominio}/${dominio}-moc|${dominio}]] — ${resumo}`,
+              hasContent ? before : buildIndex(date, layout),
+              heading(sections.domains),
+              `- [[../${folders.wiki}/${dominio}/${dominio}-moc|${dominio}]] — ${resumo}`,
             );
             return bumpAtualizado(text, date);
           },
@@ -758,9 +765,13 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
   await applyTarget(
     opts.vaultRoot,
     {
-      relPath: `04-daily/${date}.md`,
+      relPath: `${folders.daily}/${date}.md`,
       transform: (before, hasContent) =>
-        insertUnderSection(hasContent ? before : buildDaily(date), '## Capturas', capture),
+        insertUnderSection(
+          hasContent ? before : buildDaily(date, layout),
+          heading(sections.captures),
+          capture,
+        ),
     },
     result, opts,
   );

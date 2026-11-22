@@ -50,11 +50,11 @@ const ARCHIVE_PREFIX = '99-archive';
  * and for the same reason: `99-archive-notes/` is an ordinary folder that must not be demoted
  * alongside `99-archive/`.
  */
-export function pathWeight(path: string | undefined): number {
+export function pathWeight(path: string | undefined, archiveFolder: string = ARCHIVE_PREFIX): number {
   if (path === undefined) return 1.0;
   const slash = path.indexOf('/');
   const first = slash === -1 ? path : path.slice(0, slash);
-  return first === ARCHIVE_PREFIX ? ARCHIVE_PATH_WEIGHT : 1.0;
+  return first === archiveFolder ? ARCHIVE_PATH_WEIGHT : 1.0;
 }
 
 const HEADING_LINE_RE = /^#{2,3}\s+.*$/;
