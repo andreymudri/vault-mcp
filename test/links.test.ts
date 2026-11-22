@@ -252,3 +252,60 @@ describe('resolveLinkTarget', () => {
     expect(resolveLinkTarget('x', '04-daily/hoje.md', idx, empatadas)).toBe(undefined);
   });
 });
+
+/**
+ * The same name can be written two ways: `decisão` with a precomposed `ã` (NFC), or with an `a`
+ * followed by a combining tilde (NFD). They look identical and compare different. A vault that
+ * came through macOS or a sync client can hold file names in one form while the links typed in
+ * Obsidian are in the other — and every such link read as broken.
+ */
+describe('resolveLinkTarget — Unicode normalization', () => {
+  const NFC = 'decis' + String.fromCodePoint(0xe3) + 'o';
+  const NFD = 'decisa' + String.fromCodePoint(0x303) + 'o';
+  const index = (...paths: string[]) => {
+    const byBasename = new Map<string, string[]>();
+    for (const path of paths) {
+      const base = posix.basename(path, '.md');
+      byBasename.set(base, [...(byBasename.get(base) ?? []), path]);
+    }
+    return { byBasename, allPaths: new Set(paths) };
+  };
+
+  it('the two spellings really are different strings', () => {
+    expect(NFC).not.toBe(NFD);
+    expect(NFC.normalize('NFD')).toBe(NFD);
+  });
+
+  it('a link typed in NFC resolves to a file named in NFD, and the other way round', () => {
+    const onDiskNfd = index(`02-wiki/adr/${NFD}.md`, '02-wiki/adr/ref.md');
+    expect(resolveLinkTarget(NFC, '02-wiki/adr/ref.md', onDiskNfd.byBasename, onDiskNfd.allPaths)).toBe(
+      `02-wiki/adr/${NFD}.md`,
+    );
+
+    const onDiskNfc = index(`02-wiki/adr/${NFC}.md`, '02-wiki/adr/ref.md');
+    expect(resolveLinkTarget(NFD, '02-wiki/adr/ref.md', onDiskNfc.byBasename, onDiskNfc.allPaths)).toBe(
+      `02-wiki/adr/${NFC}.md`,
+    );
+  });
+
+  it('holds for the path forms too: relative to the note, and from the vault root', () => {
+    const { byBasename, allPaths } = index(`02-wiki/adr/${NFD}.md`, '03-projects/x/README.md');
+    expect(resolveLinkTarget(`../../02-wiki/adr/${NFC}`, '03-projects/x/README.md', byBasename, allPaths)).toBe(
+      `02-wiki/adr/${NFD}.md`,
+    );
+    expect(resolveLinkTarget(`02-wiki/adr/${NFC}`, '03-projects/x/README.md', byBasename, allPaths)).toBe(
+      `02-wiki/adr/${NFD}.md`,
+    );
+  });
+
+  it('prefers the spelling that was typed when BOTH files exist', () => {
+    const { byBasename, allPaths } = index(`a/${NFC}.md`, `b/${NFD}.md`, 'ref.md');
+    expect(resolveLinkTarget(NFC, 'ref.md', byBasename, allPaths)).toBe(`a/${NFC}.md`);
+    expect(resolveLinkTarget(NFD, 'ref.md', byBasename, allPaths)).toBe(`b/${NFD}.md`);
+  });
+
+  it('still reports a name that exists in neither spelling as broken', () => {
+    const { byBasename, allPaths } = index('02-wiki/adr/outra.md');
+    expect(resolveLinkTarget(NFC, 'ref.md', byBasename, allPaths)).toBeUndefined();
+  });
+});

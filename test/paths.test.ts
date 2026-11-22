@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join, resolve } from 'node:path';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { errorContext } from '../src/i18n/errors.js';
 import {
   DENIED_SEGMENTS,
+  MAX_NOTE_NAME_BYTES,
   assertNoSymlinkEscape,
   guardedPath,
   normalizeSegment,
@@ -90,6 +92,44 @@ describe('resolveWritePath', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(PathGuardError);
     }
+  });
+});
+
+/**
+ * A name the filesystem cannot hold used to surface as a raw `ENAMETOOLONG` from deep inside the
+ * write, naming a temporary file the caller never asked for. The limit is checked here instead,
+ * in bytes — which is what the filesystem counts — and below the 255 it allows, because the
+ * atomic write publishes through a sibling temporary file whose name is the note's plus a suffix.
+ */
+describe('resolveWritePath — name length', () => {
+  const code = (run: () => unknown): string | undefined => {
+    try {
+      run();
+    } catch (err) {
+      return errorContext(err).code;
+    }
+    return undefined;
+  };
+
+  it('refuses a file name too long to be written, with a code', () => {
+    expect(code(() => resolveWritePath('/vault', `02-wiki/docker/${'a'.repeat(300)}.md`))).toBe('path.nameTooLong');
+  });
+
+  it('counts BYTES: 120 accented letters are 240 bytes', () => {
+    const accented = String.fromCodePoint(0xe3).repeat(120);
+    expect(Buffer.byteLength(accented)).toBe(240);
+    expect(code(() => resolveWritePath('/vault', `02-wiki/docker/${accented}.md`))).toBe('path.nameTooLong');
+  });
+
+  it('refuses a directory name past what a filesystem holds', () => {
+    expect(code(() => resolveWritePath('/vault', `02-wiki/${'d'.repeat(256)}/nota.md`))).toBe('path.nameTooLong');
+  });
+
+  it('accepts a long name that still leaves room for the temporary file', () => {
+    const name = `${'a'.repeat(MAX_NOTE_NAME_BYTES - 3)}.md`;
+    expect(Buffer.byteLength(name)).toBe(MAX_NOTE_NAME_BYTES);
+    expect(code(() => resolveWritePath('/vault', `02-wiki/docker/${name}`))).toBeUndefined();
+    expect(code(() => resolveWritePath('/vault', `02-wiki/docker/a${name}`))).toBe('path.nameTooLong');
   });
 });
 

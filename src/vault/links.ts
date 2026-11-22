@@ -157,12 +157,18 @@ export function resolveLinkTarget(
 
   const fromDir = dirname(fromPath);
   const relative = normalize(fromDir === '' ? withExtension : `${fromDir}/${withExtension}`);
-  if (relative !== undefined && allPaths.has(relative)) return relative;
+  const relativeHit = relative === undefined ? undefined : firstPresent(spellings(relative), allPaths);
+  if (relativeHit !== undefined) return relativeHit;
 
   const vaultRelative = normalize(withExtension);
-  if (vaultRelative !== undefined && allPaths.has(vaultRelative)) return vaultRelative;
+  const rootHit = vaultRelative === undefined ? undefined : firstPresent(spellings(vaultRelative), allPaths);
+  if (rootHit !== undefined) return rootHit;
 
-  const candidates = byBasename.get(basenameWithoutExtension(withExtension));
+  let candidates: string[] | undefined;
+  for (const base of spellings(basenameWithoutExtension(withExtension))) {
+    candidates = byBasename.get(base);
+    if (candidates !== undefined && candidates.length > 0) break;
+  }
   if (candidates === undefined || candidates.length === 0) return undefined;
   if (candidates.length === 1) return candidates[0];
 
@@ -174,6 +180,33 @@ export function resolveLinkTarget(
   if (best === undefined) return undefined;
   if (runnerUp !== undefined && depth(runnerUp) === depth(best)) return undefined;
   return best;
+}
+
+/** Anything outside ASCII: the only text whose spelling can differ by Unicode normalization. */
+const NON_ASCII = /[^\x00-\x7f]/;
+
+/**
+ * The spellings under which `text` may exist on disk: as written, then precomposed (NFC), then
+ * decomposed (NFD).
+ *
+ * `decisão` typed in Obsidian is NFC; the same name on a file that came through macOS or a sync
+ * client can be NFD — an `a` followed by a combining tilde. The two look identical and are
+ * different strings, so the link read as broken. The index is left as the disk has it, and it is
+ * the LOOKUP that tries both forms: what was typed first, so that a vault holding both files (it
+ * can) still resolves each link to the one it spelled. ASCII, which is nearly every link, takes
+ * no detour at all.
+ */
+function spellings(text: string): string[] {
+  if (!NON_ASCII.test(text)) return [text];
+  const forms = [text];
+  for (const form of [text.normalize('NFC'), text.normalize('NFD')]) {
+    if (!forms.includes(form)) forms.push(form);
+  }
+  return forms;
+}
+
+function firstPresent(candidates: string[], paths: Set<string>): string | undefined {
+  return candidates.find((candidate) => paths.has(candidate));
 }
 
 /** Collapses `.` and `..`; returns undefined when the path escapes the vault root. */

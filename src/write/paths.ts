@@ -151,6 +151,19 @@ export class PathGuardError extends Error {}
  * get the flag either, and that is what makes the directory mean what it says: nothing is
  * destroyed in there, it only enters and leaves.
  */
+/** The most bytes one path segment may have: what every common filesystem allows for a name. */
+const MAX_SEGMENT_BYTES = 255;
+
+/**
+ * The most bytes a note's own FILE NAME may have, `.md` included.
+ *
+ * Below `MAX_SEGMENT_BYTES`, because a note is never written in place: `atomicWrite` publishes
+ * through a sibling temporary file named `.<name>.<pid>.<16 hex>.tmp`, up to 35 bytes longer than
+ * the note. A name that fits the filesystem on its own and not with that suffix used to fail from
+ * inside the write with a raw `ENAMETOOLONG` about a file the caller never named.
+ */
+export const MAX_NOTE_NAME_BYTES = MAX_SEGMENT_BYTES - 35;
+
 export interface PathGuardOptions {
   allowArchive?: boolean;
   /** The vault's layout: which folders are the archive and the templates. Default layout when absent. */
@@ -206,7 +219,22 @@ export function resolveWritePath(
   if (rel === '' || rel.startsWith('..') || resolve(root, rel) !== abs) {
     throw coded(new PathGuardError(`caminho fora do vault: ${relPath}`), 'path.outsideVault', { relPath });
   }
-  const head = rel.split(sep)[0];
+  // In bytes, which is what the filesystem counts: an accented letter is two.
+  const segments = rel.split(sep);
+  segments.forEach((segment, i) => {
+    const max = i === segments.length - 1 ? MAX_NOTE_NAME_BYTES : MAX_SEGMENT_BYTES;
+    const bytes = Buffer.byteLength(segment);
+    if (bytes > max) {
+      const name = segment.length > 40 ? `${segment.slice(0, 40)}…` : segment;
+      throw coded(
+        new PathGuardError(`nome longo demais: ${bytes} bytes em "${name}", máximo ${max}`),
+        'path.nameTooLong',
+        { bytes, name, max },
+      );
+    }
+  });
+
+  const head = segments[0];
   if (head !== undefined && deniedPrefixes(options).includes(head)) {
     throw coded(new PathGuardError(`escrita negada em ${head}/ (somente leitura)`), 'path.readOnlyArea', { head });
   }
