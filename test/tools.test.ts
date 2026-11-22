@@ -2823,11 +2823,47 @@ describe('servidor MCP', () => {
       expect(tool.annotations, tool.name).toMatchObject({ openWorldHint: false });
       expect(tool.execution, tool.name).toEqual({ taskSupport: 'forbidden' });
     }
+    // O dialeto é dito, e é o draft 7 que os clientes já recebiam: quem monta a lista agora é este
+    // servidor, e o padrão do conversor é outro.
+    const DRAFT_7 = 'http://json-schema.org/draft-07/schema#';
+    for (const tool of tools) {
+      expect((tool.inputSchema as { $schema?: string }).$schema, tool.name).toBe(DRAFT_7);
+      if (tool.outputSchema !== undefined) {
+        expect((tool.outputSchema as { $schema?: string }).$schema, tool.name).toBe(DRAFT_7);
+      }
+    }
     const learn = tools.find((tool) => tool.name === 'vault_learn');
     expect(learn?.inputSchema.required).toEqual(['title', 'insight', 'context', 'domain']);
     expect(learn?.outputSchema).toMatchObject({ type: 'object', additionalProperties: false });
     // A lista de tools é decidida uma vez: não há `listChanged` a prometer.
     expect(client.getServerCapabilities()?.tools).toEqual({});
+
+    await client.close();
+    await server.close();
+  });
+
+  it.each(['en', 'pt'] as const)('o tools/list publica a descrição e o título de cada tool, no idioma pedido (%s)', async (lang) => {
+    // A descrição é o que o modelo lê para decidir se chama a tool. Uma lista com onze nomes e
+    // nenhuma descrição passava em todos os outros testes, e no smoke.
+    const server = createVaultServer(await makeVault(), lang);
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
+    const catalog = messagesFor(lang).tools as Record<string, { description: string; displayName: string }>;
+    for (const tool of tools) {
+      expect(tool.description, tool.name).toBe(catalog[tool.name]?.description);
+      expect(tool.title, tool.name).toBe(catalog[tool.name]?.displayName);
+      expect(tool.description?.length ?? 0, tool.name).toBeGreaterThan(40);
+    }
+    // E os argumentos também chegam descritos.
+    const properties = (tools.find((tool) => tool.name === 'vault_search')?.inputSchema.properties ?? {}) as Record<
+      string,
+      { description?: string }
+    >;
+    expect(properties['query']?.description).toBe(messagesFor(lang).tools.vault_search.query);
 
     await client.close();
     await server.close();
@@ -3357,7 +3393,20 @@ describe('tetos de resposta e de entrada', () => {
     expect(tool('vault_learn').outputSchema?.strict().safeParse(escrita.structuredContent).success).toBe(true);
     // O corte é da RESPOSTA: a nota foi escrita inteira.
     expect(await vaultContains(vaultRoot, 'zzlinha 3999 de um aprendizado')).not.toHaveLength(0);
-  });
+
+    // E o `before`: a prévia de um ANEXO à nota grande traz o texto dela antes e depois, e os dois
+    // passam do teto. Um diff pequeno não basta para dizer que nada foi cortado.
+    const anexo = await call('vault_learn', { ...args, insight: 'zzanexo uma linha só', preview: true });
+    expect(anexo.isError).not.toBe(true);
+    const appended = anexo.structuredContent as unknown as Learned & { action: string };
+    expect(appended.action).toBe('appended');
+    const grande = appended.files?.find((file) => file.path.endsWith('aprendizado-comprido.md'));
+    expect(grande?.before.length).toBe(MAX_DIFF_CHARS);
+    expect(grande?.after.length).toBe(MAX_DIFF_CHARS);
+    expect(grande?.diff.length).toBeLessThan(MAX_DIFF_CHARS);
+    expect(grande?.truncated).toBe(true);
+    expect(JSON.stringify(anexo.structuredContent).length).toBeLessThan(4 * MAX_DIFF_CHARS);
+  }, 30_000);
 
   it('os outros tetos: limit do vault_list, old_text e new_text do vault_edit_note, context do vault_learn', async () => {
     const vaultRoot = await makeVault(true);
@@ -4153,7 +4202,9 @@ describe('validade do scan: o que as tools fazem com ela', () => {
     const deleted = await call('vault_delete', { path: '02-wiki/docker/bucket-renomeado.md', confirm: true });
     expect(deleted.isError).not.toBe(true);
     expect(await search()).toContain('Nenhum resultado');
-  });
+    // Vinte processos do git: no runner do Windows cada um custa ~150 ms, e o padrão de 5 s do
+    // vitest ficava com pouca folga.
+  }, 30_000);
 
   it('dentro da validade, ler pelas tools não refaz o stat do vault', async () => {
     // O reaproveitamento é testado no scanner; aqui, que nenhuma tool de leitura o desfaz. Um

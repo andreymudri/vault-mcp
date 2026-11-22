@@ -632,9 +632,13 @@ O review desta rodada achou, e foi corrigido antes de qualquer execução:
 **Fica com o dono, uma vez:** cadastrar este workflow como trusted publisher do pacote. O comando
 está no topo do `release.yml`. O npm descarta um cadastro que não publicar nada em dois dias.
 
-**Não testável daqui:** o workflow em si. O que tem teste é o `release-check`, a forma do workflow
-(`test/package.test.ts`: quem tem `id-token`, a ordem dos passos, as versões fixadas) e, à mão em
-2026-11-22, cada trecho de shell que não publica nada.
+**O que tem teste, e o que não tem.** O `release-check`; a forma do workflow (quem tem
+`id-token`, a ordem dos passos, as versões fixadas); e o SHELL dos passos que decidem, executado:
+`test/package.test.ts` tira os blocos `run:` do YAML e os roda no bash com `npm`, `gh`, `git`,
+`curl` e `mcp-publisher` de mentira no PATH, em cada estado (nada publicado, tudo publicado, npm
+com outro conteúdo, ref que não é `main`). Dezenove mutações — cada `if` invertido — ficam
+vermelhas. O que continua sem teste é o que só o runner tem: a troca OIDC com o npm e com o
+registry, e a verificação do cosign.
 
 ---
 

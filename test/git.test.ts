@@ -1022,6 +1022,42 @@ describe('commitFiles with a git directory it cannot write', () => {
   );
 });
 
+describe('commitFiles with a journal it can no longer rewrite', () => {
+  it.skipIf(NO_POSIX_MODES || NO_SHELL_HOOKS || process.getuid?.() === 0)(
+    'retries the pending commit and answers, instead of throwing from the rewrite',
+    async () => {
+      // The other write to the journal: after the pending entries are retried, what is left of
+      // them is written back. It runs only when the journal already HOLDS an entry, so a journal
+      // that was written while the git directory allowed it and cannot be rewritten now is the
+      // state that reaches it.
+      const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-git-test-'));
+      const gitDirectory = path.join(repoRoot, '.git');
+      try {
+        await initScratchRepo(repoRoot);
+        await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+        await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+        await installPreCommitHook(repoRoot, 'exit 1');
+        const first = path.join(repoRoot, 'primeira.md');
+        await fs.writeFile(first, '# Primeira\n', 'utf8');
+        const refused = await commitFiles(repoRoot, [first], 'docs(vault): primeira', { indexLockWaitsMs: [] });
+        expect(refused).toMatchObject({ committed: false, pending: true });
+        expect(await pendingCommits(repoRoot)).toHaveLength(1);
+
+        await fs.chmod(gitDirectory, 0o555);
+        const second = path.join(repoRoot, 'segunda.md');
+        await fs.writeFile(second, '# Segunda\n', 'utf8');
+        const result = await commitFiles(repoRoot, [second], 'docs(vault): segunda', { indexLockWaitsMs: [] });
+
+        expect(result.committed).toBe(false);
+        expect(result.warning).toBeDefined();
+      } finally {
+        await fs.chmod(gitDirectory, 0o755).catch(() => undefined);
+        await removeTree(repoRoot);
+      }
+    },
+  );
+});
+
 describe('lockPathFor', () => {
   it('puts the lock inside the git directory of a repository, and in the vault root otherwise', async () => {
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-lockpath-'));

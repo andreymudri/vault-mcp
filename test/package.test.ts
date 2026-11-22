@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -242,6 +243,35 @@ describe('scripts/release-check.mjs', () => {
     expect(run.stderr).toContain('package-lock.json');
   });
 
+  it('recusa cada uma das outras cópias da versão e do nome que ficou diferente', () => {
+    const lockTop = check({
+      file: 'package-lock.json',
+      edit: json((data) => {
+        data.version = '0.0.3';
+      }),
+    });
+    expect(lockTop.status).toBe(1);
+    expect(lockTop.stderr).toContain('package-lock.json: version');
+
+    const identifier = check({
+      file: 'server.json',
+      edit: json((data) => {
+        (data.packages[0] as { identifier?: string }).identifier = '@outro/pacote';
+      }),
+    });
+    expect(identifier.status).toBe(1);
+    expect(identifier.stderr).toContain('packages[0].identifier');
+
+    const semVersao = check({
+      file: 'package.json',
+      edit: json((data) => {
+        data.version = 'amanhã';
+      }),
+    });
+    expect(semVersao.status).toBe(1);
+    expect(semVersao.stderr).toContain('not a semantic version');
+  });
+
   it('recusa uma versão que não tem seção no CHANGELOG, ou cuja seção está vazia', () => {
     const version = String(pkg.version);
     const semSecao = check({ file: 'CHANGELOG.md', edit: (text) => text.replace(`## [${version}]`, '## [0.0.0]') });
@@ -422,5 +452,220 @@ describe('os workflows do GitHub', () => {
     expect(release).toMatch(/MCP_PUBLISHER_VERSION: v\d+\.\d+\.\d+/);
     expect(code(release)).toContain('cosign verify-blob');
     expect(code(release)).not.toContain('releases/latest');
+  });
+});
+
+/**
+ * O shell do workflow de release, EXECUTADO.
+ *
+ * Os testes acima leem o arquivo: dizem que um `npm view` está lá, não o que o passo decide com
+ * ele. Invertido, cada um destes `if` deixava aqueles testes verdes — e são eles que decidem se
+ * uma versão é publicada, e se é publicada duas vezes. Então os blocos `run:` são tirados do YAML
+ * e rodados no bash como o runner roda, com `npm`, `gh`, `git`, `curl` e `mcp-publisher` de mentira
+ * no PATH, que anotam o que foram mandados fazer e respondem o que o cenário pede.
+ *
+ * Só no Linux, que é onde o workflow roda: os passos usam o `base64 -w0` do GNU.
+ */
+describe.skipIf(process.platform !== 'linux')('o shell do workflow de release, executado', () => {
+  const workflow = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const SHA = '5b79ca9b436f7f1aa12ac945ae99e4c531a123cc';
+
+  /** O script do passo `stepName`, como o bash o recebe. */
+  function scriptOf(stepName: string): string {
+    const lines = workflow.split('\n');
+    const at = lines.findIndex((line) => line.trim() === `- name: ${stepName}`);
+    if (at === -1) throw new Error(`passo não encontrado: ${stepName}`);
+    const nextStep = lines.findIndex((line, i) => i > at && /^\s+- (name|uses|run):/.test(line));
+    const runAt = lines.findIndex((line, i) => i > at && /^\s+run: \|$/.test(line));
+    if (runAt === -1 || (nextStep !== -1 && runAt > nextStep)) throw new Error(`passo sem run: ${stepName}`);
+    const indent = /^ */.exec(lines[runAt + 1] ?? '')?.[0].length ?? 0;
+    const body: string[] = [];
+    for (const line of lines.slice(runAt + 1)) {
+      if (line.trim() !== '' && (/^ */.exec(line)?.[0].length ?? 0) < indent) break;
+      body.push(line.slice(indent));
+    }
+    return body.join('\n');
+  }
+
+  interface World {
+    /** O que o `npm view … dist.integrity` responde. Vazio: a versão não está no npm. */
+    npmIntegrity?: string;
+    /** O GitHub Release desta versão já existe. */
+    released?: boolean;
+    /** O MCP Registry já tem esta versão. */
+    registered?: boolean;
+    /** A tag desta versão já existe no remoto. */
+    tagged?: boolean;
+    env?: Record<string, string>;
+  }
+
+  /** Roda um passo num diretório de mentira e devolve o que ele mandou fazer. */
+  function runStep(stepName: string, world: World, cwd?: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'vault-mcp-release-shell-'));
+    try {
+      const bin = join(dir, 'bin');
+      const work = cwd ?? join(dir, 'work');
+      const log = join(dir, 'calls.log');
+      const output = join(dir, 'github-output');
+      mkdirSync(bin);
+      writeFileSync(log, '');
+      writeFileSync(output, '');
+      const stub = (name: string, body: string, where = bin): void => {
+        writeFileSync(join(where, name), `#!/bin/bash\necho "${name} $*" >> "$STUB_LOG"\n${body}\n`, { mode: 0o755 });
+      };
+      stub('npm', 'if [ "$1" = view ]; then [ -n "$STUB_NPM_INTEGRITY" ] || exit 1; echo "$STUB_NPM_INTEGRITY"; fi');
+      stub('gh', 'if [ "$1 $2" = "release view" ]; then exit "$STUB_GH_VIEW"; fi');
+      stub('curl', 'exit "$STUB_CURL"');
+      stub('git', 'if [ "$1" = ls-remote ]; then exit "$STUB_LS_REMOTE"; fi');
+      let ours = '';
+      if (cwd === undefined) {
+        mkdirSync(join(work, 'release'), { recursive: true });
+        mkdirSync(join(dir, 'pkg', 'package'), { recursive: true });
+        writeFileSync(join(dir, 'pkg', 'package', 'package.json'), JSON.stringify({ name: '@andreymudri/vault-mcp' }));
+        const tarball = join(work, 'release', 'andreymudri-vault-mcp-0.6.0.tgz');
+        const packed = spawnSync('tar', ['-czf', tarball, '-C', join(dir, 'pkg'), 'package/package.json']);
+        if (packed.status !== 0) throw new Error(`tar falhou: ${String(packed.stderr)}`);
+        ours = `sha512-${createHash('sha512').update(readFileSync(tarball)).digest('base64')}`;
+        cpSync(join(ROOT, 'server.json'), join(work, 'release', 'server.json'));
+        writeFileSync(join(work, 'release', 'notes.md'), 'notas\n');
+        stub('mcp-publisher', '', work);
+      }
+      const integrity = world.npmIntegrity === 'ours' ? ours : (world.npmIntegrity ?? '');
+      const run = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', scriptOf(stepName)], {
+        cwd: work,
+        encoding: 'utf8',
+        env: {
+          PATH: `${bin}:${process.env['PATH'] ?? ''}`,
+          HOME: dir,
+          STUB_LOG: log,
+          STUB_NPM_INTEGRITY: integrity,
+          STUB_GH_VIEW: world.released === true ? '0' : '1',
+          STUB_CURL: world.registered === true ? '0' : '22',
+          STUB_LS_REMOTE: world.tagged === true ? '0' : '2',
+          VERSION: '0.6.0',
+          GITHUB_SHA: SHA,
+          GITHUB_REPOSITORY: 'andreymudri/vault-mcp',
+          GITHUB_REF: 'refs/heads/main',
+          GITHUB_OUTPUT: output,
+          GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+          RUNNER_TEMP: dir,
+          EVENT: 'push',
+          ...world.env,
+        },
+      });
+      const calls = readFileSync(log, 'utf8').split('\n').filter((line) => line !== '');
+      const outputs = Object.fromEntries(
+        readFileSync(output, 'utf8')
+          .split('\n')
+          .filter((line) => line.includes('='))
+          .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+      );
+      return { status: run.status, stdout: run.stdout, stderr: run.stderr, calls, outputs, work };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const did = (calls: string[], prefix: string): string[] => calls.filter((call) => call.startsWith(prefix));
+
+  describe('decidir se há o que publicar', () => {
+    const plan = (world: World) => runStep('Versão, e se ela já tem tag', world, ROOT);
+
+    it('versão sem tag, num push em main: publica', () => {
+      const run = plan({ tagged: false });
+      expect(run.stderr).toBe('');
+      expect(run.status).toBe(0);
+      expect(run.outputs).toEqual({ version: String(pkg.version), release: 'true' });
+      expect(did(run.calls, 'git ls-remote')).toEqual([
+        `git ls-remote --exit-code --tags origin refs/tags/v${String(pkg.version)}`,
+      ]);
+    });
+
+    it('versão que já tem tag: não publica', () => {
+      expect(plan({ tagged: true }).outputs).toEqual({ version: String(pkg.version), release: 'false' });
+    });
+
+    it('disparo manual em main: publica mesmo com a tag, para terminar um release parado', () => {
+      const run = plan({ tagged: true, env: { EVENT: 'workflow_dispatch' } });
+      expect(run.outputs['release']).toBe('true');
+    });
+
+    it('qualquer ref que não seja main: não publica, nem no disparo manual', () => {
+      for (const EVENT of ['push', 'workflow_dispatch']) {
+        const run = plan({ tagged: false, env: { EVENT, GITHUB_REF: 'refs/heads/feat/x' } });
+        expect(run.status, EVENT).toBe(0);
+        expect(run.outputs['release'], EVENT).toBe('false');
+      }
+    });
+  });
+
+  describe('npm', () => {
+    it('versão que não está no npm: publica o tarball, pelo caminho absoluto', () => {
+      const run = runStep('npm', {});
+      expect(run.status).toBe(0);
+      const published = did(run.calls, 'npm publish');
+      expect(published).toHaveLength(1);
+      expect(published[0]).toMatch(/^npm publish \/.+\/release\/andreymudri-vault-mcp-0\.6\.0\.tgz --access public --provenance$/);
+      expect(did(run.calls, 'npm view')).toEqual(['npm view @andreymudri/vault-mcp@0.6.0 dist.integrity']);
+    });
+
+    it('versão que já está no npm e é este tarball: não publica de novo, e segue', () => {
+      const run = runStep('npm', { npmIntegrity: 'ours' });
+      expect(run.status).toBe(0);
+      expect(did(run.calls, 'npm publish')).toEqual([]);
+    });
+
+    it('versão que já está no npm com outro conteúdo: para, sem publicar', () => {
+      const run = runStep('npm', { npmIntegrity: 'sha512-o-tarball-de-outro-commit' });
+      expect(run.status).toBe(1);
+      expect(did(run.calls, 'npm publish')).toEqual([]);
+      expect(run.stdout).toContain('::error::');
+    });
+  });
+
+  describe('tag e GitHub Release', () => {
+    it('sem Release: cria, com a tag no commit verificado', () => {
+      const run = runStep('Tag e GitHub Release', { released: false });
+      expect(run.status).toBe(0);
+      expect(did(run.calls, 'gh release create')).toEqual([
+        `gh release create v0.6.0 --repo andreymudri/vault-mcp --target ${SHA} --title v0.6.0 --notes-file release/notes.md`,
+      ]);
+      expect(did(run.calls, 'gh release edit')).toEqual([]);
+    });
+
+    it('com Release: atualiza as notas, e não tenta criar de novo', () => {
+      const run = runStep('Tag e GitHub Release', { released: true });
+      expect(run.status).toBe(0);
+      expect(did(run.calls, 'gh release create')).toEqual([]);
+      expect(did(run.calls, 'gh release edit')).toEqual([
+        'gh release edit v0.6.0 --repo andreymudri/vault-mcp --notes-file release/notes.md',
+      ]);
+    });
+  });
+
+  describe('MCP Registry', () => {
+    it('versão que não está no registry: autentica e publica, de dentro de release/', () => {
+      const run = runStep('MCP Registry', { registered: false });
+      expect(run.status).toBe(0);
+      expect(did(run.calls, 'mcp-publisher')).toEqual(['mcp-publisher login github-oidc', 'mcp-publisher publish']);
+      expect(did(run.calls, 'curl')[0]).toContain(
+        'https://registry.modelcontextprotocol.io/v0.1/servers/io.github.andreymudri%2Fvault-mcp/versions/0.6.0',
+      );
+    });
+
+    it('versão que já está no registry: não publica de novo', () => {
+      const run = runStep('MCP Registry', { registered: true });
+      expect(run.status).toBe(0);
+      expect(did(run.calls, 'mcp-publisher')).toEqual([]);
+    });
+  });
+
+  it('o resto da forma: verify só roda quando há o que publicar, o binário só roda depois de verificado', () => {
+    expect(workflow).toMatch(/\n {2}verify:\n(?:.*\n)*? {4}needs: plan\n {4}if: needs\.plan\.outputs\.release == 'true'\n/);
+    expect(workflow).toMatch(/^concurrency:\n {2}group: release\n {2}cancel-in-progress: false$/m);
+    const download = scriptOf('Baixar e verificar o mcp-publisher');
+    expect(download.indexOf('cosign verify-blob')).toBeGreaterThan(-1);
+    expect(download.indexOf('cosign verify-blob')).toBeLessThan(download.indexOf('tar xzf'));
+    // Baixar não é rodar: o binário só é chamado no passo seguinte.
+    expect(download).not.toMatch(/\.\/mcp-publisher\b/);
   });
 });
