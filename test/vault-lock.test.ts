@@ -44,6 +44,25 @@ describe('VaultLock', () => {
     expect(await lock.holder()).toBeUndefined();
   });
 
+  it('is stamped when it is obtained, not when the wait for it began', async () => {
+    // The age of a lock is what decides a takeover, and it was counted from the moment its holder
+    // STARTED WAITING. A writer that queued for 30 s held a lock already 30 s old, so the two
+    // minutes a healthy holder is given were really ninety seconds — and with a longer
+    // `VAULT_LOCK_TIMEOUT_MS`, a lock could be born past the limit and taken at once.
+    const first = new VaultLock({ lockPath });
+    const second = new VaultLock({ lockPath });
+
+    const release = await first.acquire();
+    const waiting = second.acquire();
+    await sleep(150);
+    const releasedAt = Date.now();
+    await release();
+    const releaseSecond = await waiting;
+
+    expect(Date.parse(readLock().at)).toBeGreaterThanOrEqual(releasedAt);
+    await releaseSecond();
+  });
+
   it('makes a second acquirer wait until the first releases', async () => {
     const first = new VaultLock({ lockPath });
     const second = new VaultLock({ lockPath });

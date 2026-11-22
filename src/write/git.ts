@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync, promises as fs } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { constants, existsSync, promises as fs } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 import { PHRASES } from '../i18n/phrases.js';
@@ -160,17 +160,64 @@ export async function gitDir(repoRoot: string): Promise<string | undefined> {
 }
 
 /**
- * Where the cross-process vault lock lives: inside the git directory when there is one, a dotfile
- * in the vault root when there is not.
+ * The git directory `start` belongs to, found by READING THE DISK: the nearest `.git` at or above
+ * it, followed through when it is a file.
+ *
+ * A vault can be a subdirectory of a repository, a linked worktree or a submodule, and in each of
+ * those `.git` is further up or is a one-line file (`gitdir: <path>`) naming the real directory.
+ * This is the part of git's own discovery that depends on nothing but the filesystem — which is
+ * the point: see `lockPathFor`.
+ */
+async function gitDirOnDisk(start: string): Promise<string | undefined> {
+  let dir = start;
+  for (;;) {
+    const candidate = join(dir, '.git');
+    const stat = await fs.stat(candidate).catch(() => undefined);
+    if (stat?.isDirectory() === true) return candidate;
+    if (stat?.isFile() === true) {
+      const text = await fs.readFile(candidate, 'utf8').catch(() => '');
+      const pointer = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(text)?.[1];
+      // A `.git` file that names nothing is not a repository git would accept either.
+      return pointer === undefined ? undefined : resolve(dir, pointer);
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/**
+ * Where the cross-process vault lock lives: inside the git directory when there is one this
+ * process can write to, a dotfile in the vault root otherwise.
  *
  * Inside `.git` because nothing there is ever a note, ever staged, or ever shown by `git status`.
- * Asked of git rather than assumed to be `<vault>/.git`: a vault can be a subdirectory of a
- * repository, a linked worktree or a submodule, and in each of those `.git` is elsewhere or is a
- * file. The dotfile fallback is invisible to the scanner, which skips every dot entry.
+ * The dotfile is invisible to the scanner, which skips every dot entry.
+ *
+ * The answer comes from the DISK and from nothing else — not from the `git` binary, which this
+ * used to ask. Mutual exclusion only exists if every server over a vault arrives at the same file,
+ * and whether git answers is a property of each server's environment: one started from a desktop
+ * launcher with a minimal PATH got "no repository" and locked the dotfile while the one in a
+ * terminal locked `.git/vault-mcp.lock`. Measured with twelve processes editing one note, six of
+ * them with no git: 9 and 10 of the 12 edits survived in two rounds out of four, every call
+ * answering success. The vault root is resolved first for the same reason — two spellings of one
+ * directory are one vault.
+ *
+ * A git directory that cannot be written counts as none. No commit can succeed there, so the
+ * write is saved and its commit reported, which is what happened before there was a lock; what
+ * this does not cover is two servers running as DIFFERENT users with different rights over
+ * `.git`, which would again pick different files.
  */
 export async function lockPathFor(vaultRoot: string): Promise<string> {
-  const dir = await gitDir(vaultRoot);
-  return dir === undefined ? join(vaultRoot, '.vault-mcp.lock') : join(dir, LOCK_FILE);
+  const root = await fs.realpath(vaultRoot).catch(() => resolve(vaultRoot));
+  const dir = await gitDirOnDisk(root);
+  if (dir !== undefined) {
+    const writable = await fs.access(dir, constants.W_OK).then(
+      () => true,
+      () => false,
+    );
+    if (writable) return join(dir, LOCK_FILE);
+  }
+  return join(root, '.vault-mcp.lock');
 }
 
 function sleep(ms: number): Promise<void> {
@@ -316,6 +363,23 @@ async function writePending(dir: string, entries: PendingCommit[]): Promise<void
 }
 
 /**
+ * `writePending` for a caller that must not throw. Answers whether the journal was written.
+ *
+ * The journal lives in the git directory, so the state in which a commit cannot be made at all —
+ * a git directory this process may not write — is also the state in which the journal cannot be
+ * kept. `commitFiles` runs after the note is on disk and a throw from it reads as "the write
+ * failed", so here a journal that cannot be written is an answer, not an exception.
+ */
+async function tryWritePending(dir: string, entries: PendingCommit[]): Promise<boolean> {
+  try {
+    await writePending(dir, entries);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Commits that failed after their files were written and are waiting to be made.
  *
  * Without the journal such a write is an orphan: the note is on disk, the tool said "Commit: no",
@@ -354,7 +418,9 @@ async function drainPending(
     else if (entry.attempts + 1 >= MAX_PENDING_ATTEMPTS) dropped += 1;
     else keep.push({ ...entry, attempts: entry.attempts + 1 });
   }
-  await writePending(dir, keep);
+  // Best effort: if the journal cannot be rewritten the entries stay as they were, and what was
+  // just committed is simply found with nothing left to stage the next time round.
+  await tryWritePending(dir, keep);
   return { recovered, dropped };
 }
 
@@ -433,13 +499,11 @@ export async function commitFiles(
       attempts: 1,
       at: new Date().toISOString(),
     };
-    await writePending(dir, [...(await readPending(dir)), entry]);
-    result = {
-      committed: false,
-      pending: true,
-      warning: `${outcome.warning}; ${PHRASES.gitPending}`,
-      ...recovery,
-    };
+    // Only a commit that WAS recorded is promised a retry.
+    const recorded = await tryWritePending(dir, [...(await readPending(dir)), entry]);
+    result = recorded
+      ? { committed: false, pending: true, warning: `${outcome.warning}; ${PHRASES.gitPending}`, ...recovery }
+      : { committed: false, warning: outcome.warning, ...recovery };
   }
 
   // A recovered commit is as unpushed as a new one, so either is a reason to push.

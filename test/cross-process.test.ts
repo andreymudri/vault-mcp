@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -99,6 +99,38 @@ describe('two processes writing one vault', () => {
     expect(body).not.toContain('-old');
     expect(commitCount() - before).toBe(8);
     expect(git(root, 'status', '--porcelain')).toBe('');
+  }, 120_000);
+
+  it('keeps every edit when half the processes have no git on their PATH', async () => {
+    // The lock file has to be the same one for a process that can run git and for one that cannot:
+    // asking the binary where the repository is gave each half its own lock (9 and 10 of 12 edits
+    // in two rounds out of four). The processes with no git still answer success — their commit
+    // is the warning, the edit is on disk — so only the file can tell.
+    const path = '02-wiki/docker/shared.md';
+    const markers = Array.from({ length: 12 }, (_, i) => `marker-${i}-old`);
+    writeFileSync(join(root, path), `---\ntipo: wiki\n---\n\n# Shared\n\n${markers.join('\n\n')}\n`);
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'shared');
+    const noGit = join(base, 'no-git-here');
+    mkdirSync(noGit);
+    // On Windows the variable is `Path`, and a second spelling beside it is ambiguous.
+    const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
+
+    const answers = await Promise.all(
+      markers.map((marker, i) =>
+        callInProcess(
+          root,
+          'vault_edit_note',
+          { path, old_text: marker, new_text: `marker-${i}-NEW` },
+          i % 2 === 1 ? { [pathKey]: noGit } : {},
+        ),
+      ),
+    );
+
+    expect(answers.filter((answer) => answer.isError)).toEqual([]);
+    const body = readFileSync(join(root, path), 'utf8');
+    expect(body.match(/marker-\d+-NEW/g)?.length).toBe(12);
+    expect(body).not.toContain('-old');
   }, 120_000);
 
   it('keeps every MOC entry, daily line and commit when six processes learn into one domain', async () => {

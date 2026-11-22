@@ -12,7 +12,7 @@ import {
   pendingCommits,
   pushIfEnabled,
 } from '../src/write/git.js';
-import { NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
+import { NO_HOSTILE_FILENAMES, NO_POSIX_MODES, NO_SHELL_HOOKS } from './platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -980,6 +980,39 @@ describe('commitFiles: contention and recovery', () => {
   });
 });
 
+describe('commitFiles with a git directory it cannot write', () => {
+  it.skipIf(NO_POSIX_MODES || process.getuid?.() === 0)(
+    'answers "not committed" instead of throwing when not even the journal can be written',
+    async () => {
+      // "It never throws" is this function's contract, because by the time it runs the note is on
+      // disk and a throw reads as "the write failed". The journal of pending commits lives in the
+      // git directory, so the one state in which the commit cannot be made is also the one in which
+      // the journal cannot be written — and that write was outside every catch.
+      const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-git-test-'));
+      const gitDirectory = path.join(repoRoot, '.git');
+      try {
+        await initScratchRepo(repoRoot);
+        await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+        await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+        const absPath = path.join(repoRoot, 'nota.md');
+        await fs.writeFile(absPath, '# Nota\n', 'utf8');
+        await fs.chmod(gitDirectory, 0o555);
+
+        const result = await commitFiles(repoRoot, [absPath], 'docs(vault): nota', { indexLockWaitsMs: [] });
+
+        expect(result.committed).toBe(false);
+        expect(result.warning).toBeDefined();
+        // Nothing was recorded, so nothing is promised.
+        expect(result.pending).toBeUndefined();
+        expect(result.warning).not.toContain('será refeito');
+      } finally {
+        await fs.chmod(gitDirectory, 0o755).catch(() => undefined);
+        await removeTree(repoRoot);
+      }
+    },
+  );
+});
+
 describe('lockPathFor', () => {
   it('puts the lock inside the git directory of a repository, and in the vault root otherwise', async () => {
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-lockpath-'));
@@ -990,10 +1023,105 @@ describe('lockPathFor', () => {
         await fs.realpath(path.join(repo, '.git')),
       );
       expect(path.basename(await lockPathFor(repo))).toBe('vault-mcp.lock');
-      expect(await lockPathFor(plain)).toBe(path.join(plain, '.vault-mcp.lock'));
+      expect(await lockPathFor(plain)).toBe(path.join(await fs.realpath(plain), '.vault-mcp.lock'));
     } finally {
       await removeTree(repo);
       await removeTree(plain);
     }
+  });
+
+  /**
+   * The path is read off the DISK, never asked of the `git` binary. Two servers over one vault must
+   * arrive at the same file whatever their environments are, and "is git on my PATH" is exactly
+   * the kind of thing that differs between a terminal and a desktop app started from a launcher.
+   * Measured before this: twelve processes editing one note, six of them with no git on the PATH,
+   * kept 9 and 10 of the 12 edits in two rounds out of four — each half held its own lock.
+   */
+  describe('is derived from the filesystem alone', () => {
+    let base: string;
+    let savedPath: string | undefined;
+
+    beforeEach(async () => {
+      base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-lockpath-')));
+      savedPath = process.env['PATH'];
+    });
+
+    afterEach(async () => {
+      if (savedPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = savedPath;
+      await removeTree(base);
+    });
+
+    it('answers the same with no git on the PATH', async () => {
+      const repo = path.join(base, 'vault');
+      await fs.mkdir(repo);
+      await initScratchRepo(repo);
+      const empty = path.join(base, 'no-git-here');
+      await fs.mkdir(empty);
+
+      // Asked WITHOUT git first, and of a root nothing has asked about yet: the answer for a root
+      // used to be remembered, and a process that never had git has nothing to remember.
+      process.env['PATH'] = empty;
+      const withoutGit = await lockPathFor(repo);
+      process.env['PATH'] = savedPath;
+      const withGit = await lockPathFor(repo);
+
+      expect(withoutGit).toBe(path.join(repo, '.git', 'vault-mcp.lock'));
+      expect(withGit).toBe(withoutGit);
+    });
+
+    it('follows a `.git` FILE to the directory it names, relative or absolute', async () => {
+      // A linked worktree and a submodule both have a one-line file where a clone has a directory.
+      const real = path.join(base, 'elsewhere', 'gitdir');
+      await fs.mkdir(real, { recursive: true });
+      const relativeVault = path.join(base, 'relative');
+      const absoluteVault = path.join(base, 'absolute');
+      await fs.mkdir(relativeVault);
+      await fs.mkdir(absoluteVault);
+      await fs.writeFile(path.join(relativeVault, '.git'), 'gitdir: ../elsewhere/gitdir\n', 'utf8');
+      await fs.writeFile(path.join(absoluteVault, '.git'), `gitdir: ${real}\n`, 'utf8');
+
+      expect(await lockPathFor(relativeVault)).toBe(path.join(real, 'vault-mcp.lock'));
+      expect(await lockPathFor(absoluteVault)).toBe(path.join(real, 'vault-mcp.lock'));
+    });
+
+    it('walks up to the repository a vault is a subdirectory of', async () => {
+      const repo = path.join(base, 'repo');
+      const vault = path.join(repo, 'docs', 'vault');
+      await fs.mkdir(vault, { recursive: true });
+      await initScratchRepo(repo);
+
+      expect(await lockPathFor(vault)).toBe(path.join(repo, '.git', 'vault-mcp.lock'));
+    });
+
+    it('is the same file through a symlink to the vault', async () => {
+      const repo = path.join(base, 'vault');
+      await fs.mkdir(repo);
+      await initScratchRepo(repo);
+      const link = path.join(base, 'link-to-vault');
+      await fs.symlink(repo, link, 'junction');
+
+      expect(await lockPathFor(link)).toBe(await lockPathFor(repo));
+    });
+
+    it.skipIf(NO_POSIX_MODES || process.getuid?.() === 0)(
+      'falls back to the vault root when the git directory cannot be written',
+      async () => {
+        // A repository this user may read and not write: no commit will ever succeed there, so for
+        // the purposes of the lock it is a vault with no repository. Refusing every write instead
+        // (`lock.failed`) took away what 0.5.0 did in this state — save the note, warn about the
+        // commit.
+        const repo = path.join(base, 'vault');
+        await fs.mkdir(repo);
+        await initScratchRepo(repo);
+        const gitDirectory = path.join(repo, '.git');
+        await fs.chmod(gitDirectory, 0o555);
+        try {
+          expect(await lockPathFor(repo)).toBe(path.join(repo, '.vault-mcp.lock'));
+        } finally {
+          await fs.chmod(gitDirectory, 0o755);
+        }
+      },
+    );
   });
 });

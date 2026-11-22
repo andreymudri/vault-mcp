@@ -150,17 +150,16 @@ export class VaultLock {
    * it let go — `false` means somebody took it over while the caller was writing.
    */
   async acquire(): Promise<() => Promise<boolean>> {
-    const info: LockInfo = {
-      pid: process.pid,
-      host: this.host,
-      token: randomBytes(16).toString('hex'),
-      at: new Date().toISOString(),
-    };
-    const raw = JSON.stringify(info);
+    const token = randomBytes(16).toString('hex');
     const deadline = Date.now() + this.timeoutMs;
     let wait = FIRST_WAIT_MS;
 
     for (;;) {
+      // Stamped on EACH attempt, so the lock that is finally created carries the moment it was
+      // obtained. `at` is what a takeover on age is decided by: stamped once, before the wait, a
+      // lock came into the world already as old as the time its holder had queued for it.
+      const info: LockInfo = { pid: process.pid, host: this.host, token, at: new Date().toISOString() };
+      const raw = JSON.stringify(info);
       if (await this.create(raw)) {
         this.heldRaw = raw;
         return async () => {

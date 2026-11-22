@@ -18,7 +18,7 @@ import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import { createLogger, type LogEntry } from '../src/server/logger.js';
-import { ALWAYS_SCAN, NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
+import { ALWAYS_SCAN, NO_HOSTILE_FILENAMES, NO_POSIX_MODES, NO_SHELL_HOOKS } from './platform.js';
 import { messagesFor } from '../src/i18n/messages.js';
 import {
   ERROR_META_KEY,
@@ -3104,6 +3104,29 @@ describe('vault_status', () => {
       await release();
     }
   });
+
+  it.skipIf(NO_POSIX_MODES || process.getuid?.() === 0)(
+    'com o .git sem permissão de escrita a nota é gravada e o commit vira aviso',
+    async () => {
+      // O que a 0.5.0 fazia neste estado, e o que o lock dentro de `.git` tinha tirado: toda escrita
+      // era recusada com `lock.failed` antes de a nota ser gravada.
+      const vaultRoot = await makeVault(true);
+      const gitDir = path.join(vaultRoot, '.git');
+      await fs.chmod(gitDir, 0o555);
+      try {
+        const result = await makeTools(vaultRoot).call('vault_write_note', {
+          path: '02-wiki/docker/sem-commit.md',
+          content: '# Sem commit\n',
+        });
+
+        expect(result.isError).not.toBe(true);
+        expect(await fs.readFile(path.join(vaultRoot, '02-wiki/docker/sem-commit.md'), 'utf8')).toContain('# Sem commit');
+        expect(textOf(result)).toContain('Commit: não');
+      } finally {
+        await fs.chmod(gitDir, 0o755);
+      }
+    },
+  );
 
   it('conta quantos commits ainda não saíram para o upstream', async () => {
     const vaultRoot = await makeVault(true);

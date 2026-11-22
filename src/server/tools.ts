@@ -61,7 +61,7 @@ export function createToolset(deps: ToolDeps): Toolset {
   /**
    * The cross-process lock for this vault, asked for on every write rather than once.
    *
-   * Its path comes from where git says the repository's directory is (`lockPathFor`), and a vault
+   * Its path comes from where the repository's directory is on disk (`lockPathFor`), and a vault
    * that becomes a repository while the server runs must not keep locking a file that no other
    * server looks at. The instances are kept per path so the one holding a lock is the one that
    * releases it.
