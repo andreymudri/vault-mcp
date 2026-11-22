@@ -614,6 +614,21 @@ não tem tag, ele:
 Cada passo confere antes se já foi feito, então um release que parou no meio é repetido com
 "Re-run failed jobs".
 
+O review desta rodada achou, e foi corrigido antes de qualquer execução:
+
+- **O tarball era passado ao npm por caminho relativo.** `npm publish release/<pacote>.tgz` é lido
+  pelo npm como o atalho `usuario/repo` do GitHub: o job teria falhado — ou, existindo um
+  repositório com esse nome, publicado o conteúdo DELE sob o nome deste pacote. Caminho absoluto
+  nos dois lugares, fixado em `test/package.test.ts`.
+- **Repetir de um commit posterior criava a tag no commit errado.** "Já está no npm" pulava a
+  publicação sem conferir o que estava lá. Agora só segue se for o mesmo tarball, pelo sha512
+  (`npm pack` é reprodutível: dois builds limpos, o mesmo hash).
+- **Um disparo manual de outro branch publicaria aquele branch.** Só `main` publica.
+- **Uma versão de pré-lançamento passava na conferência e parava no npm.** O `release-check` a
+  recusa.
+- **Com o `.git` sem escrita, cada escrita esperava 3 s.** A mensagem do git para isso nomeia o
+  `index.lock`, e era lida como disputa.
+
 **Fica com o dono, uma vez:** cadastrar este workflow como trusted publisher do pacote. O comando
 está no topo do `release.yml`. O npm descarta um cadastro que não publicar nada em dois dias.
 

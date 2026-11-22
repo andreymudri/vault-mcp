@@ -1005,6 +1005,15 @@ describe('commitFiles with a git directory it cannot write', () => {
         // Nothing was recorded, so nothing is promised.
         expect(result.pending).toBeUndefined();
         expect(result.warning).not.toContain('será refeito');
+
+        // And it is not waited out as if it were contention. git's message for this names
+        // `index.lock` ("Unable to create '…/index.lock': Permission denied"), which is what the
+        // retry looks for: every write to such a vault took the whole schedule, three seconds,
+        // to arrive at the same warning. With a wait no test would sit through, it must not wait.
+        const started = Date.now();
+        const again = await commitFiles(repoRoot, [absPath], 'docs(vault): nota', { indexLockWaitsMs: [20_000] });
+        expect(again.committed).toBe(false);
+        expect(Date.now() - started).toBeLessThan(10_000);
       } finally {
         await fs.chmod(gitDirectory, 0o755).catch(() => undefined);
         await removeTree(repoRoot);

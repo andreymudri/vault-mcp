@@ -26,7 +26,8 @@ on:
   push:
     branches: [main]
   # À mão, para repetir um release que parou no meio quando "Re-run failed jobs" não serve mais.
-  # Roda todos os passos, cada um conferindo se já foi feito.
+  # Roda todos os passos, cada um conferindo se já foi feito. Só a partir de `main`, e só enquanto
+  # `main` ainda está no commit que foi para o npm.
   workflow_dispatch:
 
 # O token padrão só lê. O único job que escreve alguma coisa pede o que precisa, lá.
@@ -62,6 +63,9 @@ jobs:
       # `release-check` recusa uma versão cujos arquivos não concordam entre si ou que não tem
       # seção no CHANGELOG. Roda em todo push: uma versão mudada pela metade deixa este job
       # vermelho em vez de ser publicada.
+      #
+      # Só `main` publica, e isso é dito aqui porque o filtro `branches` lá em cima vale para o
+      # `push`: um disparo manual a partir de outro branch publicaria a versão DAQUELE branch.
       - name: Versão, e se ela já tem tag
         id: plan
         env:
@@ -70,7 +74,10 @@ jobs:
           set -euo pipefail
           version="$(node scripts/release-check.mjs)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            release=false
+            echo "::warning::disparado de $GITHUB_REF: só main publica."
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
             release=true
           elif git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
             release=false
@@ -178,15 +185,25 @@ jobs:
       # Sem token nenhum: o npm troca a identidade OIDC deste workflow por uma credencial de
       # publicação, e gera a atestação de proveniência sozinho. O que autoriza é o cadastro do
       # trusted publisher (ver o topo do arquivo).
+      #
+      # "Já está no npm" só deixa o job seguir se o que está lá for ESTE tarball, pelo hash. Um
+      # release que publicou e morreu antes da tag, repetido a partir de um commit posterior,
+      # criaria a tag num código que não é o que o npm serve. O `npm pack` é reprodutível (medido:
+      # dois builds limpos do mesmo commit, o mesmo sha512), então repetir do mesmo commit passa.
       - name: npm
         run: |
           set -euo pipefail
           tarball="$PWD/$(ls release/*.tgz)"
           name="$(tar -xzOf "$tarball" package/package.json | node -p "JSON.parse(require('node:fs').readFileSync(0, 'utf8')).name")"
-          if npm view "$name@$VERSION" version >/dev/null 2>&1; then
-            echo "$name@$VERSION já está no npm; nada a publicar."
-          else
+          ours="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+          theirs="$(npm view "$name@$VERSION" dist.integrity 2>/dev/null || true)"
+          if [ -z "$theirs" ]; then
             npm publish "$tarball" --access public --provenance
+          elif [ "$theirs" = "$ours" ]; then
+            echo "$name@$VERSION já está no npm, e é este tarball; nada a publicar."
+          else
+            echo "::error::$name@$VERSION já está no npm com OUTRO conteúdo ($theirs; este tarball é $ours). A tag não pode ir para este commit. Repita o job que falhou na execução original, ou publique uma versão nova."
+            exit 1
           fi
 
       # A tag nasce aqui, no commit que foi verificado, e só agora que o npm aceitou a versão.

@@ -60,8 +60,13 @@ packs it, and then, in a separate job that installs nothing and holds the only p
 - publishes `server.json` to the MCP Registry.
 
 Every step checks whether it was already done, so a release that stopped halfway is finished with
-**Re-run failed jobs** on the same run. (Running the workflow by hand from the Actions tab does the
-same from the current `main`.)
+**Re-run failed jobs** on the same run. Running the workflow by hand from the Actions tab does the
+same, from `main` only, and only while `main` is still at the commit that went to npm: a version
+already on npm is accepted only if it is byte for byte the tarball of this run, because the tag is
+about to be put on this commit.
+
+It publishes under the `latest` dist-tag, so a prerelease version (`1.0.0-rc.1`) is refused by the
+check rather than published.
 
 Two things it depends on that live outside the repository:
 

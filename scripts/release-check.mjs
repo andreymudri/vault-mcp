@@ -32,8 +32,13 @@ const same = (what, actual, expected) => {
   if (actual !== expected) problems.push(`${what} is ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
 };
 
-// Plain x.y.z, or a prerelease. The tag is `v` plus this, and npm refuses anything else anyway.
-if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
+// Plain x.y.z. The tag is `v` plus this. A prerelease is refused HERE rather than accepted and
+// left to fail later: the workflow publishes under the `latest` dist-tag, npm will not take a
+// prerelease without a `--tag`, and a version that passes this check, is verified and packed, and
+// only then stops at npm does so again on every push.
+if (/^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/.test(version)) {
+  problems.push(`package.json: version ${JSON.stringify(version)} is a prerelease, which this pipeline does not publish`);
+} else if (!/^\d+\.\d+\.\d+$/.test(version)) {
   problems.push(`package.json: version ${JSON.stringify(version)} is not a semantic version`);
 }
 

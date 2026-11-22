@@ -281,6 +281,24 @@ describe('scripts/release-check.mjs', () => {
     expect(outro.stderr).toContain('repository');
   });
 
+  it('recusa uma versão de pré-lançamento, que este pipeline não sabe publicar', () => {
+    // O release publica sob a dist-tag `latest`, e o npm recusa um pré-lançamento sem `--tag`: a
+    // versão passava na conferência, era verificada e empacotada, e só então parava no npm — a
+    // cada push, até alguém mudar a versão.
+    const bump = (text: string): string => text.replaceAll(String(pkg.version), '9.9.9-rc.1');
+    const dir = mkdtempSync(join(tmpdir(), 'vault-mcp-release-check-'));
+    try {
+      for (const file of FILES) writeFileSync(join(dir, file), bump(readFileSync(join(ROOT, file), 'utf8')), 'utf8');
+      const run = spawnSync(process.execPath, [SCRIPT, '--root', dir], { encoding: 'utf8' });
+      expect(run.status).toBe(1);
+      expect(run.stdout).toBe('');
+      expect(run.stderr).toContain('9.9.9-rc.1');
+      expect(run.stderr).toMatch(/prerelease/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('diz tudo o que está errado de uma vez, e não só o primeiro', () => {
     const run = check({
       file: 'server.json',
@@ -381,6 +399,23 @@ describe('os workflows do GitHub', () => {
     expect(text).toContain('npm install --prefix "$prefix" --no-audit --no-fund "$PWD"/release/*.tgz');
     expect(text).toContain('tarball="$PWD/$(ls release/*.tgz)"');
     expect(text).toContain('npm publish "$tarball"');
+  });
+
+  it('só publica de main, mesmo disparado à mão', () => {
+    // O filtro `branches: [main]` vale para o `push`. Um disparo manual com outro ref verificava,
+    // publicava e criava a tag no commit DAQUELE branch — e o que sai para o npm não volta.
+    const plan = code(jobsOf(release).get('plan') ?? '');
+    expect(plan).toMatch(/if \[ "\$GITHUB_REF" != "refs\/heads\/main" \]; then\n\s+release=false/);
+  });
+
+  it('uma versão que já está no npm só segue para a tag se for ESTE tarball', () => {
+    // Um release que publicou no npm e morreu antes da tag, repetido a partir de um commit
+    // posterior, pulava o npm ("já está lá") e criava a tag no commit novo: a tag apontava para um
+    // código que não é o que o npm serve. A comparação é pelo hash do tarball.
+    const publish = code(jobsOf(release).get('publish') ?? '');
+    expect(publish).toContain('dist.integrity');
+    expect(publish).toMatch(/elif \[ "\$theirs" = "\$ours" \]; then/);
+    expect(publish).toMatch(/else\n\s+echo "::error::[^\n]+\n\s+exit 1/);
   });
 
   it('o mcp-publisher vem numa versão fixa e é verificado antes de rodar', () => {

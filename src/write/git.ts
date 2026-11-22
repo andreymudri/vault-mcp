@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { constants, existsSync, promises as fs } from 'node:fs';
+import { accessSync, constants, existsSync, promises as fs } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -234,7 +234,18 @@ function sleep(ms: number): Promise<void> {
  * thing forged text can buy is a bounded number of retries of a command that had already failed.
  */
 function indexLockInvolved(dir: string | undefined, err: unknown): boolean {
-  if (dir !== undefined && existsSync(join(dir, 'index.lock'))) return true;
+  if (dir !== undefined) {
+    // A git directory this process may not write is not contention, and it looks like it: git
+    // says "Unable to create '…/index.lock': Permission denied", which names the file. Waiting
+    // does not change a permission, and every write to such a vault spent the whole schedule
+    // (three seconds) arriving at the same warning.
+    try {
+      accessSync(dir, constants.W_OK);
+    } catch {
+      return false;
+    }
+    if (existsSync(join(dir, 'index.lock'))) return true;
+  }
   return errorStreams(err).includes('index.lock');
 }
 
