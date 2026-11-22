@@ -62,7 +62,11 @@ const MEM_ROOT = '/vault';
 
 /** In-memory `FsOps` over a copy of the fixture, with mtime control for reindex tests. */
 class MemoryFs implements FsOps {
-  constructor(readonly files: Map<string, MemFile>) {}
+  readonly files: Map<string, MemFile>;
+
+  constructor(files: Map<string, MemFile>) {
+    this.files = files;
+  }
 
   readdir(dir: string): DirEntry[] {
     const relative = this.relative(dir);

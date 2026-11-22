@@ -452,6 +452,18 @@ export async function commitFiles(
   };
 }
 
+/** What a commit says about the pending journal, for a result type that relays it. */
+export type CommitRecovery = Pick<CommitResult, 'pending' | 'recovered' | 'dropped'>;
+
+/** The recovery fields of `commit` that are set, and no others — never a key holding `undefined`. */
+export function commitRecovery(commit: CommitResult): CommitRecovery {
+  return {
+    ...(commit.pending === undefined ? {} : { pending: commit.pending }),
+    ...(commit.recovered === undefined ? {} : { recovered: commit.recovered }),
+    ...(commit.dropped === undefined ? {} : { dropped: commit.dropped }),
+  };
+}
+
 /**
  * The push of `VAULT_AUTO_PUSH`, for a caller that committed with `push: false`.
  *

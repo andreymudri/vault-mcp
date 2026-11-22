@@ -12,7 +12,7 @@ import {
   type NodeKind,
 } from './paths.js';
 import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
-import { commitFiles } from './git.js';
+import { commitFiles, commitRecovery } from './git.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
 import type { PlannedChange } from './preview.js';
@@ -53,6 +53,12 @@ export interface WriteResult {
    * answers, and only the caller can render them differently.
    */
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warning?: string;
   diff: string;
   change?: PlannedChange;
@@ -90,6 +96,11 @@ export interface WriteNoteOptions {
   preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 export interface EditNoteOptions {
@@ -100,6 +111,11 @@ export interface EditNoteOptions {
   preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 /** The `tipo` values that have a skeleton in `_templates/`. */
@@ -347,6 +363,7 @@ async function writeAndCommit(
     preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+    push?: boolean;
     message: string;
   },
   extraWarning?: string
@@ -384,9 +401,19 @@ async function writeAndCommit(
       : { ...base, committed: false, warning };
   }
 
-  const commit = await commitFiles(opts.vaultRoot, [opts.absPath], opts.message);
+  const commit = await commitFiles(
+    opts.vaultRoot,
+    [opts.absPath],
+    opts.message,
+    opts.push === undefined ? {} : { push: opts.push },
+  );
   const warning = joinWarnings([extraWarning, diffWarning, commit.warning]);
-  const committed = { ...base, committed: commit.committed, ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }) };
+  const committed = {
+    ...base,
+    committed: commit.committed,
+    ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
+  };
   return warning === undefined ? committed : { ...committed, warning };
 }
 
@@ -494,6 +521,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
       created,
       ...(opts.preview === undefined ? {} : { preview: opts.preview }),
       ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
+      ...(opts.push === undefined ? {} : { push: opts.push }),
       message: `docs(vault): ${titleFromPath(opts.path)}`,
     },
     joinWarnings([templateWarning, frontmatterWarning])
@@ -653,6 +681,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
     created: false,
     ...(opts.preview === undefined ? {} : { preview: opts.preview }),
       ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
+      ...(opts.push === undefined ? {} : { push: opts.push }),
     message: `docs(vault): atualizar ${titleFromPath(opts.path)}`,
   });
 }

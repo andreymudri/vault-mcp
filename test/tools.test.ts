@@ -2046,6 +2046,24 @@ describe('vault_write_note e vault_edit_note', () => {
   });
 
   it('não devolve o caminho absoluto do vault num aviso de git', async () => {
+    const vaultRoot = await makeVault(true);
+    // Um caminho ignorado faz o `git add` falhar de verdade. Era um vault SEM repositório que
+    // servia de gatilho aqui, mas esse caso passou a responder uma frase só, sem saída do git
+    // (o teste seguinte); a propriedade que este fixa é a redação de um diagnóstico CRU.
+    await fs.writeFile(path.join(vaultRoot, '.gitignore'), 'recusada.md\n', 'utf8');
+    const { text } = makeTools(vaultRoot);
+    const rendered = await text('vault_write_note', {
+      path: '02-wiki/docker/recusada.md',
+      content: '# Recusada\n',
+    });
+
+    // Pré-condição: o git falhou, e o aviso ecoa o comando com `-C <raiz>`.
+    expect(rendered).toMatch(/Aviso: .*falha ao adicionar arquivos ao git/);
+    expect(rendered).not.toContain(vaultRoot);
+    expect(rendered).toContain('<vault>');
+  });
+
+  it('num vault sem repositório o aviso é UMA frase, e não o stderr do git', async () => {
     const vaultRoot = await makeVault(false);
     const { text } = makeTools(vaultRoot);
     const rendered = await text('vault_write_note', {
@@ -2053,10 +2071,14 @@ describe('vault_write_note e vault_edit_note', () => {
       content: '# Sem git\n',
     });
 
-    // Pré-condição: sem repositório, o git falha e o aviso ecoa o comando com `-C <raiz>`.
-    expect(rendered).toMatch(/Aviso: .*git/);
-    expect(rendered).not.toContain(vaultRoot);
-    expect(rendered).toContain('<vault>');
+    const avisos = rendered.split('\n').filter((line) => line.startsWith('Aviso: '));
+    expect(avisos).toEqual([
+      'Aviso: o vault não é um repositório git: a nota foi salva, mas não versionada',
+    ]);
+    expect(rendered).toContain('Commit: não');
+    expect(rendered).not.toContain('fatal');
+    // O lock de um vault sem `.git` mora na raiz dele, e não sobra depois da escrita.
+    expect(await fs.readdir(vaultRoot)).not.toContain('.vault-mcp.lock');
   });
 
   it('não devolve o caminho absoluto do vault num erro do sistema de arquivos', async () => {
@@ -2198,8 +2220,11 @@ describe('vault_learn', () => {
   });
 
   it('dobra o aviso multilinha do git numa linha só', async () => {
-    // Sem git: `commitFiles` falha e o aviso carrega a saída do próprio git, com quebras de linha.
-    const vaultRoot = await makeVault(false);
+    // A nota nova é um caminho ignorado: o `git add` falha e o aviso carrega a saída do próprio
+    // git, com quebras de linha. (Um vault sem repositório já não serve de gatilho — ele responde
+    // uma frase só.)
+    const vaultRoot = await makeVault(true);
+    await fs.writeFile(path.join(vaultRoot, '.gitignore'), 'sem-git-aqui.md\n', 'utf8');
     const { text } = makeTools(vaultRoot);
     const rendered = await text('vault_learn', {
       titulo: 'Sem git aqui',

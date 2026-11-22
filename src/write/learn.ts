@@ -9,7 +9,7 @@ import { tokenize } from '../index/tokenizer.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
 import type { ScoredChunk } from '../types.js';
-import { commitFiles } from './git.js';
+import { commitFiles, commitRecovery } from './git.js';
 import { classifyStat, INVISIBLE_CHARS, resolveWritePath } from './paths.js';
 import { propagate } from './propagate.js';
 import { applyTemplate, formatLocal } from './template.js';
@@ -269,6 +269,11 @@ export interface LearnOptions {
   links?: string[];
   confirmNovoDominio?: boolean;
   now: Date;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 export interface LearnResult {
@@ -285,6 +290,12 @@ export interface LearnResult {
   committed: boolean;
   /** Whether the commit reached the remote, or `undefined` when no push was attempted. */
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warning?: string;
 }
 
@@ -965,7 +976,12 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     const input = { titulo: opts.titulo, insight: opts.insight, contexto: opts.contexto, dominio: opts.dominio, tags: opts.tags ?? [], links: opts.links ?? [], projeto: opts.projeto ?? null, forceNew: opts.forceNew ?? false, confirmNovoDominio: opts.confirmNovoDominio ?? false, at: opts.now.toISOString() };
     return { action, path: write.path, reason, diff: planned.map(file => file.diff).join('\n'), propagated: prop.written.map(absPath => toVaultRelative(opts.vaultRoot, absPath)), committed: false, preview: true, revision: previewRevision(input, planned), files: planned, ...(prop.warnings.length ? { warning: prop.warnings.join('; ') } : {}) };
   }
-  const commit = await commitFiles(opts.vaultRoot, files, `docs(vault): ${titulo}`);
+  const commit = await commitFiles(
+    opts.vaultRoot,
+    files,
+    `docs(vault): ${titulo}`,
+    opts.push === undefined ? {} : { push: opts.push },
+  );
 
   const diff = [write.diff, ...prop.diffs]
     .filter((part) => part !== '')
@@ -993,6 +1009,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     propagated: prop.written.map((absPath) => toVaultRelative(opts.vaultRoot, absPath)),
     committed: commit.committed,
     ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
   };
   return warning === undefined ? result : { ...result, warning };
 }

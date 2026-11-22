@@ -7,7 +7,7 @@ import { extractLinkTargets, resolveLinkTarget } from '../vault/links.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
-import { commitFiles, headBlobState, headSha } from './git.js';
+import { commitFiles, commitRecovery, headBlobState, headSha } from './git.js';
 import { classifyNode, forMessage, guardedPath } from './paths.js';
 import {
   bumpAtualizado,
@@ -71,6 +71,11 @@ export interface MoveNoteOptions {
   to: string;
   confirmNovoDominio?: boolean;
   now: Date;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 export interface DeleteNoteOptions {
@@ -79,6 +84,11 @@ export interface DeleteNoteOptions {
   path: string;
   confirm?: boolean;
   now: Date;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 export interface MoveResult {
@@ -92,6 +102,12 @@ export interface MoveResult {
   propagated: string[];
   committed: boolean;
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warnings: string[];
 }
 
@@ -101,6 +117,12 @@ export interface DeleteResult {
   propagated: string[];
   committed: boolean;
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warnings: string[];
   /** The exact command that brings the note back, run from INSIDE the vault. */
   undo?: string;
@@ -421,6 +443,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     opts.vaultRoot,
     [...new Set(written)],
     `docs(vault): mover ${fromRel} para ${toRel}`,
+    opts.push === undefined ? {} : { push: opts.push },
   );
   if (commit.warning !== undefined) warnings.push(commit.warning);
 
@@ -432,6 +455,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     propagated,
     committed: commit.committed,
     ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
     warnings,
   };
 }
@@ -558,7 +582,12 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   }
 
   const titulo = posix.basename(relPath, '.md');
-  const commit = await commitFiles(opts.vaultRoot, written, `docs(vault): remover ${titulo}`);
+  const commit = await commitFiles(
+    opts.vaultRoot,
+    written,
+    `docs(vault): remover ${titulo}`,
+    opts.push === undefined ? {} : { push: opts.push },
+  );
   if (commit.warning !== undefined) warnings.push(commit.warning);
 
   // The sha of the commit JUST made, never `HEAD^`: the user may commit again before they read
@@ -577,6 +606,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
     propagated,
     committed: commit.committed,
     ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
     warnings,
     ...(sha === undefined
       ? {}

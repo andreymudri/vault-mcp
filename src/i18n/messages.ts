@@ -71,6 +71,8 @@ const PT = {
     learnedNewNote: 'Aprendizado registrado em nota NOVA',
     learnedAppended: 'Aprendizado ANEXADO à nota existente',
     reason: 'Motivo',
+    recoveredCommits: 'Commits pendentes refeitos',
+    droppedCommits: 'Commits pendentes abandonados',
   },
 
   errorCodes: {
@@ -125,6 +127,8 @@ const PT = {
     'edit.emptySnippet': 'trecho vazio para edição em {path}',
     'edit.ambiguous': 'trecho ambíguo em {path}: {occurrences} ocorrências',
     'edit.notFound': 'trecho não encontrado em {path}',
+    'lock.timeout': 'outro processo está escrevendo no vault há mais de {ms} ms (pid {pid}); nada foi escrito',
+    'lock.failed': 'não foi possível criar o lock do vault: {detail}',
   },
 
   errors: {
@@ -337,6 +341,8 @@ const EN: Messages = {
     learnedNewNote: 'Learning recorded in a NEW note',
     learnedAppended: 'Learning APPENDED to the existing note',
     reason: 'Reason',
+    recoveredCommits: 'Pending commits recovered',
+    droppedCommits: 'Pending commits given up on',
   },
 
   errorCodes: {
@@ -391,6 +397,8 @@ const EN: Messages = {
     'edit.emptySnippet': 'empty snippet for editing in {path}',
     'edit.ambiguous': 'ambiguous snippet in {path}: {occurrences} occurrences',
     'edit.notFound': 'snippet not found in {path}',
+    'lock.timeout': 'another process has been writing to the vault for more than {ms} ms (pid {pid}); nothing was written',
+    'lock.failed': 'could not create the vault lock: {detail}',
   },
 
   errors: {

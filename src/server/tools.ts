@@ -11,9 +11,11 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import { RAW_PREFIX, hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
+import { lockPathFor, pushIfEnabled } from '../write/git.js';
 import { LearnError, learn } from '../write/learn.js';
 import { INVISIBLE_CHARS } from '../write/paths.js';
 import { deleteNote, moveNote, type DeleteResult, type MoveResult } from '../write/relocate.js';
+import { VaultLock } from '../write/vault-lock.js';
 import { EditError, editNote, writeNote, type WriteResult } from '../write/writer.js';
 
 /**
@@ -63,6 +65,14 @@ export interface ToolDeps {
    * vocabulário do vault.
    */
   messages: Messages;
+  /**
+   * The cross-process lock every write takes. Optional, and the default is the right one: a lock at
+   * the path `lockPathFor` derives from the vault, which is the path every other server over the
+   * same vault derives too. Injected only by a test that needs to hold or to break it.
+   */
+  lock?: VaultLock;
+  /** How long a write waits for that lock, from `VAULT_LOCK_TIMEOUT_MS`. Default in `vault-lock.ts`. */
+  lockTimeoutMs?: number;
 }
 
 /**
@@ -190,6 +200,27 @@ const EXCLUSIVITY_WARNING =
   'esta chamada não teve exclusão garantida contra ela';
 
 /**
+ * The cross-process twin of `EXCLUSIVITY_WARNING`: the vault lock this write held was taken over
+ * before the write let go of it, which only happens to a holder older than `LOCK_STALE_MS`.
+ */
+const LOCK_LOST_WARNING =
+  'o lock do vault foi tomado por outro processo durante esta escrita; ' +
+  'a exclusão contra ele não foi garantida';
+
+/** What a write function is told about pushing when the tool layer pushes on its behalf. */
+interface DeferredPush {
+  push: false;
+}
+
+/** The part of every write result the tool layer reads to decide whether there is something to push. */
+interface Committed {
+  committed: boolean;
+  pushed?: boolean;
+  recovered?: number;
+  dropped?: number;
+}
+
+/**
  * Serializes the write tools against each other.
  *
  * `learn()` checks whether a path exists and then publishes with `rename` (src/write/atomic.ts),
@@ -229,8 +260,14 @@ export class WriteQueue {
    * exclusion, and the counter `runExclusive` reads.
    */
   private started = 0;
+  // A plain field, not a constructor parameter property: this tree is kept to syntax Node can
+  // strip without transforming (`erasableSyntaxOnly`), which is what lets a test start the real
+  // sources in a second PROCESS — see `test/cross-process.test.ts`.
+  private readonly slotTimeoutMs: number;
 
-  constructor(private readonly slotTimeoutMs: number = WRITE_SLOT_TIMEOUT_MS) {}
+  constructor(slotTimeoutMs: number = WRITE_SLOT_TIMEOUT_MS) {
+    this.slotTimeoutMs = slotTimeoutMs;
+  }
 
   run<T>(task: () => Promise<T>): Promise<T> {
     // The slot has to EXIST synchronously — it becomes the new tail before this returns — but its
@@ -910,6 +947,14 @@ function renderNoteLine(note: Note): string {
   return forMessage(`- ${note.path} — ${note.title} (${details})`);
 }
 
+/** One line per recovery fact of the commit, and none when the pending journal was not involved. */
+function recoveryLines(result: { recovered?: number; dropped?: number }, m: Messages): string[] {
+  return [
+    ...(result.recovered === undefined ? [] : [`${m.results.recoveredCommits}: ${result.recovered}`]),
+    ...(result.dropped === undefined ? [] : [`${m.results.droppedCommits}: ${result.dropped}`]),
+  ];
+}
+
 /** Shared tail of `vault_write_note` and `vault_edit_note`. */
 function renderWrite(
   result: WriteResult,
@@ -924,6 +969,7 @@ function renderWrite(
     // Only when a push was ATTEMPTED. With `VAULT_AUTO_PUSH` unset the server touches no network at
     // all, and a `Push: não` line there would report on something nobody asked for.
     ...(result.pushed === undefined ? [] : [`${m.results.push}: ${result.pushed ? m.results.yes : m.results.no}`]),
+    ...recoveryLines(result, m),
   ];
   for (const warning of [result.warning, queueWarning]) {
     if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
@@ -960,6 +1006,7 @@ function renderRelocate(
     }`,
     `${m.results.commit}: ${result.committed ? m.results.yes : m.results.no}`,
     ...(result.pushed === undefined ? [] : [`${m.results.push}: ${result.pushed ? m.results.yes : m.results.no}`]),
+    ...recoveryLines(result, m),
   );
   if ('undo' in result && result.undo !== undefined) {
     // Vault-relative on purpose (see `relocate.ts`): a command carrying the redactor's `<vault>`
@@ -1398,6 +1445,70 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
   const writes = new WriteQueue();
   const redact = makeRedactor(deps.vaultRoot);
 
+  /**
+   * The cross-process lock for this vault, asked for on every write rather than once.
+   *
+   * Its path comes from where git says the repository's directory is (`lockPathFor`), and a vault
+   * that becomes a repository while the server runs must not keep locking a file that no other
+   * server looks at. The instances are kept per path so the one holding a lock is the one that
+   * releases it.
+   */
+  const locks = new Map<string, VaultLock>();
+  const vaultLock = async (): Promise<VaultLock> => {
+    if (deps.lock !== undefined) return deps.lock;
+    const lockPath = await lockPathFor(deps.vaultRoot);
+    let lock = locks.get(lockPath);
+    if (lock === undefined) {
+      lock = new VaultLock({
+        lockPath,
+        ...(deps.lockTimeoutMs === undefined ? {} : { timeoutMs: deps.lockTimeoutMs }),
+      });
+      locks.set(lockPath, lock);
+    }
+    return lock;
+  };
+
+  /** Pushes take turns among themselves, and never make a write wait. */
+  let pushTail: Promise<unknown> = Promise.resolve();
+  const pushInTurn = (): Promise<{ pushed?: boolean; warning?: string }> => {
+    const turn = pushTail.then(() => pushIfEnabled(deps.vaultRoot));
+    pushTail = turn.catch(() => undefined);
+    return turn;
+  };
+
+  /**
+   * A write with exclusion against every OTHER PROCESS as well as against this one.
+   *
+   * `WriteQueue` alone closes the window inside one server, and an MCP stdio server is started per
+   * client: two sessions are two processes, each with a queue the other cannot see. So the task
+   * runs inside the queue's slot AND holding the vault lock, and everything it reads, it reads
+   * after both were granted.
+   *
+   * The push is the one step left outside. `git push` sends the whole branch, so it needs no
+   * exclusion, and a push stuck on the network would otherwise hold every other writer of the
+   * vault for as long as it takes to time out. The task is therefore told `push: false`, and the
+   * push happens here, after the lock is released.
+   */
+  const lockedWrite = async <T extends Committed>(
+    run: (git: DeferredPush) => Promise<T>,
+  ): Promise<{ value: T; warning?: string }> => {
+    const { value: held, warning: queueWarning } = await writes.runExclusive(async () =>
+      (await vaultLock()).with(() => run({ push: false })),
+    );
+
+    let value = held.value;
+    const warnings = [queueWarning, held.lost ? LOCK_LOST_WARNING : undefined];
+    // A recovered commit is as unpushed as a new one, so either is a reason to push.
+    if (value.committed || (value.recovered ?? 0) > 0) {
+      const push = await pushInTurn();
+      if (push.pushed !== undefined) value = { ...value, pushed: push.pushed } as T;
+      warnings.push(push.warning);
+    }
+
+    const warning = warnings.filter((w): w is string => w !== undefined).join('; ');
+    return warning === '' ? { value } : { value, warning };
+  };
+
   const vaultSearch = define(
     redact,
     m,
@@ -1734,13 +1845,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       // skeleton, and splicing one under content the caller already authored gives the note two
       // `# H1`s and a set of empty sections nobody asked for. The skeleton belongs to `vault_learn`,
       // which composes the body itself; here the content is the note.
-      const { value: result, warning } = await writes.runExclusive(() =>
+      const { value: result, warning } = await lockedWrite((git) =>
         withWriteDetail(deps.vaultRoot, input.path, () =>
           writeNote({
             vaultRoot: deps.vaultRoot,
             path: input.path,
             content: input.content,
             ...(frontmatter === undefined ? {} : { frontmatter }),
+            ...git,
           }),
         ),
       );
@@ -1759,13 +1871,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       new_text: z.string().describe(m.tools.vault_edit_note.new_text),
     },
     async (input) => {
-      const { value: result, warning } = await writes.runExclusive(() =>
+      const { value: result, warning } = await lockedWrite((git) =>
         withWriteDetail(deps.vaultRoot, input.path, () =>
           editNote({
             vaultRoot: deps.vaultRoot,
             path: input.path,
             oldText: input.old_text,
             newText: input.new_text,
+            ...git,
           }),
         ),
       );
@@ -1804,12 +1917,15 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     z.object({
       action: z.enum(['created', 'appended']), path: z.string(), reason: z.string(), diff: z.string(),
       propagated: z.array(z.string()), committed: z.boolean(), pushed: z.boolean().optional(), warning: z.string().optional(),
+      pending: z.boolean().optional(), recovered: z.number().optional(), dropped: z.number().optional(),
       preview: z.boolean().optional(), revision: z.string().optional(), previewTime: z.string(),
       files: z.array(z.object({ path: z.string(), before: z.string(), after: z.string(), diff: z.string() })).optional(),
     }),
     async (input) => {
       const at = input.preview_time ? new Date(input.preview_time) : new Date();
-      const { value: result, warning: queueWarning } = await writes.runExclusive(() =>
+      // A preview writes nothing, so it takes the queue's slot and not the vault lock: holding up
+      // a question behind another process's write would buy no exclusion anybody needs.
+      const run = (git: Partial<DeferredPush>): ReturnType<typeof learn> =>
         learn({
           vaultRoot: deps.vaultRoot,
           retriever: deps.retriever,
@@ -1829,8 +1945,10 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           forceNew: input.force_new,
           expectedRevision: input.expected_revision,
           now: at,
-        }),
-      );
+          ...git,
+        });
+      const { value: result, warning: queueWarning } =
+        input.preview === true ? await writes.runExclusive(() => run({})) : await lockedWrite(run);
 
       const lines = [
         result.action === 'created'
@@ -1845,6 +1963,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         `${m.results.commit}: ${result.committed ? m.results.yes : m.results.no}`,
         // Same rule as `renderWrite`: the line exists only when a push was attempted.
         ...(result.pushed === undefined ? [] : [`${m.results.push}: ${result.pushed ? m.results.yes : m.results.no}`]),
+        ...recoveryLines(result, m),
       ];
       for (const aviso of [result.warning, queueWarning]) {
         if (aviso !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(aviso))}`);
@@ -1864,10 +1983,12 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
    * unlinked and deletes it. So the refresh runs, and it runs after the queue has granted the
    * slot, so no write of this process can land between the refresh and the operation.
    */
-  const refreshedWrite = <T>(run: () => Promise<T>): Promise<{ value: T; warning?: string }> =>
-    writes.runExclusive(() => {
+  const refreshedWrite = <T extends Committed>(
+    run: (git: DeferredPush) => Promise<T>,
+  ): Promise<{ value: T; warning?: string }> =>
+    lockedWrite((git) => {
       refreshVault(deps);
-      return run();
+      return run(git);
     });
 
   const vaultMove = define(
@@ -1887,7 +2008,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .describe(m.tools.vault_move.confirm_novo_dominio),
     },
     async (input) => {
-      const { value: result, warning } = await refreshedWrite(() =>
+      const { value: result, warning } = await refreshedWrite((git) =>
         moveNote({
           vaultRoot: deps.vaultRoot,
           scanner: deps.scanner,
@@ -1897,6 +2018,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
             ? {}
             : { confirmNovoDominio: input.confirm_novo_dominio }),
           now: new Date(),
+          ...git,
         }),
       );
       return renderRelocate(
@@ -1922,13 +2044,14 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .describe(m.tools.vault_delete.confirm),
     },
     async (input) => {
-      const { value: result, warning } = await refreshedWrite(() =>
+      const { value: result, warning } = await refreshedWrite((git) =>
         deleteNote({
           vaultRoot: deps.vaultRoot,
           scanner: deps.scanner,
           path: input.path,
           ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
           now: new Date(),
+          ...git,
         }),
       );
       return renderRelocate(`${m.results.noteDeleted}: ${forMessage(result.path)}`, result, redact, m, warning);
