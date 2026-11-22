@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { resolveLang, type Lang } from '../i18n/lang.js';
@@ -15,7 +16,14 @@ import { messagesFor, type Messages } from '../i18n/messages.js';
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
 import { autoPushEnabled } from '../write/git.js';
-import { createToolset, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
+import {
+  applyLegacyArguments,
+  createToolset,
+  forMessage,
+  makeRedactor,
+  type ToolDefinition,
+  type ToolResult,
+} from './tools.js';
 
 /**
  * The process a user starts: `npx @andreymudri/vault-mcp`, or `node
@@ -175,6 +183,42 @@ export interface VaultApp {
   releaseLocks(): void;
 }
 
+/**
+ * Makes `transport` hand the server every `tools/call` with its legacy argument names already
+ * replaced (`LEGACY_ARGUMENTS` in `tools.ts`).
+ *
+ * It has to happen HERE. The SDK validates a call against the published schema before the tool's
+ * handler runs, that schema is strict and written in the new names, so a call spelled the old way
+ * would be refused before any of this server's code saw it. The transport is the one seam ahead
+ * of that validation that is public API: the SDK sets `onmessage`, and this wraps whatever it sets.
+ *
+ * A call carrying both spellings with different values is passed through untouched, and the
+ * strict schema then refuses the legacy name — which is the refusal it deserves.
+ */
+export function acceptLegacyArguments<T extends Transport>(transport: T): T {
+  let handler: Transport['onmessage'];
+  Object.defineProperty(transport, 'onmessage', {
+    configurable: true,
+    enumerable: true,
+    get: () => handler,
+    set: (next: Transport['onmessage']) => {
+      handler =
+        next === undefined
+          ? undefined
+          : (message, extra) => next(renameLegacyArguments(message), extra);
+    },
+  });
+  return transport;
+}
+
+function renameLegacyArguments<M>(message: M): M {
+  const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown } };
+  if (call.method !== 'tools/call' || typeof call.params?.name !== 'string') return message;
+  const renamed = applyLegacyArguments(call.params.name, call.params.arguments);
+  if (renamed.conflict !== undefined || renamed.args === call.params.arguments) return message;
+  return { ...message, params: { ...call.params, arguments: renamed.args } };
+}
+
 /** The server alone, for a caller that only speaks the protocol to it. */
 export function createVaultServer(
   vaultRoot: string,
@@ -252,6 +296,12 @@ export function createVaultApp(
       toolCallback(tool, redact, messages, logger),
     );
   }
+
+  // Whatever transport the server is connected to, legacy argument names are renamed on the way
+  // in. Wrapping `connect` rather than asking each caller to wrap its transport means there is no
+  // way to stand a server up that forgot to.
+  const connect = server.connect.bind(server);
+  server.connect = (transport) => connect(acceptLegacyArguments(transport));
 
   return { server, idle: toolset.idle, releaseLocks: toolset.releaseLocks };
 }

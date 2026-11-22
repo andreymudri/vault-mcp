@@ -123,7 +123,7 @@ const PT = {
     'learn.badTitle': 'título inválido: não gera um nome de arquivo (use letras ou números)',
     'learn.insightStartsWithDelimiter': 'insight não pode começar com o delimitador de frontmatter `---`: ele viraria o frontmatter da nota. Escreva ao menos uma linha de texto antes do bloco.',
     'learn.badDomain': 'domínio inválido: {problem}',
-    'learn.unknownDomain': "domínio '{dominio}' não existe em 02-wiki/. Domínios válidos: {validos}. Repita com confirm_novo_dominio para criar o domínio.",
+    'learn.unknownDomain': "domínio '{dominio}' não existe em 02-wiki/. Domínios válidos: {validos}. Repita com confirm_new_domain para criar o domínio.",
     'path.mustEndMd': 'caminho deve terminar em .md: {relPath}',
     'path.mustBeRelative': 'caminho deve ser relativo ao vault: {relPath}',
     'path.noGlob': 'caminho não pode conter metacaractere de glob: {relPath}',
@@ -138,7 +138,7 @@ const PT = {
     'relocate.samePath': 'origem e destino são o mesmo caminho: {fromRel}',
     'relocate.sourceNotANote': 'origem não é uma nota: {fromRel}',
     'relocate.destExists': 'destino já existe: {toRel}',
-    'relocate.newDomainNeedsConfirm': '{toDomain} ainda não tem MOC em 02-wiki/; passe confirm_novo_dominio para criá-lo',
+    'relocate.newDomainNeedsConfirm': '{toDomain} ainda não tem MOC em 02-wiki/; passe confirm_new_domain para criá-lo',
     'relocate.raceOnMove': '{toRel} passou a existir enquanto a nota era movida; nada foi sobrescrito',
     'relocate.noteNotFound': 'nota não encontrada: {relPath}',
     'relocate.structuralNote': '{relPath} é uma nota estrutural ({tipo}) e não é apagada por aqui',
@@ -168,17 +168,18 @@ const PT = {
     oldTextEmpty: 'old_text não pode ser vazio',
     tooLong: 'no máximo {max} caracteres',
     unknownArgument: 'argumento desconhecido: {keys}',
-    tituloEmpty: 'título não pode ser vazio',
+    aliasConflict: '`{legacy}` e `{canonical}` vieram com valores diferentes; use só `{canonical}`',
+    titleEmpty: 'título não pode ser vazio',
     insightEmpty: 'insight não pode ser vazio',
-    contextoEmpty: 'contexto não pode ser vazio',
+    contextEmpty: 'contexto não pode ser vazio',
     fromEmpty: 'caminho de origem não pode ser vazio',
     toEmpty: 'caminho de destino não pode ser vazio',
-    dominioEmpty: 'domínio não pode ser vazio',
+    domainEmpty: 'domínio não pode ser vazio',
   },
 
   tools: {
     vault_search: {
-      title: 'Buscar no vault',
+      displayName: 'Buscar no vault',
       description:
         'Busca semântica-lexical no vault (BM25 + um salto de wiki-links). Chame antes de responder ' +
         'qualquer pergunta sobre decisões, padrões, gotchas ou histórico do usuário, e antes de gravar ' +
@@ -186,14 +187,14 @@ const PT = {
         'resposta ao usuário. Notas de `01-raw/` ficam de fora salvo include_raw.',
       query: 'Termos de busca em linguagem natural.',
       limit: 'Máximo de trechos devolvidos (padrão 6).',
-      tipo: 'Filtra pelo `tipo` do frontmatter: wiki, moc, projeto, daily.',
+      type: 'Filtra pelo `tipo` do frontmatter: wiki, moc, projeto, daily.',
       folder: 'Restringe a uma pasta do vault, ex.: `02-wiki/nestjs`.',
       tags: 'Filtra por tags do frontmatter. A nota tem de ter TODAS; a caixa não importa.',
       status: 'Filtra por `status` do frontmatter, ex.: `ativo`.',
       include_raw: 'Inclui `01-raw/` (captura crua), fora dos resultados por padrão.',
     },
     vault_get_note: {
-      title: 'Ler uma nota',
+      displayName: 'Ler uma nota',
       description:
         'Lê uma nota inteira pelo caminho relativo ao vault (ex.: `02-wiki/nestjs/auth-guard.md`), com ' +
         'frontmatter, links resolvidos e links quebrados. Use depois de vault_search quando o trecho ' +
@@ -204,12 +205,12 @@ const PT = {
         'só. Omita na primeira chamada; depois use o offset que a marca de corte anuncia.',
     },
     vault_list: {
-      title: 'Listar notas',
+      displayName: 'Listar notas',
       description:
         'Lista notas por metadado — tipo, tags, status, pasta — sem olhar o conteúdo. Use para ' +
         'inventário ("quais projetos ativos existem?", "quais notas têm a tag jwt?"), não para buscar ' +
         'assunto: para assunto use vault_search.',
-      tipo: '`tipo` do frontmatter: wiki, moc, projeto, daily.',
+      type: '`tipo` do frontmatter: wiki, moc, projeto, daily.',
       tags: 'Todas estas tags precisam estar na nota.',
       status: '`status` do frontmatter, ex.: ativo, pausado.',
       folder: 'Pasta do vault, casada em fronteira de segmento.',
@@ -217,14 +218,14 @@ const PT = {
       offset: 'Quantas notas pular, em ordem de caminho. Use o valor que a resposta anterior anunciou.',
     },
     vault_backlinks: {
-      title: 'Notas que apontam para uma nota',
+      displayName: 'Notas que apontam para uma nota',
       description:
         'Lista as notas que apontam para a nota informada. Use para medir o quanto um assunto está ' +
         'conectado, achar o MOC que indexa a nota, ou avaliar o impacto de mudar/renomear uma nota.',
       path: 'Caminho relativo ao vault, com `.md`.',
     },
     vault_graph: {
-      title: 'Grafo de links',
+      displayName: 'Grafo de links',
       description:
         'Devolve o grafo de wiki-links do vault: as notas como nós (caminho, título, tipo, status, ' +
         'tags, área, domínio, graus) e os links entre elas como arestas, também como dado estruturado ' +
@@ -233,7 +234,7 @@ const PT = {
         'vault_search, e para quem aponta para UMA nota use vault_backlinks. Os filtros escolhem os ' +
         'nós, e uma aresta só vem quando as duas pontas vêm.',
       folder: 'Pasta do vault, casada em fronteira de segmento, como em vault_list.',
-      tipo: '`tipo` do frontmatter: wiki, moc, projeto, daily.',
+      type: '`tipo` do frontmatter: wiki, moc, projeto, daily.',
       tags: 'Todas estas tags precisam estar na nota; a caixa não importa.',
       status: '`status` do frontmatter, ex.: ativo, pausado.',
       include_raw: 'Inclui `01-raw/` (captura crua), fora do grafo por padrão.',
@@ -243,7 +244,7 @@ const PT = {
         'acima disso a resposta vem marcada como truncada.',
     },
     vault_status: {
-      title: 'Estado do servidor e do vault',
+      displayName: 'Estado do servidor e do vault',
       description:
         'Diz o estado do servidor e do vault: versão, quantas notas e chunks estão indexados, se o ' +
         'vault é um repositório git, o branch, os commits ainda não enviados, os commits que ' +
@@ -252,7 +253,7 @@ const PT = {
         'trás. Não muda nada.',
     },
     vault_write_note: {
-      title: 'Escrever uma nota',
+      displayName: 'Escrever uma nota',
       description:
         'Cria ou substitui uma nota inteira, com frontmatter garantido, e commita no git do vault. ' +
         'Substitui o arquivo inteiro: para mudar um trecho use vault_edit_note, e para registrar um ' +
@@ -262,7 +263,7 @@ const PT = {
       frontmatter: 'Campos do frontmatter, ex.: `{ "tipo": "wiki", "tags": ["jwt"] }`.',
     },
     vault_edit_note: {
-      title: 'Editar um trecho de uma nota',
+      displayName: 'Editar um trecho de uma nota',
       description:
         'Substitui UM trecho exato de uma nota existente e commita. Falha, sem escrever, se o trecho ' +
         'não aparecer ou aparecer mais de uma vez — nesse caso mande mais contexto em old_text.',
@@ -271,7 +272,7 @@ const PT = {
       new_text: 'Texto que entra no lugar.',
     },
     vault_learn: {
-      title: 'Registrar um aprendizado',
+      displayName: 'Registrar um aprendizado',
       description:
         'Registra um aprendizado no vault. Chame sempre que, durante a sessão, aparecer algo não óbvio ' +
         'e reutilizável — uma decisão de arquitetura, um pattern, um gotcha, uma armadilha de ' +
@@ -280,32 +281,32 @@ const PT = {
         'o MOC do domínio e para a nota diária (e para o índice de conhecimento quando o domínio é ' +
         'novo), tudo em um único commit. ' +
         'Mostre ao usuário o diff devolvido.',
-      titulo: 'Título curto do aprendizado; vira o nome do arquivo.',
+      title: 'Título curto do aprendizado; vira o nome do arquivo.',
       insight: 'O aprendizado em si, em markdown.',
-      contexto: 'Onde e por que isso apareceu.',
-      dominio:
-        'Domínio em `02-wiki/`, ex.: nestjs, docker, patterns. Um domínio novo exige confirm_novo_dominio.',
-      projeto:
+      context: 'Onde e por que isso apareceu.',
+      domain:
+        'Domínio em `02-wiki/`, ex.: nestjs, docker, patterns. Um domínio novo exige confirm_new_domain.',
+      project:
         'Nome do projeto em `03-projects/` a que o aprendizado pertence; entra na linha de captura da nota diária.',
       tags: 'Tags do frontmatter da nota.',
       links: 'Wiki-links relacionados, sem os colchetes.',
-      confirm_novo_dominio: 'Confirma a criação de um domínio que ainda não existe em `02-wiki/`.',
+      confirm_new_domain: 'Confirma a criação de um domínio que ainda não existe em `02-wiki/`.',
     },
     vault_move: {
-      title: 'Mover ou renomear uma nota',
+      displayName: 'Mover ou renomear uma nota',
       description:
         'Move, renomeia, promove ou arquiva uma nota, corrigindo sozinho todo link que passaria a ' +
         'apontar para outro lugar, migrando a entrada dela entre os MOCs de domínio e commitando tudo ' +
         'de uma vez. `to` é o caminho completo com `.md`, então as quatro operações são a mesma: ' +
         '`01-raw/inbox/rascunho.md` → `02-wiki/nestjs/auth-guard.md` promove, renomeia e troca de ' +
         'domínio junto. `99-archive/` vale como origem E destino, o que dá arquivar e desarquivar. ' +
-        'Um domínio de destino sem MOC exige confirm_novo_dominio. Mostre ao usuário o diff devolvido.',
+        'Um domínio de destino sem MOC exige confirm_new_domain. Mostre ao usuário o diff devolvido.',
       from: 'Caminho atual da nota, relativo ao vault, com `.md`.',
       to: 'Caminho completo de destino, relativo ao vault, com `.md`. Mover, renomear e promover são a mesma operação.',
-      confirm_novo_dominio: 'Confirma a criação do MOC de um domínio de destino que ainda não tem um.',
+      confirm_new_domain: 'Confirma a criação do MOC de um domínio de destino que ainda não tem um.',
     },
     vault_delete: {
-      title: 'Apagar uma nota',
+      displayName: 'Apagar uma nota',
       description:
         'Apaga uma nota e commita, tirando a linha dela do MOC do domínio. Recusa, sem apagar, se a ' +
         'nota não tiver versão commitada no HEAD (aí não haveria como desfazer), se ela for estrutural ' +
@@ -440,7 +441,7 @@ const EN: Messages = {
     'learn.badTitle': 'invalid title: it does not produce a filename (use letters or digits)',
     'learn.insightStartsWithDelimiter': 'insight cannot start with the frontmatter delimiter `---`: it would become the note\u2019s frontmatter. Write at least one line of text before the block.',
     'learn.badDomain': 'invalid domain: {problem}',
-    'learn.unknownDomain': "domain '{dominio}' does not exist under 02-wiki/. Valid domains: {validos}. Retry with confirm_novo_dominio to create it.",
+    'learn.unknownDomain': "domain '{dominio}' does not exist under 02-wiki/. Valid domains: {validos}. Retry with confirm_new_domain to create it.",
     'path.mustEndMd': 'path must end in .md: {relPath}',
     'path.mustBeRelative': 'path must be relative to the vault: {relPath}',
     'path.noGlob': 'path cannot contain a glob metacharacter: {relPath}',
@@ -455,7 +456,7 @@ const EN: Messages = {
     'relocate.samePath': 'source and destination are the same path: {fromRel}',
     'relocate.sourceNotANote': 'source is not a note: {fromRel}',
     'relocate.destExists': 'destination already exists: {toRel}',
-    'relocate.newDomainNeedsConfirm': '{toDomain} has no MOC under 02-wiki/ yet; pass confirm_novo_dominio to create it',
+    'relocate.newDomainNeedsConfirm': '{toDomain} has no MOC under 02-wiki/ yet; pass confirm_new_domain to create it',
     'relocate.raceOnMove': '{toRel} came into existence while the note was being moved; nothing was overwritten',
     'relocate.noteNotFound': 'note not found: {relPath}',
     'relocate.structuralNote': '{relPath} is a structural note ({tipo}) and is not deleted through here',
@@ -485,17 +486,18 @@ const EN: Messages = {
     oldTextEmpty: 'old_text cannot be empty',
     tooLong: 'at most {max} characters',
     unknownArgument: 'unknown argument: {keys}',
-    tituloEmpty: 'titulo cannot be empty',
+    aliasConflict: '`{legacy}` and `{canonical}` were sent with different values; use only `{canonical}`',
+    titleEmpty: 'title cannot be empty',
     insightEmpty: 'insight cannot be empty',
-    contextoEmpty: 'contexto cannot be empty',
+    contextEmpty: 'context cannot be empty',
     fromEmpty: 'source path cannot be empty',
     toEmpty: 'destination path cannot be empty',
-    dominioEmpty: 'dominio cannot be empty',
+    domainEmpty: 'domain cannot be empty',
   },
 
   tools: {
     vault_search: {
-      title: 'Search the vault',
+      displayName: 'Search the vault',
       description:
         'Lexical-semantic search over the vault (BM25 plus one wiki-link hop). Call it before ' +
         'answering any question about the user\'s decisions, patterns, gotchas or history, and before ' +
@@ -503,14 +505,14 @@ const EN: Messages = {
         'citation in your answer. Notes under `01-raw/` are excluded unless include_raw.',
       query: 'Search terms in natural language.',
       limit: 'Maximum snippets returned (default 6).',
-      tipo: 'Filter by the frontmatter `tipo`: wiki, moc, projeto, daily.',
+      type: 'Filter by the frontmatter `tipo`: wiki, moc, projeto, daily.',
       folder: 'Restrict to a vault folder, e.g. `02-wiki/nestjs`.',
       tags: 'Filters by frontmatter tags. A note must carry ALL of them; case does not matter.',
       status: 'Filters by the frontmatter `status`, e.g. `ativo`.',
       include_raw: 'Include `01-raw/` (unvetted capture), left out of results by default.',
     },
     vault_get_note: {
-      title: 'Read a note',
+      displayName: 'Read a note',
       description:
         'Reads a whole note by its vault-relative path (e.g. `02-wiki/nestjs/auth-guard.md`), with ' +
         'frontmatter, resolved links and broken links. Use it after vault_search when the snippet is ' +
@@ -521,12 +523,12 @@ const EN: Messages = {
         'answer. Omit it on the first call; afterwards use the offset the cut marker announces.',
     },
     vault_list: {
-      title: 'List notes',
+      displayName: 'List notes',
       description:
         'Lists notes by metadata — tipo, tags, status, folder — without looking at content. Use it for ' +
         'inventory ("which projects are active?", "which notes carry the jwt tag?"), not to search by ' +
         'subject: for subject use vault_search.',
-      tipo: 'Frontmatter `tipo`: wiki, moc, projeto, daily.',
+      type: 'Frontmatter `tipo`: wiki, moc, projeto, daily.',
       tags: 'Every one of these tags must be on the note.',
       status: 'Frontmatter `status`, e.g. ativo, pausado.',
       folder: 'Vault folder, matched on a segment boundary.',
@@ -534,14 +536,14 @@ const EN: Messages = {
       offset: 'How many notes to skip, in path order. Use the value the previous answer announced.',
     },
     vault_backlinks: {
-      title: 'Notes linking to a note',
+      displayName: 'Notes linking to a note',
       description:
         'Lists the notes pointing at the given note. Use it to gauge how connected a subject is, to ' +
         'find the MOC that indexes the note, or to weigh the impact of changing or renaming it.',
       path: 'Vault-relative path, with `.md`.',
     },
     vault_graph: {
-      title: 'Link graph',
+      displayName: 'Link graph',
       description:
         'Returns the vault\'s wiki-link graph: notes as nodes (path, title, tipo, status, tags, area, ' +
         'domain, degrees) and the links between them as edges, also as structured data for a client ' +
@@ -550,7 +552,7 @@ const EN: Messages = {
         'at ONE note use vault_backlinks. Filters pick the nodes, and an edge comes back only when ' +
         'both of its ends do.',
       folder: 'Vault folder, matched on a segment boundary, as in vault_list.',
-      tipo: 'Frontmatter `tipo`: wiki, moc, projeto, daily.',
+      type: 'Frontmatter `tipo`: wiki, moc, projeto, daily.',
       tags: 'Every one of these tags must be on the note; case does not matter.',
       status: 'Frontmatter `status`, e.g. ativo, pausado.',
       include_raw: 'Include `01-raw/` (unvetted capture), left out of the graph by default.',
@@ -560,7 +562,7 @@ const EN: Messages = {
         'beyond that the answer is marked as truncated.',
     },
     vault_status: {
-      title: 'Server and vault status',
+      displayName: 'Server and vault status',
       description:
         'Reports the state of the server and of the vault: version, how many notes and chunks are ' +
         'indexed, whether the vault is a git repository, the branch, commits not pushed yet, ' +
@@ -569,7 +571,7 @@ const EN: Messages = {
         'left behind. Changes nothing.',
     },
     vault_write_note: {
-      title: 'Write a note',
+      displayName: 'Write a note',
       description:
         'Creates or replaces a whole note, with frontmatter guaranteed, and commits it to the vault\'s ' +
         'git. It replaces the entire file: to change one passage use vault_edit_note, and to record a ' +
@@ -579,7 +581,7 @@ const EN: Messages = {
       frontmatter: 'Frontmatter fields, e.g. `{ "tipo": "wiki", "tags": ["jwt"] }`.',
     },
     vault_edit_note: {
-      title: 'Edit a passage of a note',
+      displayName: 'Edit a passage of a note',
       description:
         'Replaces ONE exact passage of an existing note and commits. Fails, without writing, if the ' +
         'passage does not appear or appears more than once — in that case send more context in old_text.',
@@ -588,7 +590,7 @@ const EN: Messages = {
       new_text: 'The text that takes its place.',
     },
     vault_learn: {
-      title: 'Record a learning',
+      displayName: 'Record a learning',
       description:
         'Records a learning in the vault. Call it whenever something non-obvious and reusable comes up ' +
         'during the session — an architecture decision, a pattern, a gotcha, a configuration trap — ' +
@@ -597,33 +599,33 @@ const EN: Messages = {
         'and propagates on its own to the domain MOC and the daily note (and to the knowledge index when ' +
         'the domain is new), all in a single commit. ' +
         'Show the returned diff to the user.',
-      titulo: 'Short title for the learning; it becomes the filename.',
+      title: 'Short title for the learning; it becomes the filename.',
       insight: 'The learning itself, in markdown.',
-      contexto: 'Where and why this came up.',
-      dominio:
-        'Domain under `02-wiki/`, e.g. nestjs, docker, patterns. A new domain requires confirm_novo_dominio.',
-      projeto:
+      context: 'Where and why this came up.',
+      domain:
+        'Domain under `02-wiki/`, e.g. nestjs, docker, patterns. A new domain requires confirm_new_domain.',
+      project:
         'Name of the project under `03-projects/` this learning belongs to; it goes into the daily note\'s capture line.',
       tags: 'Tags for the note\'s frontmatter.',
       links: 'Related wiki-links, without the brackets.',
-      confirm_novo_dominio: 'Confirms creating a domain that does not yet exist under `02-wiki/`.',
+      confirm_new_domain: 'Confirms creating a domain that does not yet exist under `02-wiki/`.',
     },
     vault_move: {
-      title: 'Move or rename a note',
+      displayName: 'Move or rename a note',
       description:
         'Moves, renames, promotes or archives a note, fixing on its own every link that would otherwise ' +
         'start pointing somewhere else, migrating its entry between domain MOCs and committing it all at ' +
         'once. `to` is the full path with `.md`, so the four operations are one: ' +
         '`01-raw/inbox/rascunho.md` → `02-wiki/nestjs/auth-guard.md` promotes, renames and changes ' +
         'domain together. `99-archive/` counts as BOTH source and destination, which gives you archive ' +
-        'and unarchive. A destination domain with no MOC requires confirm_novo_dominio. Show the ' +
+        'and unarchive. A destination domain with no MOC requires confirm_new_domain. Show the ' +
         'returned diff to the user.',
       from: 'The note\'s current vault-relative path, with `.md`.',
       to: 'Full destination path, vault-relative, with `.md`. Moving, renaming and promoting are the same operation.',
-      confirm_novo_dominio: 'Confirms creating the MOC of a destination domain that does not have one yet.',
+      confirm_new_domain: 'Confirms creating the MOC of a destination domain that does not have one yet.',
     },
     vault_delete: {
-      title: 'Delete a note',
+      displayName: 'Delete a note',
       description:
         'Deletes a note and commits, removing its line from the domain MOC. Refuses, without deleting, ' +
         'if the note has no committed version in HEAD (there would be no way to undo), if it is ' +

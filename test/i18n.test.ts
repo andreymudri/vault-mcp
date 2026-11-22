@@ -119,7 +119,7 @@ describe('as tools falam o idioma pedido', () => {
     // uma tool descrita em inglês é pior que os dois em português, porque parece um erro.
     const learn = (await tools('en')).find((t) => t.name === 'vault_learn');
     const shape = learn?.inputSchema.shape as Record<string, { description?: string }>;
-    expect(shape['titulo']?.description).toContain('Short title');
+    expect(shape['title']?.description).toContain('Short title');
     expect(shape['insight']?.description).toContain('markdown');
   });
 });

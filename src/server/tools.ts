@@ -547,6 +547,68 @@ function receivedType(value: unknown): string {
 }
 
 /**
+ * The argument names each tool took before its schema was written in English, and what each is
+ * called now.
+ *
+ * The published schema carries ONLY the new names: a model reads the schema on every session, so
+ * it adapts by itself, and a schema that listed both would lose its `required` on four fields of
+ * `vault_learn` (neither spelling could be marked mandatory). What cannot adapt by itself is a
+ * script written against the old names, so those are still accepted — renamed here, before
+ * validation, at both doors: the handler (`defineStructured`) and the transport
+ * (`acceptLegacyArguments` in `index.ts`), which has to act before the SDK's own strict
+ * validation sees the call.
+ */
+export const LEGACY_ARGUMENTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  vault_search: { tipo: 'type' },
+  vault_list: { tipo: 'type' },
+  vault_graph: { tipo: 'type' },
+  vault_learn: {
+    titulo: 'title',
+    contexto: 'context',
+    dominio: 'domain',
+    projeto: 'project',
+    confirm_novo_dominio: 'confirm_new_domain',
+  },
+  vault_move: { confirm_novo_dominio: 'confirm_new_domain' },
+};
+
+/** Both spellings of one argument, sent with values that disagree. */
+export interface LegacyConflict {
+  legacy: string;
+  canonical: string;
+}
+
+/**
+ * `args` with every legacy name replaced by its current one.
+ *
+ * Sent under both names with the SAME value, the legacy one is simply dropped. With different
+ * values there is no right answer to pick, so nothing is renamed and the conflict is reported for
+ * the caller to refuse.
+ */
+export function applyLegacyArguments(
+  tool: string,
+  args: unknown,
+): { args: unknown; conflict?: LegacyConflict } {
+  const renames = LEGACY_ARGUMENTS[tool];
+  if (renames === undefined || args === null || typeof args !== 'object' || Array.isArray(args)) {
+    return { args };
+  }
+  const source = args as Record<string, unknown>;
+  if (!Object.keys(renames).some((legacy) => Object.hasOwn(source, legacy))) return { args };
+
+  const out: Record<string, unknown> = { ...source };
+  for (const [legacy, canonical] of Object.entries(renames)) {
+    if (!Object.hasOwn(source, legacy)) continue;
+    if (Object.hasOwn(source, canonical) && JSON.stringify(source[canonical]) !== JSON.stringify(source[legacy])) {
+      return { args, conflict: { legacy, canonical } };
+    }
+    out[canonical] = source[legacy];
+    delete out[legacy];
+  }
+  return { args: out };
+}
+
+/**
  * Wraps a tool body so that NOTHING escapes as an exception: bad input and a thrown error both
  * come back as `isError` content.
  *
@@ -698,7 +760,7 @@ function defineStructured<Shape extends z.ZodRawShape>(
   // validates before sending catches it too.
   const inputSchema = z.object(shape).strict();
   const annotations = ANNOTATIONS[name];
-  const title = (m.tools as Record<string, { title?: string } | undefined>)[name]?.title;
+  const title = (m.tools as Record<string, { displayName?: string } | undefined>)[name]?.displayName;
   if (annotations === undefined || title === undefined) {
     throw new Error(`tool ${name} has no annotations or no title`);
   }
@@ -709,7 +771,16 @@ function defineStructured<Shape extends z.ZodRawShape>(
     annotations,
     inputSchema,
     ...(outputSchema === undefined ? {} : { outputSchema }),
-    handler: async (args) => {
+    handler: async (rawArgs) => {
+      const { args, conflict } = applyLegacyArguments(name, rawArgs);
+      if (conflict !== undefined) {
+        return {
+          ...fail(
+            `${m.errors.invalidInput} ${name}: ${forMessage(renderTemplate(m.validation.aliasConflict, { ...conflict }))}`,
+          ),
+          structuredContent: { error: { code: 'input.invalid' } },
+        };
+      }
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
         return {
@@ -1756,7 +1827,7 @@ export function createToolset(deps: ToolDeps): Toolset {
         .max(50)
         .optional()
         .describe(m.tools.vault_search.limit),
-      tipo: z.string().optional().describe(m.tools.vault_search.tipo),
+      type: z.string().optional().describe(m.tools.vault_search.type),
       folder: z.string().optional().describe(m.tools.vault_search.folder),
       tags: z.array(z.string()).optional().describe(m.tools.vault_search.tags),
       status: z.string().optional().describe(m.tools.vault_search.status),
@@ -1769,7 +1840,7 @@ export function createToolset(deps: ToolDeps): Toolset {
       const { results, suggestions } = deps.retriever.search({
         query: input.query,
         ...(input.limit === undefined ? {} : { limit: input.limit }),
-        ...(input.tipo === undefined ? {} : { tipo: input.tipo }),
+        ...(input.type === undefined ? {} : { tipo: input.type }),
         ...(input.folder === undefined ? {} : { folder: input.folder }),
         ...(input.tags === undefined ? {} : { tags: input.tags }),
         ...(input.status === undefined ? {} : { status: input.status }),
@@ -1899,7 +1970,7 @@ export function createToolset(deps: ToolDeps): Toolset {
     'vault_list',
     m.tools.vault_list.description,
     {
-      tipo: z.string().optional().describe(m.tools.vault_list.tipo),
+      type: z.string().optional().describe(m.tools.vault_list.type),
       tags: z.array(z.string()).optional().describe(m.tools.vault_list.tags),
       status: z.string().optional().describe(m.tools.vault_list.status),
       folder: z.string().optional().describe(m.tools.vault_list.folder),
@@ -1912,7 +1983,7 @@ export function createToolset(deps: ToolDeps): Toolset {
       // dela é a do `vault_search` (`hasAllTags`).
       const notes = deps.scanner
         .allNotes()
-        .filter((note) => matchesFilters(note, input))
+        .filter((note) => matchesFilters(note, { ...input, tipo: input.type }))
         .sort(byPath);
 
       if (notes.length === 0) {
@@ -1995,7 +2066,7 @@ export function createToolset(deps: ToolDeps): Toolset {
     m.tools.vault_graph.description,
     {
       folder: z.string().optional().describe(m.tools.vault_graph.folder),
-      tipo: z.string().optional().describe(m.tools.vault_graph.tipo),
+      type: z.string().optional().describe(m.tools.vault_graph.type),
       tags: z.array(z.string()).optional().describe(m.tools.vault_graph.tags),
       status: z.string().optional().describe(m.tools.vault_graph.status),
       include_raw: z.boolean().optional().describe(m.tools.vault_graph.include_raw),
@@ -2021,7 +2092,7 @@ export function createToolset(deps: ToolDeps): Toolset {
       const selected = deps.scanner
         .allNotes()
         .filter((note) => input.include_raw === true || !note.path.startsWith(RAW_PREFIX))
-        .filter((note) => matchesFilters(note, input))
+        .filter((note) => matchesFilters(note, { ...input, tipo: input.type }))
         .sort(byPath);
       const max = input.max_nodes ?? DEFAULT_GRAPH_NODES;
       const truncated = selected.length > max;
@@ -2247,31 +2318,31 @@ export function createToolset(deps: ToolDeps): Toolset {
       force_new: z.boolean().optional().describe('Create a linked sibling note even when this topic already exists.'),
       preview_time: z.string().datetime().optional().describe('Use the timestamp returned by the approved preview.'),
       expected_revision: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('Refuse a write if the approved preview is stale.'),
-      titulo: z.string().min(1, m.validation.tituloEmpty).describe(m.tools.vault_learn.titulo),
+      title: z.string().min(1, m.validation.titleEmpty).describe(m.tools.vault_learn.title),
       insight: z
         .string()
         .min(1, m.validation.insightEmpty)
         .max(MAX_INSIGHT_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_INSIGHT_CHARS }))
         .describe(m.tools.vault_learn.insight),
-      contexto: z
+      context: z
         .string()
-        .min(1, m.validation.contextoEmpty)
+        .min(1, m.validation.contextEmpty)
         .max(MAX_CONTEXT_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_CONTEXT_CHARS }))
-        .describe(m.tools.vault_learn.contexto),
-      dominio: z
+        .describe(m.tools.vault_learn.context),
+      domain: z
         .string()
-        .min(1, m.validation.dominioEmpty)
-        .describe(m.tools.vault_learn.dominio),
-      projeto: z
+        .min(1, m.validation.domainEmpty)
+        .describe(m.tools.vault_learn.domain),
+      project: z
         .string()
         .optional()
-        .describe(m.tools.vault_learn.projeto),
+        .describe(m.tools.vault_learn.project),
       tags: z.array(z.string()).optional().describe(m.tools.vault_learn.tags),
       links: z.array(z.string()).optional().describe(m.tools.vault_learn.links),
-      confirm_novo_dominio: z
+      confirm_new_domain: z
         .boolean()
         .optional()
-        .describe(m.tools.vault_learn.confirm_novo_dominio),
+        .describe(m.tools.vault_learn.confirm_new_domain),
     },
     z.object({
       action: z.enum(['created', 'appended']), path: z.string(), reason: z.string(), diff: z.string(),
@@ -2288,18 +2359,18 @@ export function createToolset(deps: ToolDeps): Toolset {
         learn({
           vaultRoot: deps.vaultRoot,
           retriever: deps.retriever,
-          titulo: input.titulo,
+          titulo: input.title,
           insight: input.insight,
-          contexto: input.contexto,
-          dominio: input.dominio,
-          ...(input.projeto === undefined ? {} : { projeto: input.projeto }),
+          contexto: input.context,
+          dominio: input.domain,
+          ...(input.project === undefined ? {} : { projeto: input.project }),
           // The same round-trip guard as `vault_write_note`: `learn` writes these into the very
           // same YAML block, so a tag that would not come back must be refused here too.
           ...(input.tags === undefined ? {} : { tags: coerceTags(input.tags) }),
           ...(input.links === undefined ? {} : { links: input.links }),
-          ...(input.confirm_novo_dominio === undefined
+          ...(input.confirm_new_domain === undefined
             ? {}
-            : { confirmNovoDominio: input.confirm_novo_dominio }),
+            : { confirmNovoDominio: input.confirm_new_domain }),
           preview: input.preview,
           forceNew: input.force_new,
           expectedRevision: input.expected_revision,
@@ -2368,10 +2439,10 @@ export function createToolset(deps: ToolDeps): Toolset {
         .string()
         .min(1, m.validation.toEmpty)
         .describe(m.tools.vault_move.to),
-      confirm_novo_dominio: z
+      confirm_new_domain: z
         .boolean()
         .optional()
-        .describe(m.tools.vault_move.confirm_novo_dominio),
+        .describe(m.tools.vault_move.confirm_new_domain),
     },
     async (input) => {
       const { value: result, warning } = await refreshedWrite('vault_move', (git) =>
@@ -2380,9 +2451,9 @@ export function createToolset(deps: ToolDeps): Toolset {
           scanner: deps.scanner,
           from: input.from,
           to: input.to,
-          ...(input.confirm_novo_dominio === undefined
+          ...(input.confirm_new_domain === undefined
             ? {}
-            : { confirmNovoDominio: input.confirm_novo_dominio }),
+            : { confirmNovoDominio: input.confirm_new_domain }),
           now: new Date(),
           ...git,
         }),

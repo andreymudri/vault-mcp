@@ -351,10 +351,10 @@ describe('createTools: catálogo', () => {
     expect(description).toContain('nota diária');
   });
 
-  it('descreve projeto como o nome do projeto em 03-projects/', async () => {
+  it('descreve project como o nome do projeto em 03-projects/', async () => {
     const { tool } = makeTools(await makeVault());
     const shape = tool('vault_learn').inputSchema.shape as Record<string, { description?: string }>;
-    expect(shape['projeto']?.description ?? '').toContain('03-projects/');
+    expect(shape['project']?.description ?? '').toContain('03-projects/');
   });
 });
 
@@ -374,7 +374,7 @@ describe('schemas de entrada', () => {
       schema.safeParse({
         query: 'jwt',
         limit: 3,
-        tipo: 'wiki',
+        type: 'wiki',
         folder: '02-wiki',
         include_raw: true,
       }).success,
@@ -384,14 +384,14 @@ describe('schemas de entrada', () => {
     expect(schema.safeParse({ query: 'jwt', limit: 0 }).success).toBe(false);
   });
 
-  it('vault_learn exige titulo, insight, contexto e dominio', async () => {
+  it('vault_learn exige title, insight, context e domain', async () => {
     const { tool } = makeTools(await makeVault());
     const schema = tool('vault_learn').inputSchema;
     const completo = {
-      titulo: 'Rate limit no gateway',
+      title: 'Rate limit no gateway',
       insight: 'Use token bucket por tenant.',
-      contexto: 'API multi-tenant',
-      dominio: 'nestjs',
+      context: 'API multi-tenant',
+      domain: 'nestjs',
     };
     expect(schema.safeParse(completo).success).toBe(true);
     for (const key of Object.keys(completo)) {
@@ -400,9 +400,12 @@ describe('schemas de entrada', () => {
       expect(schema.safeParse(parcial).success).toBe(false);
     }
     expect(
-      schema.safeParse({ ...completo, tags: ['a'], links: ['b'], projeto: 'potentia', confirm_novo_dominio: true })
+      schema.safeParse({ ...completo, tags: ['a'], links: ['b'], project: 'potentia', confirm_new_domain: true })
         .success,
     ).toBe(true);
+    // O SCHEMA é estrito e só conhece os nomes novos; quem aceita os antigos é a troca de nome
+    // que roda antes dele (`applyLegacyArguments`), coberta mais abaixo.
+    expect(schema.safeParse({ ...completo, projeto: 'potentia' }).success).toBe(false);
     expect(schema.safeParse({ ...completo, tags: 'nestjs' }).success).toBe(false);
   });
 
@@ -2843,7 +2846,7 @@ describe('servidor MCP', () => {
     expect(search?.inputSchema.type).toBe('object');
     expect(search?.inputSchema['required']).toEqual(['query']);
     expect(Object.keys((search?.inputSchema['properties'] ?? {}) as Record<string, unknown>).sort()).toEqual(
-      ['folder', 'include_raw', 'limit', 'query', 'status', 'tags', 'tipo'].sort(),
+      ['folder', 'include_raw', 'limit', 'query', 'status', 'tags', 'type'].sort(),
     );
 
     await client.close();
@@ -3719,5 +3722,114 @@ describe('validade do scan e escrita', () => {
     const moved = textOf(await call('vault_move', { from: '02-wiki/docker/recem.md', to: '02-wiki/docker/renomeada.md' }));
     expect(moved).toContain('02-wiki/docker/por-fora.md');
     expect(await read(vaultRoot, '02-wiki/docker/por-fora.md')).toContain('[[renomeada]]');
+  });
+});
+
+describe('nomes de parâmetro em inglês, com os antigos aceitos', () => {
+  const LEARN = { insight: 'zzalias: retry com backoff exponencial na fila.' };
+
+  async function connected(vaultRoot: string) {
+    const server = createVaultServer(vaultRoot, 'pt');
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return {
+      client,
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+
+  it('o schema publicado só tem os nomes em inglês, com os obrigatórios marcados', async () => {
+    const { client, close } = await connected(await makeVault());
+    const { tools } = await client.listTools();
+    const schemaOf = (name: string) => tools.find((tool) => tool.name === name)?.inputSchema;
+    const properties = (name: string): string[] =>
+      Object.keys((schemaOf(name)?.['properties'] ?? {}) as Record<string, unknown>);
+
+    expect([...((schemaOf('vault_learn')?.['required'] ?? []) as string[])].sort()).toEqual([
+      'context',
+      'domain',
+      'insight',
+      'title',
+    ]);
+    expect(properties('vault_learn')).toEqual(expect.arrayContaining(['project', 'confirm_new_domain']));
+    expect(properties('vault_move')).toContain('confirm_new_domain');
+    for (const name of ['vault_search', 'vault_list', 'vault_graph']) expect(properties(name)).toContain('type');
+
+    const antigos = ['titulo', 'contexto', 'dominio', 'projeto', 'confirm_novo_dominio', 'tipo'];
+    for (const tool of tools) {
+      for (const antigo of antigos) expect(properties(tool.name), `${tool.name}.${antigo}`).not.toContain(antigo);
+    }
+    await close();
+  });
+
+  it('os nomes novos funcionam, pelo handler e pelo protocolo', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+    const pelaMao = await call('vault_learn', {
+      ...LEARN,
+      title: 'Backoff no worker novo',
+      context: 'fila de jobs',
+      domain: 'nestjs',
+      project: 'potentia',
+    });
+    expect(pelaMao.isError).not.toBe(true);
+
+    const { client, close } = await connected(vaultRoot);
+    const filtrada = await client.callTool({ name: 'vault_list', arguments: { type: 'projeto' } });
+    expect(filtrada.isError).not.toBe(true);
+    expect(JSON.stringify(filtrada.content)).toContain(POTENTIA);
+    expect(JSON.stringify(filtrada.content)).not.toContain(AUTH_GUARD);
+    await close();
+  });
+
+  it('os nomes antigos continuam aceitos pelo PROTOCOLO, onde o SDK valida antes do handler', async () => {
+    const vaultRoot = await makeVault(true);
+    const { client, close } = await connected(vaultRoot);
+
+    const aprendizado = await client.callTool({
+      name: 'vault_learn',
+      arguments: { ...LEARN, titulo: 'Backoff no worker antigo', contexto: 'fila de jobs', dominio: 'nestjs' },
+    });
+    expect(aprendizado.isError, JSON.stringify(aprendizado.content)).not.toBe(true);
+    expect(await vaultContains(vaultRoot, 'zzalias')).not.toHaveLength(0);
+
+    const antiga = await client.callTool({ name: 'vault_list', arguments: { tipo: 'projeto' } });
+    const nova = await client.callTool({ name: 'vault_list', arguments: { type: 'projeto' } });
+    expect(antiga.isError).not.toBe(true);
+    expect(antiga.content).toEqual(nova.content);
+
+    const busca = await client.callTool({ name: 'vault_search', arguments: { query: 'jwt', tipo: 'wiki' } });
+    expect(busca.isError).not.toBe(true);
+    await close();
+  });
+
+  it('os dois nomes juntos: iguais passam, diferentes são recusados dizendo qual usar', async () => {
+    const { call } = makeTools(await makeVault(true));
+
+    const iguais = await call('vault_list', { tipo: 'projeto', type: 'projeto' });
+    expect(iguais.isError).not.toBe(true);
+
+    const diferentes = await call('vault_list', { tipo: 'projeto', type: 'wiki' });
+    expect(diferentes.isError).toBe(true);
+    expect(textOf(diferentes)).toContain('`tipo`');
+    expect(textOf(diferentes)).toContain('use só `type`');
+  });
+
+  it('a recusa por domínio novo já fala o nome novo do parâmetro', async () => {
+    const { call } = makeTools(await makeVault(true));
+    const result = await call('vault_learn', {
+      ...LEARN,
+      title: 'Domínio que não existe',
+      context: 'teste',
+      domain: 'inexistente',
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('confirm_new_domain');
+    expect(textOf(result)).not.toContain('confirm_novo_dominio');
   });
 });

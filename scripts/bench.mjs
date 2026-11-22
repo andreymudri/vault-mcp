@@ -44,7 +44,10 @@ const root = join(base, 'vault');
 try {
   // A small linear congruential generator: the same vault on every run and every machine.
   let seed = 42;
-  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
   const vocabulary = Array.from({ length: 6000 }, (_, i) => `w${i.toString(36)}term`);
   // Squaring the draw skews it towards the head of the vocabulary, roughly as real text does.
   const words = (count) =>

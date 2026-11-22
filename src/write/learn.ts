@@ -777,7 +777,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   if (domainIsNew && opts.confirmNovoDominio !== true) {
     const validos = dominios.length === 0 ? 'nenhum' : dominios.join(', ');
     throw coded(new LearnError(`domínio '${opts.dominio}' não existe em 02-wiki/. Domínios válidos: ${validos}. ` +
-        'Repita com confirm_novo_dominio para criar o domínio.'), 'learn.unknownDomain', { dominio: opts.dominio, validos });
+        'Repita com confirm_new_domain para criar o domínio.'), 'learn.unknownDomain', { dominio: opts.dominio, validos });
   }
 
   const tags = (opts.tags ?? []).filter((tag): tag is string => typeof tag === 'string');

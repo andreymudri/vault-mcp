@@ -792,7 +792,10 @@ describe('InvertedIndex: postings compactos', () => {
 
   it('depois de churn aleatório, é indistinguível de um índice novo com os mesmos chunks', () => {
     let seed = 7;
-    const random = (): number => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const random = (): number => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
     const text = (): string =>
       Array.from({ length: 3 + Math.floor(random() * 6) }, () => WORDS[Math.floor(random() * WORDS.length)]).join(' ');
 

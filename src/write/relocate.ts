@@ -356,7 +356,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     const domainIsNew = existing === '';
     if (domainIsNew && opts.confirmNovoDominio !== true) {
       throw coded(new RelocateError(`${forMessage(toDomain ?? '')} ainda não tem MOC em 02-wiki/; ` +
-          'passe confirm_novo_dominio para criá-lo'), 'relocate.newDomainNeedsConfirm', { toDomain: forMessage(toDomain ?? '') });
+          'passe confirm_new_domain para criá-lo'), 'relocate.newDomainNeedsConfirm', { toDomain: forMessage(toDomain ?? '') });
     }
 
     const slug = posix.basename(toRel, '.md');
