@@ -18,9 +18,10 @@ import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import { createLogger, type LogEntry } from '../src/server/logger.js';
-import { NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
+import { ALWAYS_SCAN, NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
 import { messagesFor } from '../src/i18n/messages.js';
 import {
+  ERROR_META_KEY,
   MAX_DIFF_CHARS,
   MAX_NOTE_CHARS,
   WriteQueue,
@@ -108,7 +109,7 @@ interface Harness {
 }
 
 function makeTools(vaultRoot: string): Harness {
-  const scanner = new VaultScanner({ vaultRoot });
+  const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
   const retriever = new Retriever({ scanner });
   // Português FIXADO, e não o padrão: as asserções deste arquivo foram escritas contra o catálogo
   // pt (descrição de tool, texto de recusa), e desde que `VAULT_LANG` existe o padrão é `en`. Sem
@@ -136,7 +137,7 @@ function textOf(result: ToolResult): string {
 
 /** A fresh retriever over the same vault, used as the independent oracle for search results. */
 function oracle(vaultRoot: string): Retriever {
-  return new Retriever({ scanner: new VaultScanner({ vaultRoot }) });
+  return new Retriever({ scanner: new VaultScanner({ vaultRoot, ...ALWAYS_SCAN }) });
 }
 
 /**
@@ -2780,8 +2781,8 @@ describe('servidor MCP', () => {
       description: 'tool de teste',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: createTools({
-        retriever: new Retriever({ scanner: new VaultScanner({ vaultRoot }) }),
-        scanner: new VaultScanner({ vaultRoot }),
+        retriever: new Retriever({ scanner: new VaultScanner({ vaultRoot, ...ALWAYS_SCAN }) }),
+        scanner: new VaultScanner({ vaultRoot, ...ALWAYS_SCAN }),
         vaultRoot,
         messages: messagesFor('pt'),
       })[0]!.inputSchema,
@@ -2990,7 +2991,7 @@ describe('diagnósticos do vault na saída das tools', () => {
 
   it('o aviso sai no idioma do catálogo, e não em português cru', async () => {
     const vaultRoot = await makeVault();
-    const scanner = new VaultScanner({ vaultRoot });
+    const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
     const tools = createTools({
       retriever: new Retriever({ scanner }),
       scanner,
@@ -3034,7 +3035,7 @@ describe('vault_status', () => {
     const vaultRoot = await makeVault(true);
     const { text, data } = await semAutoPush(() => status(vaultRoot));
 
-    const scanner = new VaultScanner({ vaultRoot });
+    const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(data).toMatchObject({
       notes: scanner.allNotes().length,
@@ -3381,7 +3382,7 @@ describe('log do servidor', () => {
     const vaultRoot = await makeVault(true);
     await fs.writeFile(path.join(vaultRoot, '.gitignore'), 'recusada.md\n', 'utf8');
     const { logger, entries } = collecting();
-    const scanner = new VaultScanner({ vaultRoot });
+    const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
     const tools = createTools({
       retriever: new Retriever({ scanner }),
       scanner,
@@ -3614,7 +3615,7 @@ describe('modo somente leitura e tools desligadas', () => {
 
 describe('código de erro estruturado', () => {
   const errorOf = (result: ToolResult): { code?: string; params?: Record<string, unknown> } | undefined =>
-    (result.structuredContent as { error?: { code?: string; params?: Record<string, unknown> } } | undefined)?.error;
+    result._meta?.[ERROR_META_KEY] as { code?: string; params?: Record<string, unknown> } | undefined;
 
   it('toda recusa carrega o código que a explica, além do texto', async () => {
     const vaultRoot = await makeVault(true);
@@ -3647,7 +3648,7 @@ describe('código de erro estruturado', () => {
 
   it('os parâmetros do erro não devolvem a raiz absoluta do vault', async () => {
     const vaultRoot = await makeVault(true);
-    const scanner = new VaultScanner({ vaultRoot });
+    const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
     // Um lock que outro "processo" segura: a escrita espera 60 ms e é recusada.
     const lockPath = await lockPathFor(vaultRoot);
     const release = await new VaultLock({ lockPath }).acquire();
@@ -3665,7 +3666,7 @@ describe('código de erro estruturado', () => {
 
       expect(result.isError).toBe(true);
       expect(errorOf(result)).toMatchObject({ code: 'lock.timeout', params: { ms: 60, pid: process.pid } });
-      expect(JSON.stringify(result.structuredContent)).not.toContain(vaultRoot);
+      expect(JSON.stringify(result._meta)).not.toContain(vaultRoot);
       await expect(fs.access(path.join(vaultRoot, '02-wiki/docker/espera.md'))).rejects.toThrow();
     } finally {
       await release();
@@ -3684,12 +3685,60 @@ describe('código de erro estruturado', () => {
 
     const result = await client.callTool({ name: 'vault_get_note', arguments: { path: 'nao-existe.md' } });
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({ error: { code: 'note.notFound' } });
+    expect(result._meta?.[ERROR_META_KEY]).toMatchObject({ code: 'note.notFound' });
     expect(entries.find((entry) => entry.event === 'tool.call')?.fields).toMatchObject({
       tool: 'vault_get_note',
       ok: false,
       code: 'note.notFound',
     });
+
+    await client.close();
+    await server.close();
+  });
+
+  it('uma recusa nunca leva structuredContent, nem nas tools que publicam outputSchema', async () => {
+    const { tools } = makeTools(await makeVault(true));
+    // A premissa do teste: há tools com schema de saída, e é nelas que um `{ error }` no lugar do
+    // resultado quebraria a promessa do schema.
+    expect(tools.filter((tool) => tool.outputSchema !== undefined).map((tool) => tool.name).sort()).toEqual([
+      'vault_graph',
+      'vault_learn',
+      'vault_status',
+    ]);
+    for (const tool of tools) {
+      const refused = await tool.handler({ argumento_que_ninguem_declara: 1 });
+      expect(refused.isError, tool.name).toBe(true);
+      expect(refused.structuredContent, tool.name).toBeUndefined();
+      expect(errorOf(refused), tool.name).toEqual({ code: 'input.invalid' });
+    }
+  });
+
+  it('a recusa de uma tool com outputSchema chega ao cliente como recusa, e não como erro de protocolo', async () => {
+    const server = createVaultServer(await makeVault(true), 'pt');
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    // O `Client` do SDK só valida o `structuredContent` de uma tool depois de conhecer o schema
+    // dela, e conhece pelo `tools/list`. Sem esta chamada o teste passaria sem testar nada — foi
+    // assim que o defeito atravessou os outros testes de protocolo deste arquivo.
+    const listed = await client.listTools();
+    expect(listed.tools.find((tool) => tool.name === 'vault_learn')?.outputSchema).toBeDefined();
+
+    const learn = { title: 'Um título', insight: 'Um aprendizado.', context: 'Um contexto.', domain: 'dominio-que-nao-existe' };
+    const semDominio = await client.callTool({ name: 'vault_learn', arguments: learn });
+    expect(semDominio.isError).toBe(true);
+    expect(semDominio.structuredContent).toBeUndefined();
+    expect(semDominio._meta?.[ERROR_META_KEY]).toMatchObject({ code: 'learn.unknownDomain' });
+    expect((semDominio.content as Array<{ text: string }>).map((part) => part.text).join('\n')).toContain('confirm_new_domain');
+
+    const vencida = await client.callTool({
+      name: 'vault_learn',
+      arguments: { ...learn, confirm_new_domain: true, expected_revision: 'b'.repeat(64) },
+    });
+    expect(vencida.isError).toBe(true);
+    expect(vencida.structuredContent).toBeUndefined();
+    expect(vencida._meta?.[ERROR_META_KEY]).toEqual({ code: 'preview_stale' });
 
     await client.close();
     await server.close();

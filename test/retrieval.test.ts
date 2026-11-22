@@ -14,6 +14,7 @@ import {
 import { Retriever, type SearchOptions } from '../src/retrieval/retrieval.js';
 import type { Chunk, ScoredChunk } from '../src/types.js';
 import { VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
+import { ALWAYS_SCAN } from './platform.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -141,7 +142,7 @@ class MemoryFs implements FsOps {
 
 function memoryRetriever(): { retriever: Retriever; fs: MemoryFs; scanner: VaultScanner } {
   const fs = new MemoryFs(loadFixture());
-  const scanner = new VaultScanner({ vaultRoot: MEM_ROOT, fs });
+  const scanner = new VaultScanner({ vaultRoot: MEM_ROOT, fs, ...ALWAYS_SCAN });
   return { retriever: new Retriever({ scanner }), fs, scanner };
 }
 
@@ -149,7 +150,7 @@ function memoryRetriever(): { retriever: Retriever; fs: MemoryFs; scanner: Vault
 const WARMUP = 'aquecimento-do-indice';
 
 function diskRetriever(): Retriever {
-  return new Retriever({ scanner: new VaultScanner({ vaultRoot: FIXTURE }) });
+  return new Retriever({ scanner: new VaultScanner({ vaultRoot: FIXTURE, ...ALWAYS_SCAN }) });
 }
 
 function paths(results: ScoredChunk[]): string[] {

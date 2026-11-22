@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { VaultScanner } from '../src/vault/scanner.js';
 import { RelocateError, deleteNote, moveNote } from '../src/write/relocate.js';
+import { ALWAYS_SCAN } from './platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -36,7 +37,7 @@ async function makeVault(): Promise<{ root: string; scanner: VaultScanner }> {
   await git(root, ['config', 'user.email', 'vault-mcp-test@example.com']);
   await git(root, ['add', '-A']);
   await git(root, ['commit', '-m', 'chore: vault inicial']);
-  const scanner = new VaultScanner({ vaultRoot: root });
+  const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
   scanner.refresh();
   return { root, scanner };
 }
@@ -211,7 +212,7 @@ describe('moveNote', () => {
     // e o teste pergunta ao próprio scanner — não à intuição — se o link ainda resolve.
     await move('02-wiki/nestjs/auth-guard.md', '02-wiki/docker/auth-guard.md');
 
-    const fresh = new VaultScanner({ vaultRoot: root });
+    const fresh = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     fresh.refresh();
     const movida = fresh.getNote('02-wiki/docker/auth-guard.md');
     expect(movida).toBeDefined();
@@ -431,7 +432,7 @@ describe('deleteNote', () => {
     expect(await exists(root, '02-wiki/nestjs/bullmq-worker.md')).toBe(false);
     // Não há para onde reescrever, e o vault já modela link quebrado como cidadão de primeira
     // classe — `vault_get_note` reporta `brokenLinks`. Inventar um destino seria pior.
-    const fresh = new VaultScanner({ vaultRoot: root });
+    const fresh = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     fresh.refresh();
     expect(fresh.getNote('02-wiki/nestjs/auth-guard.md')?.brokenLinks).toContain('bullmq-worker');
   });

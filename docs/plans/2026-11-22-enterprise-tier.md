@@ -40,7 +40,7 @@ consegue usar o servidor com nomes de parâmetro em inglês.
 - O servidor escreve log estruturado em stderr no nível pedido e avisa de configuração inválida
 - SIGTERM durante uma escrita deixa a escrita terminar e o lock solto
 - `VAULT_READ_ONLY=1` não publica tool de escrita
-- Toda recusa com código carrega o código em `structuredContent.error`
+- Toda recusa com código carrega o código no resultado, em `_meta["io.github.andreymudri/vault-mcp.error"]` (era `structuredContent.error`: o review final mostrou que isso quebra o `outputSchema` de três tools)
 - Com o scan caro, chamadas seguidas dentro da validade não refazem `stat` do vault
 - O índice de 20 mil notas sintéticas usa menos memória que antes, medido por `scripts/bench.mjs`
 - O schema publicado usa nomes de parâmetro em inglês e os nomes em português continuam aceitos
@@ -272,7 +272,7 @@ consegue usar o servidor com nomes de parâmetro em inglês.
 **Depends:** T5
 
 - [x] **Step 1:** Testes: recusa por caminho fora do vault traz `structuredContent.error.code = 'path.outsideVault'`; entrada inválida traz `input.invalid`; erro de sistema de arquivos traz o errno; os parâmetros saem redigidos.
-- [x] **Step 2:** Em `defineStructured`, toda falha vira `{ error: { code, params } }`. `vault_list` e `vault_backlinks` NÃO ganham saída estruturada: ela dobraria, para o modelo, uma resposta que acabou de ganhar teto, e o inventário para programa já existe no `vault_graph`.
+- [x] **Step 2:** Em `defineStructured`, toda falha vira `{ code, params }` no `_meta` do resultado (no plano original era `structuredContent.error`; mudou no review final, porque o `Client` do SDK valida `structuredContent` contra o `outputSchema` também em erro). `vault_list` e `vault_backlinks` NÃO ganham saída estruturada: ela dobraria, para o modelo, uma resposta que acabou de ganhar teto, e o inventário para programa já existe no `vault_graph`.
 
 ### Task 19: validade adaptativa do scan
 

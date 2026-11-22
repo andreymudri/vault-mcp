@@ -34,7 +34,8 @@ export {
   MAX_WRITE_CHARS,
 } from './tools/limits.js';
 export { forMessage, makeRedactor } from './tools/sanitize.js';
-export type { ToolAnnotations, ToolDefinition, ToolDeps, ToolResult } from './tools/types.js';
+export { ERROR_META_KEY } from './tools/types.js';
+export type { RefusalCode, ToolAnnotations, ToolDefinition, ToolDeps, ToolResult } from './tools/types.js';
 export { WRITE_SLOT_TIMEOUT_MS, WriteQueue } from './tools/write-queue.js';
 
 /** The tools, plus what a process that is shutting down needs to know about the writes behind them. */

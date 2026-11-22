@@ -350,10 +350,9 @@ describe('decideDuplicate', () => {
     expect(decision.reason).toContain('outro domínio');
   });
 
-  it('a shared tag does not make a note in ANOTHER domain a duplicate', () => {
-    // Recorded in the vault on 2026-11-08: a learning filed under `trading` was appended to a note
-    // in `02-wiki/rustot/` because both carried one generic tag. A tag is shared by notes that
-    // have nothing else in common; the domain is where the caller said this learning belongs.
+  it('a hit in ANOTHER domain is never the append target, and the reason names it', () => {
+    // The rule takes no tags at all, which is the point — see the `learn` test "uma tag em comum
+    // com a nota de outro domínio" below for the call that used to append on a shared tag.
     const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], 'docker');
     expect(decision.isDuplicate).toBe(false);
     expect(decision.targetPath).toBeUndefined();
@@ -485,6 +484,34 @@ describe('learn — roteamento', () => {
     expect(result.reason).toContain('outro domínio');
     expect(result.reason).toContain(BULLMQ);
     // The strongly matching note was NOT touched.
+    expect(await read(vaultRoot, BULLMQ)).toBe(before);
+  });
+
+  it('uma tag em comum com a nota de outro domínio não faz dela o alvo do anexo', async () => {
+    // Recorded in the vault on 2026-11-08: a learning filed under `trading` was appended to a note
+    // in `02-wiki/rustot/` because both carried one generic tag. A tag is shared by notes that
+    // have nothing else in common; the domain is where the caller said this learning belongs.
+    //
+    // `bullmq` IS a tag of the nestjs note, and that is what makes this the test of the rule: with
+    // "a shared tag OR the same domain" this exact call answered "APPENDED to
+    // 02-wiki/nestjs/bullmq-worker.md". The test above it passes a tag the note does not have, so
+    // it stays green under either rule.
+    expect(matter(await read(vaultRoot, BULLMQ), {}).data.tags).toContain('bullmq');
+    const before = await read(vaultRoot, BULLMQ);
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Retry de worker BullMQ no build',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila de notificacoes',
+      contexto: 'Lendo o Dockerfile do worker',
+      dominio: 'docker',
+      tags: ['bullmq'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/docker/retry-de-worker-bullmq-no-build.md');
+    expect(result.reason).toContain(BULLMQ);
     expect(await read(vaultRoot, BULLMQ)).toBe(before);
   });
 

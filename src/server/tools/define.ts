@@ -3,7 +3,14 @@ import { errorContext, renderTemplate } from '../../i18n/errors.js';
 import type { Messages } from '../../i18n/messages.js';
 import type { Diagnostic } from '../../types.js';
 import { forMessage, redactDeep } from './sanitize.js';
-import { ANNOTATIONS, type ToolDefinition, type ToolDeps, type ToolResult } from './types.js';
+import {
+  ANNOTATIONS,
+  ERROR_META_KEY,
+  type RefusalCode,
+  type ToolDefinition,
+  type ToolDeps,
+  type ToolResult,
+} from './types.js';
 
 /**
  * How a tool is built: argument validation and legacy names, the translation of errors, the
@@ -50,6 +57,21 @@ export function ok(text: string): ToolResult {
 
 export function fail(text: string): ToolResult {
   return { content: [{ type: 'text', text }], isError: true };
+}
+
+/**
+ * `fail` with the code of the refusal beside the text, under {@link ERROR_META_KEY} in `_meta`.
+ *
+ * The text is written for a model and in the server's language; a program deciding what to do
+ * next — retry a `lock.timeout`, re-preview a `preview_stale`, give up on a `path.outsideVault` —
+ * should not have to parse it.
+ */
+export function refuse(text: string, code: string, params?: Record<string, unknown>): ToolResult {
+  const refusal: RefusalCode = {
+    code,
+    ...(params === undefined || Object.keys(params).length === 0 ? {} : { params }),
+  };
+  return { ...fail(text), _meta: { [ERROR_META_KEY]: refusal } };
 }
 
 export function messageOf(err: unknown): string {
@@ -280,9 +302,9 @@ export function define<Shape extends z.ZodRawShape>(
  * every other tool's does and the data as `structuredContent`, under `outputSchema`.
  *
  * `define` delegates here with no schema, so the tools that answer only text keep exactly the
- * path they had. Errors take the same route in both: an `isError` answer carries the text and, as
- * `structuredContent.error`, the code of the refusal — the SDK skips output validation on errors,
- * so that shape is free of each tool's own `outputSchema`.
+ * path they had. Errors take the same route in both: an `isError` answer carries the text and, in
+ * `_meta`, the code of the refusal — never `structuredContent`, which on a tool with an
+ * `outputSchema` has to obey it on every answer (see {@link ERROR_META_KEY}).
  */
 export function defineStructured<Shape extends z.ZodRawShape>(
   redact: (text: string) => string,
@@ -316,19 +338,17 @@ export function defineStructured<Shape extends z.ZodRawShape>(
     handler: async (rawArgs) => {
       const { args, conflict } = applyLegacyArguments(name, rawArgs);
       if (conflict !== undefined) {
-        return {
-          ...fail(
-            `${m.errors.invalidInput} ${name}: ${forMessage(renderTemplate(m.validation.aliasConflict, { ...conflict }))}`,
-          ),
-          structuredContent: { error: { code: 'input.invalid' } },
-        };
+        return refuse(
+          `${m.errors.invalidInput} ${name}: ${forMessage(renderTemplate(m.validation.aliasConflict, { ...conflict }))}`,
+          'input.invalid',
+        );
       }
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
-        return {
-          ...fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m, args))}`),
-          structuredContent: { error: { code: 'input.invalid' } },
-        };
+        return refuse(
+          `${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m, args))}`,
+          'input.invalid',
+        );
       }
       try {
         const { text, structured } = await run(parsed.data);
@@ -351,21 +371,13 @@ export function defineStructured<Shape extends z.ZodRawShape>(
         const body = bare
           ? forMessage(redact(text))
           : `${name} ${m.errors.toolFailed}: ${forMessage(redact(text))}`;
-        // The same refusal as DATA. The text is written for a model and in the server's language;
-        // a program deciding what to do next — retry a `lock.timeout`, re-preview a
-        // `preview_stale`, give up on a `path.outsideVault` — should not have to parse either. A
-        // filesystem error carries its errno here, and one with no code at all says `unknown`.
-        return {
-          ...fail(body),
-          structuredContent: {
-            error: {
-              code: code ?? 'unknown',
-              ...(params === undefined || Object.keys(params).length === 0
-                ? {}
-                : { params: redactDeep(params, redact) }),
-            },
-          },
-        };
+        // The same refusal as DATA. A filesystem error carries its errno here, and one with no
+        // code at all says `unknown`.
+        return refuse(
+          body,
+          code ?? 'unknown',
+          params === undefined ? undefined : (redactDeep(params, redact) as Record<string, unknown>),
+        );
       }
     },
   };

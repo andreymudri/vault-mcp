@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Note } from '../src/types.js';
 import { DEFAULT_MAX_NOTE_BYTES, VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
-import { IS_WINDOWS } from './platform.js';
+import { ALWAYS_SCAN, IS_WINDOWS } from './platform.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -91,7 +91,7 @@ function tracker(): Tracker {
 }
 
 function scannerWith(t: Tracker): VaultScanner {
-  return new VaultScanner({ vaultRoot: root, fs: t.fs });
+  return new VaultScanner({ vaultRoot: root, fs: t.fs, ...ALWAYS_SCAN });
 }
 
 const ALL_PATHS = [
@@ -139,7 +139,7 @@ function touch(relativePath: string, secondsAhead: number): void {
 
 describe('VaultScanner.refresh', () => {
   it('encontra todo `.md` do vault, inclusive na raiz e em 99-archive/', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     const { changed, removed } = scanner.refresh();
 
     expect(paths(scanner)).toEqual(ALL_PATHS);
@@ -150,7 +150,7 @@ describe('VaultScanner.refresh', () => {
   });
 
   it('devolve caminhos vault-relativos com separador `/`', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     for (const path of paths(scanner)) {
@@ -163,7 +163,7 @@ describe('VaultScanner.refresh', () => {
   });
 
   it('ignora `_templates/`, verificado pela saída', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     // Os dois arquivos existem na cópia — a asserção só vale porque há alvo.
@@ -206,7 +206,7 @@ describe('VaultScanner.refresh', () => {
 
 describe('VaultScanner: notas', () => {
   it('quebrada.md entra com frontmatter vazio e gera diagnostic, sem lançar', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     expect(() => scanner.refresh()).not.toThrow();
 
     const note = scanner.getNote('quebrada.md');
@@ -222,7 +222,7 @@ describe('VaultScanner: notas', () => {
   });
 
   it('title vem do primeiro `# `, com fallback para o basename sem extensão', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/nestjs/auth-guard.md')?.title).toBe('Auth Guard');
@@ -237,14 +237,14 @@ describe('VaultScanner: notas', () => {
       join(root, 'cercada.md'),
       ['```md', '# Titulo Falso', '```', '', '# Titulo Real', '', 'corpo', ''].join('\n'),
     );
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('cercada.md')?.title).toBe('Titulo Real');
   });
 
   it('resolve wiki-links numa segunda passada, com o conjunto completo de caminhos', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const authGuard = scanner.getNote('02-wiki/nestjs/auth-guard.md');
@@ -267,7 +267,7 @@ describe('VaultScanner: notas', () => {
   });
 
   it('expõe mtimeMs, getNote e allNotes coerentes', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const note = scanner.getNote('99-archive/antigo.md');
@@ -334,7 +334,7 @@ describe('VaultScanner: revalidação por mtime', () => {
   });
 
   it('remover um arquivo o retira do mapa e reabre os links que dependiam dele', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(scanner.getNote('02-wiki/nestjs/bullmq-worker.md')).toBeDefined();
 
@@ -353,7 +353,7 @@ describe('VaultScanner: revalidação por mtime', () => {
   });
 
   it('um arquivo novo entra em `changed` e passa a resolver links', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     writeFileSync(
@@ -387,7 +387,7 @@ describe('VaultScanner: diagnostics', () => {
   });
 
   it('um arquivo corrigido deixa de ser reportado', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(scanner.diagnostics.map((d) => d.path)).toContain('quebrada.md');
 
@@ -437,7 +437,7 @@ function closingDelimiterLine(relative: string): number {
 
 describe('VaultScanner: bodyStartLine', () => {
   it('nota sem bloco de frontmatter começa na linha 1', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     for (const relative of ['01-raw/inbox/rascunho.md', 'CLAUDE.md']) {
@@ -449,7 +449,7 @@ describe('VaultScanner: bodyStartLine', () => {
   });
 
   it('nota com frontmatter começa na linha seguinte ao fechamento `---`', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const relative = '02-wiki/nestjs/auth-guard.md';
@@ -469,7 +469,7 @@ describe('VaultScanner: bodyStartLine', () => {
       join(root, 'branco.md'),
       ['---', 'tipo: wiki', '---', '', '# Título', '', 'corpo', ''].join('\n'),
     );
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const note = scanner.getNote('branco.md')!;
@@ -482,7 +482,7 @@ describe('VaultScanner: bodyStartLine', () => {
     const lines = ['---', 'tipo: wiki', 'tags: [docker]', '---', '', '# Título', '', 'corpo', ''];
     writeFileSync(join(root, 'crlf.md'), lines.join('\r\n'));
     writeFileSync(join(root, 'lf.md'), lines.join('\n'));
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const crlf = scanner.getNote('crlf.md')!;
@@ -494,7 +494,7 @@ describe('VaultScanner: bodyStartLine', () => {
   });
 
   it('vale para toda nota da fixture, inclusive a de frontmatter inválido', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     let comFrontmatter = 0;
@@ -534,7 +534,7 @@ describe('VaultScanner: hard link', () => {
     writeFileSync(secret, '-----BEGIN PRIVATE KEY-----\nnão pertence ao vault\n');
     linkSync(secret, join(root, '02-wiki', 'vazamento.md'));
 
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/vazamento.md')).toBeUndefined();
@@ -553,7 +553,7 @@ describe('VaultScanner: hard link', () => {
   it('recusa também um hard link cujos dois nomes estão dentro do vault', () => {
     linkSync(join(root, '02-wiki', 'nestjs', 'auth-guard.md'), join(root, '02-wiki', 'copia.md'));
 
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/copia.md')).toBeUndefined();
@@ -579,7 +579,7 @@ describe('VaultScanner: tetos', () => {
   it('não LÊ um arquivo acima do teto de bytes, e diz por quê', () => {
     writeFileSync(join(root, '02-wiki', 'enorme.md'), `# Enorme\n\n${'x'.repeat(LIMITE * 2)}\n`);
     const t = tracker();
-    const scanner = new VaultScanner({ vaultRoot: root, fs: t.fs, maxNoteBytes: LIMITE });
+    const scanner = new VaultScanner({ vaultRoot: root, fs: t.fs, maxNoteBytes: LIMITE, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/enorme.md')).toBeUndefined();
@@ -593,7 +593,7 @@ describe('VaultScanner: tetos', () => {
   it('um arquivo exatamente no teto ainda é nota', () => {
     const corpo = '# No teto\n\n';
     writeFileSync(join(root, '02-wiki', 'no-teto.md'), corpo + 'x'.repeat(LIMITE - corpo.length));
-    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE });
+    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/no-teto.md')?.title).toBe('No teto');
@@ -601,7 +601,7 @@ describe('VaultScanner: tetos', () => {
 
   it('uma nota que cresce além do teto sai do índice', () => {
     writeFileSync(join(root, '02-wiki', 'cresce.md'), '# Cresce\n');
-    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE });
+    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(scanner.getNote('02-wiki/cresce.md')).toBeDefined();
 
@@ -633,7 +633,7 @@ describe('VaultScanner: tetos', () => {
 
   it('volta a indexar o arquivo quando ele deixa de ser binário', () => {
     writeFileSync(join(root, '02-wiki', 'binario.md'), Buffer.from([0x00, 0x01]));
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(scanner.getNote('02-wiki/binario.md')).toBeUndefined();
 
@@ -655,7 +655,7 @@ describe('VaultScanner: tetos', () => {
       writeFileSync(join(outside, 'imagem.png'), 'png');
       symlinkSync(join(outside, 'imagem.png'), join(root, '02-wiki', 'imagem.png'));
 
-      const scanner = new VaultScanner({ vaultRoot: root });
+      const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
       scanner.refresh();
 
       expect(paths(scanner)).toEqual(ALL_PATHS);

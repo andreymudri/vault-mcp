@@ -21,6 +21,28 @@ export interface ToolResult {
   isError?: boolean;
   /** The same answer as data, for the tools that declare an `outputSchema`. Never on an error. */
   structuredContent?: Record<string, unknown>;
+  /** Out-of-band metadata of the result. A refusal carries its code here, under {@link ERROR_META_KEY}. */
+  _meta?: Record<string, unknown>;
+}
+
+/**
+ * Where a refusal carries its code: the `_meta` of the tool result, under a key in this server's
+ * own namespace (the prefix is the one its MCP Registry name uses).
+ *
+ * NOT `structuredContent`. A tool that publishes an `outputSchema` promises that its structured
+ * content obeys it, and a client is entitled to hold it to that on every answer: the SDK's own
+ * `Client.callTool` validates whatever `structuredContent` arrives, `isError` or not, and turns a
+ * mismatch into a protocol error (-32602) — so an `{ error }` object there made every refusal of
+ * `vault_learn`, `vault_graph` and `vault_status` unreadable to exactly the clients that validate.
+ * `_meta` is the slot the protocol reserves for what is not the answer itself, and it is the same
+ * place for all eleven tools.
+ */
+export const ERROR_META_KEY = 'io.github.andreymudri/vault-mcp.error';
+
+/** What sits under {@link ERROR_META_KEY}: the catalog code, an errno, `input.invalid` or `unknown`. */
+export interface RefusalCode {
+  code: string;
+  params?: Record<string, unknown>;
 }
 
 /**

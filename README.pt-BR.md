@@ -300,9 +300,11 @@ schema publica. Os nomes em português das versões anteriores — `titulo`, `co
 `projeto`, `confirm_novo_dominio`, `tipo` — continuam aceitos e são trocados na entrada.
 
 Toda tool publica título e annotations do MCP: as seis de leitura são `readOnlyHint`, e das cinco
-de escrita só o `vault_learn` é não destrutivo (ele só acrescenta). Toda recusa carrega o código em
-`structuredContent.error.code` — `path.outsideVault`, `lock.timeout`, `preview_stale`,
-`input.invalid`, o errno de um erro de sistema de arquivos — ao lado do texto.
+de escrita só o `vault_learn` é não destrutivo (ele só acrescenta). Toda recusa carrega o código
+ao lado do texto, no `_meta["io.github.andreymudri/vault-mcp.error"]` do resultado, como `{ code, params? }` —
+`path.outsideVault`, `lock.timeout`, `preview_stale`, o errno de um erro de sistema de arquivos.
+Fica no `_meta` e não no `structuredContent` porque uma tool que publica schema de saída deve esse
+schema em toda resposta, e os clientes cobram isso até num erro.
 
 ## Como o `vault_learn` Decide
 
@@ -451,7 +453,7 @@ Nada do que uma tool devolve, aceita ou indexa é ilimitado:
 | Corpo no `vault_get_note` | 20.000 caracteres por resposta; o `offset` continua |
 | `vault_list` | 200 notas por resposta por padrão, 1.000 no máximo; o `offset` continua |
 | `vault_graph` | 2.000 nós por padrão, 5.000 no máximo |
-| Diff repassado por uma tool de escrita | 20.000 caracteres; a nota em si é escrita inteira |
+| Diff repassado no texto da resposta de uma tool de escrita | 20.000 caracteres; a nota em si é escrita inteira, e o resultado estruturado do `vault_learn` ainda leva o diff sem corte |
 | `content`, `old_text`, `new_text` | 1.000.000 de caracteres |
 | `insight` / `context` | 200.000 / 20.000 caracteres |
 | Nota que o scanner indexa | `VAULT_MAX_NOTE_BYTES`, 5 MB por padrão; arquivo com byte NUL não é indexado |
@@ -510,7 +512,7 @@ Cinco coisas que este servidor não faz, todas escolhidas e não esquecidas:
 
 `docs/followups.md` guarda o histórico de cada defeito achado até aqui: a medição que o
 caracterizava, a correção aplicada e o teste que a fixa, mais o raciocínio inteiro por trás de cada
-aceitação acima.
+aceitação acima. O item 33 lista o que o último review achou e ficou aberto.
 
 ## Desenvolvimento
 

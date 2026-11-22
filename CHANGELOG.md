@@ -35,8 +35,8 @@ The audit release: every finding of the 2026-11-22 review, measured before it wa
   setting the server could not honour (`config.invalid`); SIGTERM and SIGINT let a write in flight
   finish, release the lock and exit 0.
 - **Protocol.** Every tool has a title and annotations (`readOnlyHint`, `destructiveHint`,
-  `idempotentHint`, `openWorldHint`). Every refusal carries its code as
-  `structuredContent.error.code`.
+  `idempotentHint`, `openWorldHint`). Every refusal carries its code in the
+  result's `_meta["io.github.andreymudri/vault-mcp.error"]`.
 - **Translated warnings.** Commit, push, move and link-rewrite warnings and the `Reason:` line of
   `vault_learn` follow `VAULT_LANG`; they used to stay in Portuguese.
 - `scripts/bench.mjs`, `npm run lint` (Biome) and `npm run coverage` (with a floor).
@@ -49,6 +49,10 @@ The audit release: every finding of the 2026-11-22 review, measured before it wa
   `vault_list` and `vault_graph`. The previous names (`titulo`, `contexto`, `dominio`, `projeto`,
   `confirm_novo_dominio`, `tipo`) are still accepted and renamed on the way in; passing both
   spellings of one argument is refused.
+- **`preview_stale` moved.** 0.5.0 answered a stale preview with `structuredContent.error.code`,
+  which broke `vault_learn`'s own output schema: a client that validates structured content (the
+  SDK's does, error or not) got a protocol error instead of the refusal. The code is now in `_meta`
+  with every other, and an error never carries `structuredContent`.
 - **An argument a tool does not declare is refused**, by name. It used to be dropped, so a mistyped
   filter answered with the whole vault.
 - **`vault_learn` only appends inside the domain the learning was filed under.** A shared tag used

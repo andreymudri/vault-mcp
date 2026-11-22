@@ -18,6 +18,7 @@ import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
 import { autoPushEnabled } from '../write/git.js';
 import {
+  ERROR_META_KEY,
   applyLegacyArguments,
   createToolset,
   forMessage,
@@ -105,6 +106,7 @@ function toCallToolResult(result: ToolResult): CallToolResult {
     content: result.content.map((part) => ({ type: 'text' as const, text: part.text })),
     ...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
     ...(result.isError === undefined ? {} : { isError: result.isError }),
+    ...(result._meta === undefined ? {} : { _meta: result._meta }),
   };
 }
 
@@ -134,7 +136,7 @@ export function toolCallback(
       // an operator wants from this line is the duration and the rate of each.
       const code =
         result.isError === true
-          ? (result.structuredContent as { error?: { code?: unknown } } | undefined)?.error?.code
+          ? (result._meta?.[ERROR_META_KEY] as { code?: unknown } | undefined)?.code
           : undefined;
       logger.info('tool.call', {
         tool: tool.name,

@@ -9,7 +9,8 @@ o teste que impede a volta — mais a seção final, **Aceito deliberadamente**,
 
 A suíte está verde, o `tsc` está limpo sobre `src/` E sobre `test/`, o lint não tem aviso e o binário
 responde o handshake MCP com as onze tools. (A contagem de testes saiu desta frase de propósito: ela
-envelheceu três vezes em quatro lugares.) Os itens 20 em diante vieram da auditoria de 2026-11-22.
+envelheceu três vezes em quatro lugares.) Os itens 20 em diante vieram da auditoria de 2026-11-22; o 33 lista o que o review final achou e
+ficou ABERTO.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
 pelo motivo certo, e só então a correção. Onde o defeito era uma LACUNA DE COBERTURA e não um bug de
@@ -486,7 +487,7 @@ recusa nomeia o argumento. `test/tools.test.ts`, "argumento desconhecido".
 O servidor escrevia em stderr duas vezes na vida, as duas falhando ao subir. Agora há log JSON por
 linha (`VAULT_LOG_LEVEL`), aviso de configuração que não pôde honrar (`config.invalid`),
 `vault_status`, modo somente leitura (`VAULT_READ_ONLY`, que falha FECHADO), título e annotations
-em toda tool, código de erro em `structuredContent.error`, e SIGTERM que deixa a escrita em curso
+em toda tool, código de erro no `_meta` do resultado (ver o item 32), e SIGTERM que deixa a escrita em curso
 terminar e solta o lock. `test/logger.test.ts`, `test/config.test.ts`, `test/tools.test.ts`.
 
 ## 28. Escala: varredura a cada chamada e índice gordo — CORRIGIDO
@@ -524,6 +525,77 @@ branch `feat/research-preview`, já contido em `main`, foi apagado do remoto.
 
 **Fica com o dono:** cadastrar o trusted publisher no npmjs.com (repositório + `release.yml`),
 publicar a 0.6.0, publicar no MCP Registry e, se quiser, assinar commits.
+
+## 32. Review final de 2026-11-22: quatro achados `high` — CORRIGIDOS
+
+Um review só, no fim, sobre o diff inteiro, com duas lentes (correção e testes). Os quatro `high`:
+
+- **O código de erro em `structuredContent` quebrava o `outputSchema`.** Toda recusa respondia
+  `structuredContent: { error }`, inclusive nas três tools que publicam schema de saída
+  (`vault_learn`, `vault_graph`, `vault_status`). O `Client` do SDK valida o `structuredContent`
+  sempre que ele existe, com ou sem `isError`: a recusa virava `McpError -32602` e o texto nunca
+  chegava a quem chamou. A 0.5.0 já tinha isso num caso só (`preview_stale`). O código passou para
+  o `_meta` do resultado, em `io.github.andreymudri/vault-mcp.error`, e um erro nunca leva
+  `structuredContent`. Os testes de protocolo que existiam não viam o defeito porque o cliente só
+  valida depois de um `tools/list`; o teste novo faz o `tools/list` antes.
+- **O piso de cobertura não batia com o comando do CI.** `npm test -- --coverage` saía com 1 com
+  a suíte verde (funções em 95,2% contra um piso de 96%): o piso foi medido antes de existirem os
+  handlers de sinal, que só rodam em processo filho e o v8 não conta. Remedido.
+- **26 testes dependiam do custo do scan.** Criavam um scanner com relógio real, mudavam o vault
+  por fora e pediam a mudança em seguida: passavam só se o scan anterior tivesse custado menos de
+  20 ms. Numa máquina ocupada, 2 de 12 rodadas da suíte falharam. Esses scanners agora varrem a
+  cada chamada (`ALWAYS_SCAN`, em `test/platform.ts`). Conferido por mutação: com TODO scan
+  tratado como caro, só os dois testes do próprio limiar falham.
+- **A regra "só anexa no mesmo domínio" não tinha teste que a segurasse.** Os testes passavam uma
+  tag que a nota do outro domínio não tinha, então a regra antiga ("tag em comum OU mesmo
+  domínio") podia voltar com a suíte verde. O teste novo passa a tag que a nota TEM; com a regra
+  antiga de volta ele falha com `expected 'appended' to be 'created'`.
+
+## 33. Review final de 2026-11-22: achados `medium` e `low` — ABERTOS
+
+Reproduzidos pelos revisores e NÃO corrigidos: a regra da casa é corrigir só o `high` do review
+final. Ficam aqui para não serem redescobertos.
+
+Correção:
+
+- **(medium) O caminho do lock depende de o `git` responder.** `lockPathFor` pergunta ao binário
+  (`rev-parse --absolute-git-dir`) e, se ele falha, cai em `<vault>/.vault-mcp.lock`. Dois
+  servidores no mesmo vault, um com `git` no PATH e outro sem, travam arquivos diferentes: com 12
+  processos, metade sem `git`, ficaram 9 e 10 de 12 edições em duas de quatro rodadas. Derivar de
+  `.git` pelo sistema de arquivos, como o plano previa, fecha isso.
+- **(medium) O lock nasce com a idade da espera.** `acquire()` carimba `at` antes de esperar, e a
+  idade do lock é medida por esse `at`. Com os padrões a margem real cai de 120 s para 90 s; com
+  `VAULT_LOCK_TIMEOUT_MS` acima de 120000, quem esperou mais de 2 min cria um lock já vencido.
+  Carimbar na hora em que o lock é obtido fecha isso.
+- **(medium) O teto do diff vale só para o texto.** O `structuredContent` do `vault_learn` leva o
+  `diff` inteiro e, na prévia, `before`/`after` de cada arquivo: 581 mil caracteres para um
+  insight de 187 mil. Limitado só pelo teto de entrada.
+- **(low) `stderr` fechado derruba o servidor.** O `EPIPE` chega como evento assíncrono, cai no
+  `uncaughtException` novo e o processo sai com 1 na chamada seguinte.
+- **(low) O teto de 220 bytes do nome vale também para a ORIGEM do `vault_move` e para o
+  `vault_delete`.** Uma nota que já existe com nome de 221 a 255 bytes não pode ser renomeada nem
+  apagada pelo servidor.
+- **(low) `.git` sem permissão de escrita recusa toda escrita** com `lock.failed`. A 0.5.0
+  gravava a nota e avisava do commit.
+- **(low) `input.invalid` e a mensagem traduzida de argumento desconhecido não chegam pelo
+  protocolo.** O SDK valida antes do handler, com o mesmo schema estrito, e responde com o texto
+  dele, em inglês e sem código. A recusa acontece; o que se perde é a tradução e o código.
+
+Testes (cada um é uma mutação que a suíte não vê):
+
+- **(medium)** o teste do teto da resposta do `vault_learn` mede só o texto;
+- **(medium)** o teste de redação dos parâmetros do erro usa `lock.timeout`, que nunca carrega
+  caminho, então não consegue falhar;
+- **(medium)** o `invalidate()` na SAÍDA do lock, que é o que vale para `vault_learn`,
+  `vault_move` e `vault_delete`, não tem teste;
+- **(medium)** o caminho da variável de ambiente até o componente não tem teste para
+  `VAULT_MAX_NOTE_BYTES`, `VAULT_SCAN_TTL_MS` e `VAULT_LOCK_TIMEOUT_MS`;
+- **(medium)** do desligamento só o SIGTERM feliz tem teste: SIGINT, a saída forçada depois dos
+  5 s, os handlers de erro fatal e o `releaseLocks()` não têm;
+- **(low)** "o push fica fora do lock" e o aviso de lock perdido na resposta não têm teste;
+- **(low)** o teto de 1.000 do `limit` do `vault_list`, o de `old_text`/`new_text` e o de
+  `context` não têm teste;
+- **(low)** o reaproveitamento do scan só é testado no scanner, não pelas tools.
 
 ---
 

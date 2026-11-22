@@ -8,11 +8,17 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.ts'],
       reporter: ['text-summary', 'json-summary'],
-      // A floor one point under what was measured when coverage was first turned on (2026-11-22:
-      // statements 95.58, branches 87.26, functions 97.92, lines 97.51). It is there to catch a
-      // change that arrives without tests, not to be chased upward. The two cross-process test
-      // files start real child processes, and what runs in a child is not counted here.
-      thresholds: { statements: 94, branches: 86, functions: 96, lines: 96 },
+      // A floor one point under what `npm test -- --coverage` measures, which is the command CI
+      // runs (2026-11-22, at the end of the 0.6.0 work: statements 94.63, branches 87.13,
+      // functions 95.2, lines 96.75). It is there to catch a change that arrives without tests,
+      // not to be chased upward.
+      //
+      // What runs in a child process is not counted here, and that is most of what is missing:
+      // the signal handlers and `main` in `src/server/index.ts` are exercised by tests that start
+      // the real server, so that file reads as 60% of its functions. The first floor was measured
+      // before those existed and was not measured again when they landed — it failed CI's own
+      // command with the suite green. A floor is re-measured in the commit that moves it.
+      thresholds: { statements: 93, branches: 86, functions: 94, lines: 95 },
     },
   },
 });
