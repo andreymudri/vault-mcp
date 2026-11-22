@@ -231,6 +231,44 @@ describe('chunkNote', () => {
     }
   });
 
+  it('não produz chunk para uma seção que só tem o heading', () => {
+    // O formato exato que `_templates/wiki.md` deixa em toda nota criada por `vault_learn`. Medido
+    // no vault real em 2026-11-22: 1.503 de 4.180 chunks (36%) eram estas três seções vazias, e
+    // elas ocupavam 22,7% dos slots de resultado — as tags da nota entram em todo chunk, e um
+    // chunk que só tem heading e tags é curto o bastante para o BM25 tratá-lo como denso.
+    const body = '# Título\n\ncorpo real\n\n## Solução\n\n## Exemplo\n```code\n```\n\n## Referências\n-\n';
+    const chunks = chunkNote('sintetico.md', body, 'wiki', ['x'], 1);
+
+    expect(chunks.map((chunk) => chunk.headingPath)).toEqual([[]]);
+    expect(chunks[0]?.text).toContain('corpo real');
+  });
+
+  it.each([
+    ['marcadores de lista soltos', '## A\n-\n*\n+\n1.\n'],
+    ['caixa de tarefa vazia', '## A\n- [ ]\n'],
+    ['cerca vazia com info string', '## A\n```code\n```\n'],
+    ['cerca de til só com linha em branco', '## A\n~~~\n\n~~~\n'],
+    ['as mesmas formas com CRLF', '## A\r\n-\r\n```code\r\n```\r\n'],
+  ])('trata como seção vazia: %s', (_nome, body) => {
+    expect(chunkNote('sintetico.md', body, undefined, [], 1)).toEqual([]);
+  });
+
+  it.each([
+    ['uma palavra de prosa', '## Solução\n\nusar\n'],
+    ['um item de lista com texto', '## Referências\n- [[nota]]\n'],
+    ['uma linha de código dentro da cerca', '## Exemplo\n```ts\nconst x = 1;\n```\n'],
+    ['uma linha parecida com cerca DENTRO de uma cerca aberta', '## Exemplo\n````\n```\n````\n'],
+  ])('mantém a seção que tem %s', (_nome, body) => {
+    expect(chunkNote('sintetico.md', body, undefined, [], 1)).toHaveLength(1);
+  });
+
+  it('um heading pai sem texto próprio some, e o filho continua carregando o caminho dele', () => {
+    const chunks = chunkNote('sintetico.md', '## 1. PvE\n\n### Bosses\n\nconteúdo\n', undefined, [], 1);
+
+    expect(chunks.map((chunk) => chunk.headingPath)).toEqual([['1. PvE', 'Bosses']]);
+    expect(chunks[0]?.lineStart).toBe(3);
+  });
+
   it('um heading dentro de uma cerca de til não abre um novo chunk', () => {
     // Cerca de til é o que uma nota usa quando o próprio exemplo contém
     // crases — plausível num vault sobre ferramentas de desenvolvedor.

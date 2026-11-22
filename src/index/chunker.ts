@@ -70,6 +70,41 @@ function feedFenceTracker(line: string, tracker: FenceTracker): void {
   }
 }
 
+/** A list item with no text: a bare marker (`-`, `*`, `+`, `1.`), or an empty task box. */
+const BARE_LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])(?:\s+\[[ xX]\])?\s*$/;
+
+/**
+ * True when a chunk carries nothing but scaffolding: blank lines, list markers with no text and
+ * fenced blocks with nothing between the fences. `fromLine` skips the heading line that opened it.
+ *
+ * This is the shape `_templates/wiki.md` leaves in every note `vault_learn` creates —
+ * `## Solução`, `## Exemplo` with an empty fence, `## Referências` with a lone `-`. Measured on
+ * the real vault on 2026-11-22: 1,503 of 4,180 chunks (36%) were these, and they took 22.7% of
+ * the result slots. Two things put them there. The note's tags are indexed on EVERY chunk at
+ * weight 2.0, and a chunk that is only a heading and tags is short enough for BM25's length
+ * normalisation to read as dense, so it matched directly (239 of 242 direct cases); and graph
+ * expansion hands a neighbour's score to every one of its chunks, hollow ones included.
+ *
+ * Not indexed rather than demoted, unlike the archive: an archived note is real content that
+ * stopped competing, and this is no content. Nothing is lost with it — a parent heading that has
+ * only sub-headings below it lives on in each child's `headingPath`.
+ */
+function isHollow(lines: readonly string[], fromLine: number): boolean {
+  const fence: FenceTracker = { char: null, length: 0 };
+  for (let i = fromLine; i < lines.length; i++) {
+    const line = stripTrailingCR(lines[i] ?? '');
+    const wasInFence = fence.char !== null;
+    feedFenceTracker(line, fence);
+    // The state flipped, so this line is a fence delimiter: scaffolding, whatever its info string.
+    if (wasInFence !== (fence.char !== null)) continue;
+    if (line.trim() === '') continue;
+    // Inside a fence every non-blank line is content, a lone `-` included.
+    if (!wasInFence && BARE_LIST_ITEM_RE.test(line)) continue;
+    return false;
+  }
+  return true;
+}
+
 /**
  * Divide o corpo de uma nota em chunks delimitados por headings `##`/`###`,
  * respeitando blocos de código cercados (fenced code blocks): um heading que
@@ -99,12 +134,14 @@ export function chunkNote(
   let headingPath: string[] = [];
   let currentLines: string[] = [];
   let currentStartLine = bodyStartLine;
+  /** Whether `currentLines[0]` is the heading that opened the chunk — false only before the first. */
+  let openedByHeading = false;
 
   const flush = (endLine: number): void => {
-    const text = currentLines.join('\n');
-    if (text.trim().length === 0) {
+    if (isHollow(currentLines, openedByHeading ? 1 : 0)) {
       return;
     }
+    const text = currentLines.join('\n');
     chunks.push({
       id: `${path}#${currentStartLine}`,
       path,
@@ -141,6 +178,7 @@ export function chunkNote(
 
         currentLines = [line];
         currentStartLine = originalLine;
+        openedByHeading = true;
         continue;
       }
     }

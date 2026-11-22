@@ -312,9 +312,15 @@ export class Retriever {
     // Explicit tie-break, not cosmetics: expansion gives every chunk of every neighbour the same
     // inherited score, so ties are the common case. Without it the budget cut would return
     // different sets depending on `Map` insertion order — i.e. on the order notes were indexed.
+    //
+    // By path, then by line AS A NUMBER. The id (`path#line`) used to be compared as a string, and
+    // `#11` sorts before `#4` that way: of a neighbour's tied chunks the one from further down the
+    // note came first, so the budget kept the end of a note and cut its beginning.
     scored.sort(
       (a, b) =>
-        b.score - a.score || (a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0),
+        b.score - a.score ||
+        (a.chunk.path < b.chunk.path ? -1 : a.chunk.path > b.chunk.path ? 1 : 0) ||
+        a.chunk.lineStart - b.chunk.lineStart,
     );
 
     const results = markTruncated(
