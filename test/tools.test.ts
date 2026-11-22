@@ -3532,3 +3532,79 @@ describe('desligamento', () => {
     await expect(fs.access(await lockPathFor(vaultRoot))).rejects.toThrow();
   });
 });
+
+describe('modo somente leitura e tools desligadas', () => {
+  const READ_TOOLS = ['vault_backlinks', 'vault_get_note', 'vault_graph', 'vault_list', 'vault_search', 'vault_status'];
+
+  async function connect(vaultRoot: string, options: Parameters<typeof createVaultServer>[2]) {
+    const server = createVaultServer(vaultRoot, 'pt', options);
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+    return {
+      client,
+      names,
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+
+  it('somente leitura não PUBLICA tool de escrita, e a que não foi publicada não pode ser chamada', async () => {
+    const vaultRoot = await makeVault(true);
+    const { client, names, close } = await connect(vaultRoot, { readOnly: true });
+
+    expect(names).toEqual(READ_TOOLS);
+    const result = await client.callTool({
+      name: 'vault_write_note',
+      arguments: { path: '02-wiki/docker/nao.md', content: '# Não\n' },
+    });
+    expect(result.isError).toBe(true);
+    await expect(fs.access(path.join(vaultRoot, '02-wiki/docker/nao.md'))).rejects.toThrow();
+
+    const status = await client.callTool({ name: 'vault_status', arguments: {} });
+    expect((status.structuredContent as { readOnly: boolean }).readOnly).toBe(true);
+    expect(JSON.stringify(status.content)).toContain('somente leitura');
+    await close();
+  });
+
+  it('VAULT_DISABLED_TOOLS tira as tools nomeadas e avisa do nome que não existe', async () => {
+    const entries: LogEntry[] = [];
+    const logger = createLogger({ level: 'debug', write: () => undefined });
+    logger.addSink((entry) => entries.push(entry));
+    const { names, close } = await connect(await makeVault(), {
+      disabledTools: ['vault_delete', 'vault_nope'],
+      logger,
+    });
+
+    expect(names).toEqual([...TOOL_NAMES].filter((name) => name !== 'vault_delete').sort());
+    expect(entries.filter((entry) => entry.event === 'config.unknownTool')).toMatchObject([
+      { level: 'warn', fields: { tool: 'vault_nope' } },
+    ]);
+    await close();
+  });
+
+  it('sem nenhuma das duas, o servidor publica as onze e se diz de leitura e escrita', async () => {
+    const { client, names, close } = await connect(await makeVault(), {});
+    expect(names).toEqual([...TOOL_NAMES].sort());
+    const status = await client.callTool({ name: 'vault_status', arguments: {} });
+    expect((status.structuredContent as { readOnly: boolean }).readOnly).toBe(false);
+    await close();
+  });
+
+  it('pelo ambiente: VAULT_READ_ONLY=1 sobe um servidor só com as tools de leitura', async () => {
+    const vaultRoot = await makeVault(true);
+    const { stdout, code } = await runServer(
+      await buildServer(),
+      { VAULT_PATH: vaultRoot, VAULT_READ_ONLY: '1' },
+      [INITIALIZE, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }],
+    );
+    expect(code).toBe(0);
+    const lista = jsonLines(stdout).find((message) => message['id'] === 2);
+    const names = ((lista?.['result'] as { tools: Array<{ name: string }> } | undefined)?.tools ?? []).map((tool) => tool.name);
+    expect(names.sort()).toEqual(READ_TOOLS);
+  });
+});

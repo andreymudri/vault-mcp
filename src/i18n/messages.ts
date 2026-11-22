@@ -91,6 +91,8 @@ const PT = {
     lockHeld: 'Lock do vault: pid {pid} em {host}, desde {at}',
     autoPushOn: 'Push automático: ligado',
     autoPushOff: 'Push automático: desligado',
+    modeReadOnly: 'Modo: somente leitura (nenhuma tool de escrita publicada)',
+    modeReadWrite: 'Modo: leitura e escrita',
   },
 
   errorCodes: {
@@ -406,6 +408,8 @@ const EN: Messages = {
     lockHeld: 'Vault lock: pid {pid} on {host}, since {at}',
     autoPushOn: 'Auto-push: on',
     autoPushOff: 'Auto-push: off',
+    modeReadOnly: 'Mode: read-only (no write tool is published)',
+    modeReadWrite: 'Mode: read and write',
   },
 
   errorCodes: {

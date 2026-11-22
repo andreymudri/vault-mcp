@@ -88,10 +88,13 @@ function runGit(args: string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<{ s
   });
 }
 
-/** `VAULT_AUTO_PUSH=1` (or `true`) turns the push on for every write. Anything else is off. */
+/**
+ * `VAULT_AUTO_PUSH=1` (or `true`, `yes`, `on`) turns the push on for every write. Anything else is
+ * off — and a value that is neither a yes nor a no is reported at start-up by `resolveConfig`.
+ */
 export function autoPushEnabled(): boolean {
   const raw = process.env.VAULT_AUTO_PUSH?.trim().toLowerCase();
-  return raw === '1' || raw === 'true';
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 /**

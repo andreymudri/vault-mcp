@@ -137,6 +137,8 @@ export interface ToolDeps {
   version?: string;
   /** Where a write that did not go as asked is recorded. Absent in tests that do not look. */
   logger?: Logger;
+  /** True when the server publishes no write tool (`VAULT_READ_ONLY`), for `vault_status` to say so. */
+  readOnly?: boolean;
 }
 
 /**
@@ -1584,6 +1586,7 @@ const VAULT_STATUS_OUTPUT = z.object({
   notes: z.number(),
   chunks: z.number(),
   diagnostics: z.number(),
+  readOnly: z.boolean(),
   autoPush: z.boolean(),
   repository: z.boolean(),
   branch: z.string().nullable(),
@@ -2106,6 +2109,7 @@ export function createToolset(deps: ToolDeps): Toolset {
           ? s.lockFree
           : renderTemplate(s.lockHeld, { pid: holder.pid, host: forMessage(holder.host), at: forMessage(holder.at) }),
         autoPush ? s.autoPushOn : s.autoPushOff,
+        deps.readOnly === true ? s.modeReadOnly : s.modeReadWrite,
       );
 
       return {
@@ -2115,6 +2119,7 @@ export function createToolset(deps: ToolDeps): Toolset {
           notes: stats.notes,
           chunks: stats.chunks,
           diagnostics,
+          readOnly: deps.readOnly === true,
           autoPush,
           repository: repo.repository,
           branch: repo.branch ?? null,

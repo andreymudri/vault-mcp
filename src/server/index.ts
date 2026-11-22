@@ -214,9 +214,21 @@ export function createVaultApp(
     messages,
     version: VERSION,
     logger,
+    ...(config.readOnly === true ? { readOnly: true } : {}),
     ...(config.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: config.lockTimeoutMs }),
   });
-  for (const tool of toolset.tools) {
+  // What is not published cannot be called: the SDK answers an unknown tool name itself. That is
+  // the whole mechanism of read-only mode, and why it is decided here and not inside each handler.
+  const disabled = new Set(config.disabledTools ?? []);
+  const known = new Set(toolset.tools.map((tool) => tool.name));
+  for (const name of disabled) {
+    if (!known.has(name)) logger.warn('config.unknownTool', { variable: 'VAULT_DISABLED_TOOLS', tool: name });
+  }
+  const published = toolset.tools.filter(
+    (tool) => !disabled.has(tool.name) && (config.readOnly !== true || tool.annotations.readOnlyHint),
+  );
+
+  for (const tool of published) {
     server.registerTool(
       tool.name,
       {
@@ -314,6 +326,7 @@ export async function main(): Promise<void> {
     version: VERSION,
     lang: config.lang,
     autoPush: autoPushEnabled(),
+    readOnly: config.readOnly === true,
     node: process.version,
     pid: process.pid,
   });

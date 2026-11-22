@@ -42,6 +42,47 @@ describe('resolveConfig', () => {
     ]);
   });
 
+  it.each([
+    ['1', true],
+    ['true', true],
+    ['YES', true],
+    ['on', true],
+    ['0', false],
+    ['false', false],
+    ['no', false],
+    ['off', false],
+  ])('reads VAULT_READ_ONLY=%s as %s', (value, expected) => {
+    const config = resolveConfig({ VAULT_READ_ONLY: value });
+    expect(config.readOnly).toBe(expected);
+    expect(config.warnings).toEqual([]);
+  });
+
+  it('fails CLOSED on a VAULT_READ_ONLY it cannot read: read-only, and it says so', () => {
+    // Whoever set the variable meant to restrict the server. Falling back to the default here would
+    // hand them a server that writes while they believe it cannot.
+    const config = resolveConfig({ VAULT_READ_ONLY: 'maybe' });
+    expect(config.readOnly).toBe(true);
+    expect(config.warnings).toEqual([
+      { variable: 'VAULT_READ_ONLY', value: 'maybe', expected: '1 or 0' },
+    ]);
+  });
+
+  it('warns about a VAULT_AUTO_PUSH that turns nothing on', () => {
+    expect(resolveConfig({ VAULT_AUTO_PUSH: 'sim' }).warnings).toEqual([
+      { variable: 'VAULT_AUTO_PUSH', value: 'sim', expected: '1 or 0' },
+    ]);
+    expect(resolveConfig({ VAULT_AUTO_PUSH: 'yes' }).warnings).toEqual([]);
+  });
+
+  it('reads VAULT_DISABLED_TOOLS as a list, by comma or by space', () => {
+    expect(resolveConfig({ VAULT_DISABLED_TOOLS: 'vault_delete, vault_move  vault_graph' }).disabledTools).toEqual([
+      'vault_delete',
+      'vault_move',
+      'vault_graph',
+    ]);
+    expect(resolveConfig({ VAULT_DISABLED_TOOLS: ' , ' }).disabledTools).toBeUndefined();
+  });
+
   it('treats a blank variable as unset', () => {
     expect(resolveConfig({ VAULT_MAX_NOTE_BYTES: '  ' })).toEqual({ lang: 'en', warnings: [] });
   });

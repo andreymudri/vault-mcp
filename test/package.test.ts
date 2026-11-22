@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { VERSION } from '../src/server/index.js';
@@ -120,6 +121,23 @@ describe('server.json — o contrato do MCP Registry', () => {
     // release é npm primeiro, registry depois. Um teste aqui move a descoberta para o `npm test`.
     expect(server.description.length).toBeLessThanOrEqual(100);
     expect(server.description.trim()).not.toBe('');
+  });
+
+  it('documenta toda variável de ambiente que o servidor lê, e nenhuma que ele não lê', () => {
+    // Lido do FONTE: uma variável nova que entra no código sem entrar aqui é uma opção que existe
+    // e que nenhum cliente consegue oferecer, e uma que saiu do código e ficou aqui é uma promessa
+    // que o servidor não cumpre.
+    const srcDir = fileURLToPath(new URL('../src', import.meta.url));
+    const read = new Set<string>();
+    for (const entry of readdirSync(srcDir, { recursive: true, encoding: 'utf8' })) {
+      if (!entry.endsWith('.ts')) continue;
+      const text = readFileSync(join(srcDir, entry), 'utf8');
+      for (const match of text.matchAll(/(?:env\[['"]|process\.env\.|env, ')(VAULT_[A-Z_]+)/g)) {
+        read.add(match[1] ?? '');
+      }
+    }
+    const declared = (server.packages[0]?.environmentVariables ?? []).map((v) => v.name);
+    expect([...declared].sort()).toEqual([...read].sort());
   });
 
   it('declara VAULT_PATH como obrigatória e as outras como opcionais', () => {
