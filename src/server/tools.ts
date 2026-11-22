@@ -43,12 +43,12 @@ export interface ToolDefinition {
   name: string;
   description: string;
   /** A zod object schema. `index.ts` converts it to JSON Schema for `tools/list`. */
-  inputSchema: z.AnyZodObject;
+  inputSchema: z.ZodObject;
   /**
    * A zod object schema for `structuredContent`, on the tools that answer data as well as text.
    * `index.ts` publishes it in `tools/list`, and the SDK validates every successful answer with it.
    */
-  outputSchema?: z.AnyZodObject;
+  outputSchema?: z.ZodObject;
   handler: (args: unknown) => Promise<ToolResult>;
 }
 
@@ -445,23 +445,44 @@ function messageOf(err: unknown): string {
  * translated here rather than by hanging a custom message off each of the twenty-odd fields, where
  * the next field added would silently be the one in English.
  */
-function describeIssues(error: z.ZodError, m: Messages): string {
+function describeIssues(error: z.ZodError, m: Messages, args: unknown): string {
   return error.issues
     .map((issue) => {
       const where = issue.path.join('.');
+      // zod 4 no longer says what it RECEIVED, only what it expected, so the type is read off the
+      // argument itself, at the path the issue names.
+      const received = issue.code === 'invalid_type' ? receivedType(valueAt(args, issue.path)) : '';
       const message =
         issue.code === 'invalid_type'
-          ? issue.received === 'undefined'
+          ? received === 'undefined'
             ? m.validation.requiredField
             : m.validation.wrongType
                 .replace('{expected}', String(issue.expected))
-                .replace('{received}', String(issue.received))
+                .replace('{received}', received)
           : issue.code === 'unrecognized_keys'
             ? renderTemplate(m.validation.unknownArgument, { keys: issue.keys.join(', ') })
             : issue.message;
       return where === '' ? message : `${where}: ${message}`;
     })
     .join('; ');
+}
+
+/** The value an issue's path points at inside the arguments, or `undefined` when it leads nowhere. */
+function valueAt(args: unknown, path: readonly PropertyKey[]): unknown {
+  let value = args;
+  for (const key of path) {
+    if (value === null || typeof value !== 'object') return undefined;
+    value = (value as Record<PropertyKey, unknown>)[key];
+  }
+  return value;
+}
+
+/** The name of a value's type as a validation message says it: `array` and `null` are not `object`. */
+function receivedType(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'number' && Number.isNaN(value)) return 'nan';
+  return typeof value;
 }
 
 /**
@@ -603,7 +624,7 @@ function defineStructured<Shape extends z.ZodRawShape>(
   name: string,
   description: string,
   shape: Shape,
-  outputSchema: z.AnyZodObject | undefined,
+  outputSchema: z.ZodObject | undefined,
   run: (
     input: z.infer<z.ZodObject<Shape>>,
   ) => Promise<{ text: string; structured?: Record<string, unknown> }>,
@@ -622,7 +643,7 @@ function defineStructured<Shape extends z.ZodRawShape>(
     handler: async (args) => {
       const parsed = inputSchema.safeParse(args);
       if (!parsed.success) {
-        return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m))}`);
+        return fail(`${m.errors.invalidInput} ${name}: ${forMessage(describeIssues(parsed.error, m, args))}`);
       }
       try {
         const { text, structured } = await run(parsed.data);
@@ -2011,7 +2032,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .max(MAX_WRITE_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_WRITE_CHARS }))
         .describe(m.tools.vault_write_note.content),
       frontmatter: z
-        .record(z.unknown())
+        .record(z.string(), z.unknown())
         .optional()
         .describe(m.tools.vault_write_note.frontmatter),
     },

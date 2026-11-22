@@ -2,7 +2,7 @@
 /**
  * The compiled server, started as a PROGRAM and asked for its tools over stdio.
  *
- * This exists because `package.json` promises `engines.node >= 20` and nothing verified it. The
+ * This exists because `package.json` promises `engines.node >= 22` and nothing verified it. The
  * suite cannot: `test/frontmatter.test.ts` spawns `node <arquivo>.ts` and depends on the type
  * stripping of the runtime it runs on, so CI pins Node 26 and an older runner fails there for a
  * TOOLCHAIN reason, telling us nothing about whether the shipped code runs. What ships is `dist/`,
