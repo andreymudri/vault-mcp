@@ -339,6 +339,20 @@ export function createVaultApp(
 export const SHUTDOWN_GRACE_MS = 5_000;
 
 /**
+ * The part of `process` the handlers below use.
+ *
+ * A parameter, so that what a signal and an escaped error do can be tested for what they are —
+ * SIGINT, the grace period running out, an uncaught exception — without sending any of them to
+ * the process running the tests. Only the SIGTERM of a write in flight is tested with a real one.
+ */
+export interface ProcessHooks {
+  once(event: 'SIGTERM' | 'SIGINT', listener: (signal: NodeJS.Signals) => void): unknown;
+  on(event: 'exit' | 'uncaughtException' | 'unhandledRejection', listener: (reason: unknown) => void): unknown;
+  exit(code: number): void;
+  stdout: { write(chunk: string, done: () => void): unknown };
+}
+
+/**
  * What the process does when it is told to stop, and when something escapes it.
  *
  * Without this a SIGTERM killed the server wherever it was. If that was between a note's `rename`
@@ -347,38 +361,43 @@ export const SHUTDOWN_GRACE_MS = 5_000;
  * lets the write in flight finish, hands its answer to the transport, releases the lock and only
  * then exits. A second signal is not caught: asked twice, the process just goes.
  */
-function installProcessHandlers(app: VaultApp, logger: Logger): void {
+export function installProcessHandlers(
+  app: Pick<VaultApp, 'idle' | 'releaseLocks'>,
+  logger: Logger,
+  proc: ProcessHooks = process,
+  graceMs: number = SHUTDOWN_GRACE_MS,
+): void {
   const leave = (code: number): void => {
     app.releaseLocks();
     // stdout is the protocol channel: what was written to it gets out before the process does.
-    process.stdout.write('', () => process.exit(code));
+    proc.stdout.write('', () => proc.exit(code));
   };
 
   const onSignal = (signal: NodeJS.Signals): void => {
     logger.info('server.stop', { signal });
     const grace = new Promise<boolean>((resolve) => {
-      setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS).unref();
+      setTimeout(() => resolve(false), graceMs).unref();
     });
     void Promise.race([app.idle().then(() => true), grace]).then((drained) => {
-      if (!drained) logger.warn('server.stopForced', { signal, graceMs: SHUTDOWN_GRACE_MS });
+      if (!drained) logger.warn('server.stopForced', { signal, graceMs });
       // One turn of the event loop first: the write that just finished still has to be rendered
       // and handed to the transport, and all of that is already queued ahead of this.
       setImmediate(() => leave(0));
     });
   };
-  process.once('SIGTERM', onSignal);
-  process.once('SIGINT', onSignal);
+  proc.once('SIGTERM', onSignal);
+  proc.once('SIGINT', onSignal);
 
   // Whatever the way out, a lock this process holds does not outlive it.
-  process.on('exit', () => app.releaseLocks());
+  proc.on('exit', () => app.releaseLocks());
 
   const onFatal = (event: string) => (reason: unknown): void => {
     logger.error(event, { error: reason instanceof Error ? reason.message : String(reason) });
     app.releaseLocks();
-    process.exit(1);
+    proc.exit(1);
   };
-  process.on('uncaughtException', onFatal('server.uncaughtException'));
-  process.on('unhandledRejection', onFatal('server.unhandledRejection'));
+  proc.on('uncaughtException', onFatal('server.uncaughtException'));
+  proc.on('unhandledRejection', onFatal('server.unhandledRejection'));
 }
 
 /** Reads the environment, brings the server up on stdio, and never returns while it is connected. */

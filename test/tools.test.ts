@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { promises as fs, readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
@@ -16,16 +17,21 @@ import { lockPathFor } from '../src/write/git.js';
 import { VaultLock } from '../src/write/vault-lock.js';
 import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
-import { VaultScanner } from '../src/vault/scanner.js';
+import { VaultScanner, type FsOps } from '../src/vault/scanner.js';
 import { createLogger, type LogEntry } from '../src/server/logger.js';
 import { ALWAYS_SCAN, NO_HOSTILE_FILENAMES, NO_POSIX_MODES, NO_SHELL_HOOKS } from './platform.js';
 import { messagesFor } from '../src/i18n/messages.js';
+import { PHRASES } from '../src/i18n/phrases.js';
 import {
   ERROR_META_KEY,
+  LIST_MAX_LIMIT,
+  MAX_CONTEXT_CHARS,
   MAX_DIFF_CHARS,
   MAX_NOTE_CHARS,
+  MAX_WRITE_CHARS,
   WriteQueue,
   createTools,
+  createToolset,
   makeRedactor,
   type ToolDefinition,
   type ToolResult,
@@ -33,6 +39,7 @@ import {
 import {
   VaultPathError,
   createVaultServer,
+  installProcessHandlers,
   isDirectRun,
   main,
   resolveVaultPath,
@@ -3352,6 +3359,33 @@ describe('tetos de resposta e de entrada', () => {
     expect(await vaultContains(vaultRoot, 'zzlinha 3999 de um aprendizado')).not.toHaveLength(0);
   });
 
+  it('os outros tetos: limit do vault_list, old_text e new_text do vault_edit_note, context do vault_learn', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+    const refused = async (name: string, args: unknown): Promise<void> => {
+      const result = await call(name, args);
+      expect(result.isError, name).toBe(true);
+      expect(result._meta?.[ERROR_META_KEY], name).toEqual({ code: 'input.invalid' });
+    };
+
+    await refused('vault_list', { limit: LIST_MAX_LIMIT + 1 });
+    expect((await call('vault_list', { limit: LIST_MAX_LIMIT })).isError).not.toBe(true);
+
+    const nota = '02-wiki/docker/multi-stage.md';
+    const antes = await read(vaultRoot, nota);
+    await refused('vault_edit_note', { path: nota, old_text: 'a'.repeat(MAX_WRITE_CHARS + 1), new_text: 'b' });
+    await refused('vault_edit_note', { path: nota, old_text: antes.slice(0, 40), new_text: 'b'.repeat(MAX_WRITE_CHARS + 1) });
+    expect(await read(vaultRoot, nota)).toBe(antes);
+
+    await refused('vault_learn', {
+      title: 'Contexto enorme',
+      insight: 'zzcontextoenorme',
+      context: 'c'.repeat(MAX_CONTEXT_CHARS + 1),
+      domain: 'docker',
+    });
+    expect(await vaultContains(vaultRoot, 'zzcontextoenorme')).toHaveLength(0);
+  });
+
   it('recusa conteúdo acima de 1 MB e insight acima de 200 mil caracteres, sem escrever nada', async () => {
     const vaultRoot = await makeVault(true);
     const { call } = makeTools(vaultRoot);
@@ -3680,6 +3714,96 @@ describe('desligamento', () => {
     expect(await server.exited).toEqual({ code: 0, signal: null });
   }, 30_000);
 
+  describe('o que os handlers do processo fazem', () => {
+    /**
+     * Os handlers de verdade, sobre um processo de mentira: um sinal e uma exceção não tratada não
+     * são coisas que se mande ao processo que roda a suíte.
+     */
+    function handlers(idle: () => Promise<void>, graceMs: number) {
+      const emitter = new EventEmitter();
+      const exits: number[] = [];
+      const entries: LogEntry[] = [];
+      let released = 0;
+      const logger = createLogger({ level: 'debug', write: () => undefined });
+      logger.addSink((entry) => entries.push(entry));
+      installProcessHandlers(
+        {
+          idle,
+          releaseLocks: () => {
+            released += 1;
+          },
+        },
+        logger,
+        {
+          once: (event, listener) => emitter.once(event, listener),
+          on: (event, listener) => emitter.on(event, listener),
+          exit: (code) => {
+            exits.push(code);
+          },
+          stdout: {
+            write: (_chunk, done) => {
+              done();
+              return true;
+            },
+          },
+        },
+        graceMs,
+      );
+      return { emitter, exits, released: () => released, events: () => entries.map((entry) => entry.event) };
+    }
+
+    it('SIGINT espera a escrita em curso, solta os locks e sai com 0', async () => {
+      let finish = (): void => undefined;
+      const writing = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const h = handlers(() => writing, 60_000);
+
+      h.emitter.emit('SIGINT', 'SIGINT');
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      // A escrita ainda corre: ninguém saiu.
+      expect(h.exits).toEqual([]);
+
+      finish();
+      await vi.waitFor(() => expect(h.exits).toEqual([0]));
+      expect(h.released()).toBeGreaterThan(0);
+      expect(h.events()).toContain('server.stop');
+      expect(h.events()).not.toContain('server.stopForced');
+    });
+
+    it('passado o prazo, sai mesmo com a escrita em curso, solta os locks e avisa', async () => {
+      const h = handlers(() => new Promise<void>(() => undefined), 40);
+
+      h.emitter.emit('SIGTERM', 'SIGTERM');
+
+      await vi.waitFor(() => expect(h.exits).toEqual([0]), { timeout: 5_000 });
+      expect(h.released()).toBeGreaterThan(0);
+      expect(h.events()).toContain('server.stopForced');
+    });
+
+    it.each(['uncaughtException', 'unhandledRejection'] as const)(
+      'um erro que escapa (%s) vai para o log, solta os locks e sai com 1',
+      (event) => {
+        const h = handlers(() => Promise.resolve(), 60_000);
+
+        h.emitter.emit(event, new Error('explodiu'));
+
+        expect(h.exits).toEqual([1]);
+        expect(h.released()).toBeGreaterThan(0);
+        expect(h.events()).toContain(`server.${event}`);
+      },
+    );
+
+    it('na saída do processo, por qualquer caminho, os locks são soltos', () => {
+      const h = handlers(() => Promise.resolve(), 60_000);
+
+      h.emitter.emit('exit', 0);
+
+      expect(h.released()).toBe(1);
+      expect(h.exits).toEqual([]);
+    });
+  });
+
   it('fechar o stdin sem nada em andamento encerra o processo, sem lock para trás', async () => {
     const vaultRoot = await makeVault(true);
     const { code } = await runServer(await buildServer(), { VAULT_PATH: vaultRoot }, [INITIALIZE]);
@@ -3822,6 +3946,32 @@ describe('código de erro estruturado', () => {
     } finally {
       await release();
     }
+  });
+
+  it('um parâmetro de erro que carrega um caminho sai com a raiz do vault redigida', async () => {
+    // O teste acima usa `lock.timeout`, cujos parâmetros são `{ ms, pid }`: nunca carregam caminho,
+    // então a redação podia ser removida com ele verde. `lock.failed` leva a mensagem do sistema,
+    // que nomeia o arquivo que não pôde ser criado.
+    const vaultRoot = await makeVault(true);
+    const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
+    const tools = createTools({
+      retriever: new Retriever({ scanner }),
+      scanner,
+      vaultRoot,
+      messages: messagesFor('pt'),
+      lock: new VaultLock({ lockPath: path.join(vaultRoot, 'pasta-que-nao-existe', 'vault-mcp.lock') }),
+    });
+
+    const result = await tools
+      .find((candidate) => candidate.name === 'vault_write_note')!
+      .handler({ path: '02-wiki/docker/sem-lock.md', content: '# Sem lock\n' });
+
+    expect(result.isError).toBe(true);
+    const error = errorOf(result);
+    expect(error?.code).toBe('lock.failed');
+    expect(String(error?.params?.['detail'])).toContain('pasta-que-nao-existe');
+    expect(JSON.stringify(result._meta)).not.toContain(vaultRoot);
+    expect(textOf(result)).not.toContain(vaultRoot);
   });
 
   it('chega ao cliente pelo protocolo, e ao log da chamada', async () => {
@@ -3968,6 +4118,273 @@ describe('validade do scan e escrita', () => {
     expect(moved).toContain('02-wiki/docker/por-fora.md');
     expect(await read(vaultRoot, '02-wiki/docker/por-fora.md')).toContain('[[renomeada]]');
   });
+});
+
+describe('validade do scan: o que as tools fazem com ela', () => {
+  it('o que o vault_learn, o vault_move e o vault_delete deixam aparece na leitura seguinte', async () => {
+    // Estas três varrem o vault DENTRO do lock, antes de escrever: o scan que fica guardado é o de
+    // antes da escrita, e só a invalidação na SAÍDA do lock faz a leitura seguinte enxergar o que
+    // foi escrito. (`vault_write_note` não varre, e por isso o teste dele não via esta metade.)
+    const vaultRoot = await makeVault(true);
+    const scanner = new VaultScanner({ vaultRoot, scanTtlMs: 3_600_000 });
+    const tools = createTools({ retriever: new Retriever({ scanner }), scanner, vaultRoot, messages: messagesFor('pt') });
+    const call = (name: string, args: unknown): Promise<ToolResult> =>
+      tools.find((candidate) => candidate.name === name)!.handler(args);
+    const search = async (): Promise<string> => textOf(await call('vault_search', { query: 'zzbucketdemo' }));
+
+    expect(await search()).toContain('Nenhum resultado');
+    const learned = await call('vault_learn', {
+      title: 'Bucket de demonstração',
+      insight: 'zzbucketdemo guarda os artefatos do build.',
+      context: 'teste de validade',
+      domain: 'docker',
+    });
+    expect(learned.isError).not.toBe(true);
+    // Onde o aprendizado foi parar é decisão do servidor (nota nova, ou anexo numa que já cobre o
+    // assunto): o teste segue o caminho que ele respondeu.
+    const learnedPath = (learned.structuredContent as { path: string }).path;
+    expect(await search()).toContain(`${learnedPath}:`);
+
+    const moved = await call('vault_move', { from: learnedPath, to: '02-wiki/docker/bucket-renomeado.md' });
+    expect(moved.isError).not.toBe(true);
+    expect(await search()).toContain('02-wiki/docker/bucket-renomeado.md:');
+    expect(await search()).not.toContain(`${learnedPath}:`);
+
+    const deleted = await call('vault_delete', { path: '02-wiki/docker/bucket-renomeado.md', confirm: true });
+    expect(deleted.isError).not.toBe(true);
+    expect(await search()).toContain('Nenhum resultado');
+  });
+
+  it('dentro da validade, ler pelas tools não refaz o stat do vault', async () => {
+    // O reaproveitamento é testado no scanner; aqui, que nenhuma tool de leitura o desfaz. Um
+    // `invalidate` a mais no caminho de leitura devolveria o custo inteiro sem nada ficar vermelho.
+    const vaultRoot = await makeVault();
+    const clock = { now: 0 };
+    let stats = 0;
+    const fsOps: FsOps = {
+      readdir: (dir) => readdirSync(dir, { withFileTypes: true }),
+      readFile: (file) => readFileSync(file, 'utf8'),
+      // Cada `stat` "custa" 5 ms: o primeiro scan sai caro, e vale por dez vezes o que custou.
+      stat: (file) => {
+        stats += 1;
+        clock.now += 5;
+        return statSync(file);
+      },
+    };
+    const scanner = new VaultScanner({ vaultRoot, fs: fsOps, now: () => clock.now });
+    const tools = createTools({ retriever: new Retriever({ scanner }), scanner, vaultRoot, messages: messagesFor('pt') });
+    const call = (name: string, args: unknown): Promise<ToolResult> =>
+      tools.find((candidate) => candidate.name === name)!.handler(args);
+
+    expect((await call('vault_list', {})).isError).not.toBe(true);
+    const afterFirstScan = stats;
+    expect(afterFirstScan).toBeGreaterThan(4);
+
+    const reads: Array<[string, unknown]> = [
+      ['vault_get_note', { path: POTENTIA }],
+      ['vault_list', {}],
+      ['vault_backlinks', { path: POTENTIA }],
+      ['vault_graph', {}],
+      ['vault_search', { query: 'jwt' }],
+      ['vault_status', {}],
+    ];
+    for (const [name, args] of reads) expect((await call(name, args)).isError, name).not.toBe(true);
+    expect(stats).toBe(afterFirstScan);
+
+    // Vencida a validade, a leitura seguinte varre de novo.
+    clock.now += 60_000;
+    await call('vault_list', {});
+    expect(stats).toBeGreaterThan(afterFirstScan);
+  });
+});
+
+describe('os limites do ambiente chegam ao componente', () => {
+  // `test/config.test.ts` cobre a leitura da variável, e os testes do scanner e do lock cobrem a
+  // opção. O que ficava sem teste era o meio: `createVaultApp` repassar uma à outra.
+  async function connect(vaultRoot: string, options: Parameters<typeof createVaultServer>[2]) {
+    const server = createVaultServer(vaultRoot, 'pt', options);
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return {
+      client,
+      text: async (name: string, args: Record<string, unknown>): Promise<string> =>
+        ((await client.callTool({ name, arguments: args })).content as Array<{ text: string }>)
+          .map((part) => part.text)
+          .join('\n'),
+      close: async () => {
+        await client.close();
+        await server.close();
+      },
+    };
+  }
+
+  it('maxNoteBytes: a nota acima do teto configurado fica fora do índice, com diagnóstico', async () => {
+    const vaultRoot = await makeVault();
+    await fs.writeFile(
+      path.join(vaultRoot, '02-wiki/docker/gorda.md'),
+      `# Gorda\n\n${'zzgorda palavra '.repeat(200)}\n`,
+      'utf8',
+    );
+
+    const padrao = await connect(vaultRoot, {});
+    expect(await padrao.text('vault_search', { query: 'zzgorda' })).toContain('02-wiki/docker/gorda.md:');
+    await padrao.close();
+
+    const apertado = await connect(vaultRoot, { maxNoteBytes: 1_024 });
+    const resposta = await apertado.text('vault_search', { query: 'zzgorda' });
+    expect(resposta).toContain('Nenhum resultado');
+    // E não em silêncio: o rodapé nomeia o arquivo que ficou de fora e o teto que o tirou.
+    expect(resposta).toContain('gorda.md');
+    expect(resposta).toContain('acima do teto de 1024');
+    await apertado.close();
+  });
+
+  it('scanTtlMs: uma validade longa não enxerga o que mudou por fora, e zero enxerga na hora', async () => {
+    const vaultRoot = await makeVault();
+    const nota = path.join(vaultRoot, '02-wiki/docker/por-fora.md');
+
+    const longa = await connect(vaultRoot, { scanTtlMs: 3_600_000 });
+    expect(await longa.text('vault_search', { query: 'zzporfora' })).toContain('Nenhum resultado');
+    await fs.writeFile(nota, '# Por fora\n\nzzporfora aqui\n', 'utf8');
+    expect(await longa.text('vault_search', { query: 'zzporfora' })).toContain('Nenhum resultado');
+    await longa.close();
+    await fs.rm(nota);
+
+    const zero = await connect(vaultRoot, { scanTtlMs: 0 });
+    expect(await zero.text('vault_search', { query: 'zzporfora' })).toContain('Nenhum resultado');
+    await fs.writeFile(nota, '# Por fora\n\nzzporfora aqui\n', 'utf8');
+    expect(await zero.text('vault_search', { query: 'zzporfora' })).toContain('02-wiki/docker/por-fora.md:');
+    await zero.close();
+  });
+
+  it('lockTimeoutMs: a espera pelo lock do vault é a configurada', async () => {
+    const vaultRoot = await makeVault(true);
+    const release = await new VaultLock({ lockPath: await lockPathFor(vaultRoot) }).acquire();
+    const { client, close } = await connect(vaultRoot, { lockTimeoutMs: 60 });
+    try {
+      const result = await client.callTool({
+        name: 'vault_write_note',
+        arguments: { path: '02-wiki/docker/espera.md', content: '# Espera\n' },
+      });
+      expect(result.isError).toBe(true);
+      expect(result._meta?.[ERROR_META_KEY]).toMatchObject({ code: 'lock.timeout', params: { ms: 60 } });
+    } finally {
+      await release();
+      await close();
+    }
+  }, 15_000);
+});
+
+describe('lock e push nas tools de escrita', () => {
+  const toolsFor = (vaultRoot: string, lock?: VaultLock) => {
+    const scanner = new VaultScanner({ vaultRoot, ...ALWAYS_SCAN });
+    return createToolset({
+      retriever: new Retriever({ scanner }),
+      scanner,
+      vaultRoot,
+      messages: messagesFor('pt'),
+      ...(lock === undefined ? {} : { lock }),
+    });
+  };
+  const write = (toolset: ReturnType<typeof toolsFor>, name: string): Promise<ToolResult> =>
+    toolset.tools
+      .find((candidate) => candidate.name === 'vault_write_note')!
+      .handler({ path: `02-wiki/docker/${name}.md`, content: `# ${name}\n` });
+
+  it('uma escrita que perdeu o lock no meio diz isso na resposta', async () => {
+    const vaultRoot = await makeVault(true);
+    /** Um lock que foi tomado por outro enquanto a escrita corria: é o que `with` relata. */
+    class LostLock extends VaultLock {
+      override async with<T>(task: () => Promise<T>): Promise<{ value: T; lost: boolean }> {
+        return { value: await task(), lost: true };
+      }
+    }
+    const lock = new LostLock({ lockPath: path.join(vaultRoot, '.git', 'vault-mcp.lock') });
+
+    const result = await write(toolsFor(vaultRoot, lock), 'perdeu-o-lock');
+
+    expect(result.isError).not.toBe(true);
+    expect(textOf(result)).toContain('Commit: sim');
+    expect(textOf(result)).toContain(PHRASES.lockLost);
+  });
+
+  it('releaseLocks solta o lock que o processo ainda segura', async () => {
+    const vaultRoot = await makeVault(true);
+    const lock = new VaultLock({ lockPath: path.join(vaultRoot, '.git', 'vault-mcp.lock') });
+    const toolset = toolsFor(vaultRoot, lock);
+    await lock.acquire();
+    await fs.access(lock.lockPath);
+
+    toolset.releaseLocks();
+
+    await expect(fs.access(lock.lockPath)).rejects.toThrow();
+  });
+
+  it.skipIf(NO_SHELL_HOOKS)(
+    'releaseLocks solta o lock de uma escrita ainda em curso, e a escrita diz que o perdeu',
+    async () => {
+      // Sem lock injetado: o lock é o que o próprio toolset criou para o vault, que é o caso de um
+      // processo saindo no meio de uma escrita.
+      const vaultRoot = await makeVault(true);
+      const hook = path.join(vaultRoot, '.git', 'hooks', 'pre-commit');
+      await fs.writeFile(hook, '#!/bin/sh\nsleep 2\n', 'utf8');
+      await fs.chmod(hook, 0o755);
+      const lockPath = await lockPathFor(vaultRoot);
+      const toolset = toolsFor(vaultRoot);
+
+      const writing = write(toolset, 'em-curso');
+      await vi.waitFor(async () => fs.access(lockPath), { timeout: 10_000, interval: 20 });
+      toolset.releaseLocks();
+      await expect(fs.access(lockPath)).rejects.toThrow();
+
+      expect(textOf(await writing)).toContain(PHRASES.lockLost);
+    },
+    30_000,
+  );
+
+  it.skipIf(NO_SHELL_HOOKS)(
+    'o push acontece depois de o lock do vault ser solto',
+    async () => {
+      // O push leva o branch inteiro e pode ficar preso na rede: dentro do lock, seguraria todos
+      // os outros escritores do vault pelo tempo do timeout dele.
+      const vaultRoot = await makeVault(true);
+      const origin = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-origin-lock-'));
+      const mark = path.join(path.dirname(vaultRoot), 'lock-no-push');
+      try {
+        await git(origin, ['init', '--bare', '--initial-branch=main', '.']);
+        await git(vaultRoot, ['branch', '-M', 'main']);
+        await git(vaultRoot, ['remote', 'add', 'origin', origin]);
+        await git(vaultRoot, ['push', '--set-upstream', 'origin', 'main']);
+        const hook = path.join(vaultRoot, '.git', 'hooks', 'pre-push');
+        await fs.writeFile(
+          hook,
+          `#!/bin/sh\nif [ -e "$(git rev-parse --absolute-git-dir)/vault-mcp.lock" ]; then echo tomado >> '${mark}'; else echo solto >> '${mark}'; fi\n`,
+          'utf8',
+        );
+        await fs.chmod(hook, 0o755);
+
+        const antes = process.env.VAULT_AUTO_PUSH;
+        process.env.VAULT_AUTO_PUSH = '1';
+        try {
+          const result = await write(toolsFor(vaultRoot), 'com-push');
+          expect(textOf(result)).toContain('Push: sim');
+        } finally {
+          if (antes === undefined) delete process.env.VAULT_AUTO_PUSH;
+          else process.env.VAULT_AUTO_PUSH = antes;
+        }
+
+        // Toda vez que o hook rodou: nenhuma delas com o lock tomado.
+        const marks = (await fs.readFile(mark, 'utf8')).trim().split('\n');
+        expect(marks).toContain('solto');
+        expect(marks).not.toContain('tomado');
+      } finally {
+        await fs.rm(origin, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    },
+    30_000,
+  );
 });
 
 describe('nomes de parâmetro em inglês, com os antigos aceitos', () => {
