@@ -89,7 +89,7 @@ function runGit(args: string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<{ s
 }
 
 /** `VAULT_AUTO_PUSH=1` (or `true`) turns the push on for every write. Anything else is off. */
-function autoPushEnabled(): boolean {
+export function autoPushEnabled(): boolean {
   const raw = process.env.VAULT_AUTO_PUSH?.trim().toLowerCase();
   return raw === '1' || raw === 'true';
 }
@@ -449,6 +449,64 @@ export async function commitFiles(
     ...(push.warning === undefined
       ? {}
       : { warning: result.warning === undefined ? push.warning : `${result.warning}; ${push.warning}` }),
+  };
+}
+
+/** What `vault_status` reports about the repository under the vault. */
+export interface RepoState {
+  /** False when the vault is not inside a git repository, or git is not installed. */
+  repository: boolean;
+  /** The checked-out branch. Absent on a detached HEAD and when `repository` is false. */
+  branch?: string;
+  /** True when HEAD names a commit rather than a branch: new commits then belong to no branch. */
+  detached: boolean;
+  /** Commits here that the upstream lacks. Absent, with `behind`, when no upstream is configured. */
+  ahead?: number;
+  /** Commits the last-fetched upstream has that are not here. No network is touched to learn it. */
+  behind?: number;
+  pending: PendingCommit[];
+}
+
+/**
+ * The repository as a write would find it, read without changing anything.
+ *
+ * Every question is asked of git by exit status or by a number, never by its prose, and each one
+ * failing means "not applicable" rather than an error: no upstream is the ordinary state of a
+ * vault that never leaves the machine.
+ */
+export async function repoState(repoRoot: string): Promise<RepoState> {
+  const dir = await gitDir(repoRoot);
+  if (dir === undefined) return { repository: false, detached: false, pending: [] };
+
+  let branch: string | undefined;
+  let detached = false;
+  try {
+    const { stdout } = await runGit(['-C', repoRoot, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
+    branch = stdout.trim() === '' ? undefined : stdout.trim();
+  } catch {
+    // Exit 1 is `--quiet`'s "HEAD is not a symbolic ref".
+    detached = true;
+  }
+
+  let counts: { ahead: number; behind: number } | undefined;
+  try {
+    const { stdout } = await runGit([
+      '-C', repoRoot, 'rev-list', '--left-right', '--count', '@{upstream}...HEAD',
+    ]);
+    const [behind, ahead] = stdout.trim().split(/\s+/).map(Number);
+    if (ahead !== undefined && behind !== undefined && Number.isInteger(ahead) && Number.isInteger(behind)) {
+      counts = { ahead, behind };
+    }
+  } catch {
+    // No upstream configured, or no commit yet: there is nothing to be ahead of.
+  }
+
+  return {
+    repository: true,
+    ...(branch === undefined ? {} : { branch }),
+    detached,
+    ...(counts ?? {}),
+    pending: await readPending(dir),
   };
 }
 

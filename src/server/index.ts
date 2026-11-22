@@ -17,7 +17,7 @@ import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolRe
 /**
  * The process a user starts: `npx @andreymudri/vault-mcp`, or `node
  * <caminho-absoluto>/dist/server/index.js` from a clone. It wires a `VaultScanner`, a `Retriever`
- * and the ten tools of `tools.ts` onto an MCP server speaking over stdio.
+ * and the eleven tools of `tools.ts` onto an MCP server speaking over stdio.
  *
  * The package is SCOPED for a concrete reason: the bare `vault-mcp` on npm belongs to somebody else
  * (`vault-mcp@0.0.1`, 443 bytes, a namespace placeholder by another author), so a plain
@@ -127,7 +127,7 @@ export function toolCallback(
 }
 
 /**
- * The server with the ten tools registered, ready for any transport.
+ * The server with the eleven tools registered, ready for any transport.
  *
  * `McpServer` is the SDK's registration front end over its own `Server` (it is reachable as
  * `.server`); it takes the zod schema each tool already carries, publishes the JSON Schema that
@@ -148,13 +148,13 @@ export function createVaultServer(vaultRoot: string, lang: Lang = 'en'): McpServ
   );
 
   const redact = makeRedactor(vaultRoot);
-  for (const tool of createTools({ retriever, scanner, vaultRoot, messages })) {
+  for (const tool of createTools({ retriever, scanner, vaultRoot, messages, version: VERSION })) {
     server.registerTool(
       tool.name,
       {
         description: tool.description,
         inputSchema: tool.inputSchema,
-        // Only `vault_graph` has one; the SDK publishes it and validates each successful answer.
+        // Where a tool has one, the SDK publishes it and validates each successful answer.
         ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
       },
       toolCallback(tool, redact, messages),

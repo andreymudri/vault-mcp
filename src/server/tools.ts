@@ -11,7 +11,7 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import { RAW_PREFIX, hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
-import { lockPathFor, pushIfEnabled } from '../write/git.js';
+import { autoPushEnabled, lockPathFor, pushIfEnabled, repoState } from '../write/git.js';
 import { LearnError, learn } from '../write/learn.js';
 import { INVISIBLE_CHARS } from '../write/paths.js';
 import { deleteNote, moveNote, type DeleteResult, type MoveResult } from '../write/relocate.js';
@@ -19,10 +19,11 @@ import { VaultLock } from '../write/vault-lock.js';
 import { EditError, editNote, writeNote, type WriteResult } from '../write/writer.js';
 
 /**
- * The ten tools the MCP server exposes, as plain objects: a name, a description written for an
- * agent to route on, a zod schema and a handler that answers with TEXT. One of them, `vault_graph`,
- * also answers `structuredContent` under an `outputSchema`, because its reader is a program that
- * draws the graph rather than an agent that reads it.
+ * The eleven tools the MCP server exposes, as plain objects: a name, a description written for an
+ * agent to route on, a zod schema and a handler that answers with TEXT. Some also answer
+ * `structuredContent` under an `outputSchema`, where the reader can be a program: `vault_graph`
+ * (the fleetmates deck draws it), `vault_learn` (the preview is approved by revision) and
+ * `vault_status`.
  *
  * Nothing here talks to a transport. `createTools` is handed the same `VaultScanner` the
  * `Retriever` owns and returns definitions whose handlers can be called directly, which is what
@@ -73,6 +74,11 @@ export interface ToolDeps {
   lock?: VaultLock;
   /** How long a write waits for that lock, from `VAULT_LOCK_TIMEOUT_MS`. Default in `vault-lock.ts`. */
   lockTimeoutMs?: number;
+  /**
+   * The server's version, for `vault_status`. Handed in rather than imported: the one module that
+   * knows it is `index.ts`, which imports this one.
+   */
+  version?: string;
 }
 
 /**
@@ -1440,6 +1446,24 @@ const VAULT_GRAPH_OUTPUT = z
   })
   .strict();
 
+/** The `structuredContent` of `vault_status`. `null` where a fact does not apply, never an absent key. */
+const VAULT_STATUS_OUTPUT = z.object({
+  version: z.string(),
+  notes: z.number(),
+  chunks: z.number(),
+  diagnostics: z.number(),
+  autoPush: z.boolean(),
+  repository: z.boolean(),
+  branch: z.string().nullable(),
+  detached: z.boolean(),
+  ahead: z.number().nullable(),
+  behind: z.number().nullable(),
+  pendingCommits: z.array(
+    z.object({ paths: z.array(z.string()), message: z.string(), attempts: z.number(), at: z.string() }),
+  ),
+  lock: z.object({ pid: z.number(), host: z.string(), at: z.string() }).nullable(),
+});
+
 export function createTools(deps: ToolDeps): ToolDefinition[] {
   const m = deps.messages;
   const writes = new WriteQueue();
@@ -1824,6 +1848,85 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
   );
 
+  /**
+   * The operator's view, and the one read tool that looks at git.
+   *
+   * It exists because a write that could not be committed answers "Commit: no" once, to whoever
+   * happened to make it, and until now nothing could be asked afterwards: not whether a commit is
+   * still pending, not whether the branch ever left the machine, not who is holding the lock a
+   * write is waiting on.
+   */
+  const vaultStatus = defineStructured(
+    redact,
+    m,
+    'vault_status',
+    m.tools.vault_status.description,
+    {},
+    VAULT_STATUS_OUTPUT,
+    async () => {
+      const stats = deps.retriever.stats();
+      const [repo, holder] = await Promise.all([
+        repoState(deps.vaultRoot),
+        vaultLock().then((lock) => lock.holder()),
+      ]);
+      const diagnostics = deps.scanner.diagnostics.length;
+      const autoPush = autoPushEnabled();
+      const s = m.status;
+
+      const lines = [
+        `vault-mcp ${deps.version ?? '?'}`,
+        renderTemplate(s.vault, { notes: stats.notes, chunks: stats.chunks, diagnostics }),
+        !repo.repository
+          ? s.repositoryNone
+          : repo.detached || repo.branch === undefined
+            ? s.repositoryDetached
+            : renderTemplate(s.repositoryBranch, { branch: forMessage(repo.branch) }),
+      ];
+      if (repo.repository) {
+        lines.push(
+          repo.ahead === undefined || repo.behind === undefined
+            ? s.upstreamNone
+            : renderTemplate(s.upstream, { ahead: repo.ahead, behind: repo.behind }),
+          renderTemplate(s.pending, { count: repo.pending.length }),
+          // A commit message carries a note title, which is text a model chose over clipped
+          // content: escaped like everything else that lands on a line of its own.
+          ...repo.pending.map(
+            (entry) =>
+              `  ${renderTemplate(s.pendingItem, {
+                at: forMessage(entry.at),
+                attempts: entry.attempts,
+                message: forMessage(entry.message),
+              })}`,
+          ),
+        );
+      }
+      lines.push(
+        holder === undefined
+          ? s.lockFree
+          : renderTemplate(s.lockHeld, { pid: holder.pid, host: forMessage(holder.host), at: forMessage(holder.at) }),
+        autoPush ? s.autoPushOn : s.autoPushOff,
+      );
+
+      return {
+        text: lines.join('\n'),
+        structured: {
+          version: deps.version ?? '?',
+          notes: stats.notes,
+          chunks: stats.chunks,
+          diagnostics,
+          autoPush,
+          repository: repo.repository,
+          branch: repo.branch ?? null,
+          detached: repo.detached,
+          ahead: repo.ahead ?? null,
+          behind: repo.behind ?? null,
+          pendingCommits: repo.pending,
+          lock: holder === undefined ? null : { pid: holder.pid, host: holder.host, at: holder.at },
+        },
+      };
+    },
+  );
+
   const vaultWriteNote = define(
     redact,
     m,
@@ -2064,6 +2167,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     vaultList,
     vaultBacklinks,
     vaultGraph,
+    vaultStatus,
     vaultWriteNote,
     vaultEditNote,
     vaultLearn,

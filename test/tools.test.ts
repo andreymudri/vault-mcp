@@ -11,6 +11,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { TRUNCATION_MARKER } from '../src/retrieval/budget.js';
 import { parseFile } from '../src/vault/frontmatter.js';
+import { lockPathFor } from '../src/write/git.js';
+import { VaultLock } from '../src/write/vault-lock.js';
 import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
@@ -51,6 +53,7 @@ const TOOL_NAMES = [
   'vault_list',
   'vault_backlinks',
   'vault_graph',
+  'vault_status',
   'vault_write_note',
   'vault_edit_note',
   'vault_learn',
@@ -325,7 +328,7 @@ function jsonLines(text: string): Array<Record<string, unknown>> {
 }
 
 describe('createTools: catálogo', () => {
-  it('expõe exatamente as dez tools do spec', async () => {
+  it('expõe exatamente as onze tools do spec', async () => {
     const { tools } = makeTools(await makeVault());
     expect(tools.map((tool) => tool.name)).toEqual(TOOL_NAMES);
   });
@@ -2703,7 +2706,7 @@ describe('entrypoint: o processo que o usuário inicia', () => {
 });
 
 describe('binário compilado (dist/server/index.js)', () => {
-  it('sobe pelo stdio e responde o handshake MCP com as dez tools', async () => {
+  it('sobe pelo stdio e responde o handshake MCP com as onze tools', async () => {
     const bin = await buildServer();
     const vaultRoot = await makeVault();
     const { stdout, stderr, code } = await runServer(bin, { VAULT_PATH: vaultRoot }, [
@@ -2820,7 +2823,7 @@ describe('servidor MCP', () => {
     expect(resolveVaultPath({ VAULT_PATH: vaultRoot })).toBe(path.resolve(vaultRoot));
   });
 
-  it('expõe as dez tools por cima do protocolo, com JSON Schema de entrada', async () => {
+  it('expõe as onze tools por cima do protocolo, com JSON Schema de entrada', async () => {
     const vaultRoot = await makeVault();
     const server = createVaultServer(vaultRoot);
     const client = new Client({ name: 'teste', version: '0.0.0' });
@@ -2993,5 +2996,118 @@ describe('diagnósticos do vault na saída das tools', () => {
     // `errors.ts` já resolve para os erros da escrita, agora também para os diagnósticos.
     expect(rendered).toMatch(/invalid frontmatter/i);
     expect(rendered).not.toMatch(/inválido/i);
+  });
+});
+
+describe('vault_status', () => {
+  type Status = Record<string, unknown> & {
+    pendingCommits: Array<{ paths: string[]; message: string; attempts: number; at: string }>;
+  };
+
+  const status = async (vaultRoot: string): Promise<{ text: string; data: Status }> => {
+    const result = await makeTools(vaultRoot).call('vault_status', {});
+    expect(result.isError).not.toBe(true);
+    return { text: textOf(result), data: result.structuredContent as Status };
+  };
+
+  /** `VAULT_AUTO_PUSH` unset for the duration: what the tool reports about it is asserted below. */
+  const semAutoPush = async <T>(run: () => Promise<T>): Promise<T> => {
+    const antes = process.env.VAULT_AUTO_PUSH;
+    delete process.env.VAULT_AUTO_PUSH;
+    try {
+      return await run();
+    } finally {
+      if (antes !== undefined) process.env.VAULT_AUTO_PUSH = antes;
+    }
+  };
+
+  it('diz o que o servidor enxerga: índice, repositório, pendências e lock', async () => {
+    const vaultRoot = await makeVault(true);
+    const { text, data } = await semAutoPush(() => status(vaultRoot));
+
+    const scanner = new VaultScanner({ vaultRoot });
+    scanner.refresh();
+    expect(data).toMatchObject({
+      notes: scanner.allNotes().length,
+      diagnostics: scanner.diagnostics.length,
+      repository: true,
+      detached: false,
+      ahead: null,
+      behind: null,
+      pendingCommits: [],
+      lock: null,
+      autoPush: false,
+    });
+    expect(typeof data.version).toBe('string');
+    expect(typeof data.branch).toBe('string');
+    expect(data.chunks as number).toBeGreaterThan(data.notes as number);
+    expect(text).toContain('Repositório: sim');
+    expect(text).toContain('Commits pendentes: 0');
+    expect(text).toContain('Lock do vault: livre');
+    expect(text).toContain('Push automático: desligado');
+  });
+
+  it('mostra o commit que ficou pendente, e para de mostrá-lo depois de refeito', async () => {
+    const vaultRoot = await makeVault(true);
+    // Um caminho ignorado: o `git add` falha, a nota fica no disco e o commit vai para o diário.
+    await fs.writeFile(path.join(vaultRoot, '.gitignore'), 'recusada.md\n', 'utf8');
+    const { call, text } = makeTools(vaultRoot);
+    await call('vault_write_note', { path: '02-wiki/docker/recusada.md', content: '# Recusada\n' });
+
+    const pendente = (await status(vaultRoot)).data;
+    expect(pendente.pendingCommits).toHaveLength(1);
+    expect(pendente.pendingCommits[0]).toMatchObject({
+      paths: ['02-wiki/docker/recusada.md'],
+      attempts: 1,
+    });
+    expect((await status(vaultRoot)).text).toContain('Commits pendentes: 1');
+
+    await fs.rm(path.join(vaultRoot, '.gitignore'));
+    const depois = await text('vault_write_note', { path: '02-wiki/docker/outra.md', content: '# Outra\n' });
+    expect(depois).toContain('Commits pendentes refeitos: 1');
+    expect((await status(vaultRoot)).data.pendingCommits).toEqual([]);
+    expect(await git(vaultRoot, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('diz que não há repositório, em vez de falhar', async () => {
+    const { text, data } = await status(await makeVault(false));
+    expect(data).toMatchObject({ repository: false, branch: null, detached: false, pendingCommits: [] });
+    expect(text).toContain('Repositório: não');
+  });
+
+  it('avisa de HEAD solto', async () => {
+    const vaultRoot = await makeVault(true);
+    await git(vaultRoot, ['checkout', '--detach']);
+    const { text, data } = await status(vaultRoot);
+    expect(data).toMatchObject({ repository: true, detached: true, branch: null });
+    expect(text).toContain('HEAD solto');
+  });
+
+  it('nomeia o processo que segura o lock do vault', async () => {
+    const vaultRoot = await makeVault(true);
+    const release = await new VaultLock({ lockPath: await lockPathFor(vaultRoot) }).acquire();
+    try {
+      const { text, data } = await status(vaultRoot);
+      expect(data.lock).toMatchObject({ pid: process.pid });
+      expect(text).toContain(`Lock do vault: pid ${process.pid}`);
+    } finally {
+      await release();
+    }
+  });
+
+  it('conta quantos commits ainda não saíram para o upstream', async () => {
+    const vaultRoot = await makeVault(true);
+    const remote = path.join(path.dirname(vaultRoot), 'remote.git');
+    await git(path.dirname(vaultRoot), ['init', '--bare', remote]);
+    await git(vaultRoot, ['remote', 'add', 'origin', remote]);
+    await git(vaultRoot, ['push', '-u', 'origin', 'HEAD']);
+
+    await semAutoPush(() =>
+      makeTools(vaultRoot).call('vault_write_note', { path: '02-wiki/docker/local.md', content: '# Local\n' }),
+    );
+
+    const { text, data } = await status(vaultRoot);
+    expect(data).toMatchObject({ ahead: 1, behind: 0 });
+    expect(text).toContain('1 à frente');
   });
 });

@@ -264,6 +264,12 @@ export class Retriever {
     if (changed.length > 0 || removed.length > 0) this.graph.build(this.scanner.allNotes());
   }
 
+  /** How much is indexed right now, for `vault_status`. Brings the index up to date first. */
+  stats(): { notes: number; chunks: number } {
+    this.sync();
+    return { notes: this.scanner.allNotes().length, chunks: this.index.size() };
+  }
+
   search(options: SearchOptions): SearchResult {
     this.sync();
 

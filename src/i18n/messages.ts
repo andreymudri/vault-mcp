@@ -75,6 +75,21 @@ const PT = {
     droppedCommits: 'Commits pendentes abandonados',
   },
 
+  status: {
+    vault: 'Vault: {notes} nota(s), {chunks} chunk(s) indexados, {diagnostics} arquivo(s) com problema de indexação',
+    repositoryBranch: 'Repositório: sim, branch {branch}',
+    repositoryDetached: 'Repositório: sim, HEAD solto (commits novos não ficam em branch nenhum)',
+    repositoryNone: 'Repositório: não (as notas são salvas sem versionamento)',
+    upstream: 'Upstream: {ahead} à frente, {behind} atrás',
+    upstreamNone: 'Upstream: (nenhum)',
+    pending: 'Commits pendentes: {count}',
+    pendingItem: '{at} (tentativa {attempts}): {message}',
+    lockFree: 'Lock do vault: livre',
+    lockHeld: 'Lock do vault: pid {pid} em {host}, desde {at}',
+    autoPushOn: 'Push automático: ligado',
+    autoPushOff: 'Push automático: desligado',
+  },
+
   errorCodes: {
     'tags.scalarOnly': 'frontmatter.tags só aceita textos ou números; remova listas e objetos',
     'hint.hardLinks': 'o arquivo tem {nlink} hard links apontando para o mesmo inode (uma cópia `cp -al` ou um snapshot de backup faz isso), então escrever nele mudaria todas as cópias de uma vez',
@@ -208,6 +223,14 @@ const PT = {
       max_nodes:
         'Máximo de notas devolvidas, em ordem de caminho (padrão 2000, até 5000); ' +
         'acima disso a resposta vem marcada como truncada.',
+    },
+    vault_status: {
+      description:
+        'Diz o estado do servidor e do vault: versão, quantas notas e chunks estão indexados, se o ' +
+        'vault é um repositório git, o branch, os commits ainda não enviados, os commits que ' +
+        'falharam e serão refeitos, e quem segura o lock de escrita. Use antes de uma sessão de ' +
+        'escrita, ou depois de uma escrita responder "Commit: não", para saber se algo ficou para ' +
+        'trás. Não muda nada.',
     },
     vault_write_note: {
       description:
@@ -345,6 +368,21 @@ const EN: Messages = {
     droppedCommits: 'Pending commits given up on',
   },
 
+  status: {
+    vault: 'Vault: {notes} note(s), {chunks} chunk(s) indexed, {diagnostics} file(s) with an indexing problem',
+    repositoryBranch: 'Repository: yes, branch {branch}',
+    repositoryDetached: 'Repository: yes, detached HEAD (new commits land on no branch)',
+    repositoryNone: 'Repository: no (notes are saved without version control)',
+    upstream: 'Upstream: {ahead} ahead, {behind} behind',
+    upstreamNone: 'Upstream: (none)',
+    pending: 'Pending commits: {count}',
+    pendingItem: '{at} (attempt {attempts}): {message}',
+    lockFree: 'Vault lock: free',
+    lockHeld: 'Vault lock: pid {pid} on {host}, since {at}',
+    autoPushOn: 'Auto-push: on',
+    autoPushOff: 'Auto-push: off',
+  },
+
   errorCodes: {
     'tags.scalarOnly': 'frontmatter.tags only accepts text or numbers; remove lists and objects',
     'hint.hardLinks': 'the file has {nlink} hard links pointing at the same inode (a `cp -al` copy or a backup snapshot does that), so writing to it would change every copy at once',
@@ -478,6 +516,14 @@ const EN: Messages = {
       max_nodes:
         'Maximum notes returned, in path order (default 2000, up to 5000); ' +
         'beyond that the answer is marked as truncated.',
+    },
+    vault_status: {
+      description:
+        'Reports the state of the server and of the vault: version, how many notes and chunks are ' +
+        'indexed, whether the vault is a git repository, the branch, commits not pushed yet, ' +
+        'commits that failed and will be retried, and who holds the write lock. Use it before a ' +
+        'writing session, or after a write answered "Commit: no", to learn whether anything was ' +
+        'left behind. Changes nothing.',
     },
     vault_write_note: {
       description:
