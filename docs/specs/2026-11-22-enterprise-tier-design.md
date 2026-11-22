@@ -95,8 +95,9 @@ diagnósticos do scanner, modo somente-leitura. É a superfície de operação q
 
 ## 4. Operação e protocolo
 
-- **Annotations e título** nas tools: `readOnlyHint` nas de leitura, `destructiveHint` em
-  `vault_delete`, `idempotentHint` onde vale, `openWorldHint: false` em todas.
+- **Annotations e título** nas tools: `readOnlyHint` nas de leitura; `destructiveHint: false` só
+  em `vault_learn`, a única escrita que só acrescenta; `idempotentHint` em `vault_write_note`;
+  `openWorldHint: false` em todas.
 - **Log** em stderr, uma linha JSON por evento, nível por `VAULT_LOG_LEVEL` (padrão `warn`): start,
   configuração inválida, vault sem git, chamada lenta, falha de commit. O servidor também declara a
   capability `logging` do MCP e manda os mesmos eventos ao cliente.

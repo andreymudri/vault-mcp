@@ -168,7 +168,9 @@ export function createVaultServer(
     server.registerTool(
       tool.name,
       {
+        title: tool.title,
         description: tool.description,
+        annotations: tool.annotations,
         inputSchema: tool.inputSchema,
         // Where a tool has one, the SDK publishes it and validates each successful answer.
         ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),

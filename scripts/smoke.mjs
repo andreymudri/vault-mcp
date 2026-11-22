@@ -140,6 +140,13 @@ if (missing.length > 0 || extra.length > 0) {
   );
 }
 
+// Every tool says what it does to the vault. A client decides whether to ask the user first from
+// these, so a tool that ships without them is a tool every client has to treat as the worst case.
+const bare = (listed.result?.tools ?? [])
+  .filter((tool) => typeof tool.annotations?.readOnlyHint !== 'boolean' || typeof tool.title !== 'string')
+  .map((tool) => tool.name);
+if (bare.length > 0) fail(`tools sem annotations ou sem título: ${bare.join(', ')}`);
+
 clearTimeout(timer);
 child.removeAllListeners('exit');
 child.kill('SIGTERM');

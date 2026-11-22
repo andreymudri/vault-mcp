@@ -225,7 +225,7 @@ consegue usar o servidor com nomes de parâmetro em inglês.
 - Modify: `scripts/smoke.mjs`
 - Test: `test/tools.test.ts`
 
-- [ ] **Step 1:** Teste: toda tool tem `title` e `annotations`; as de leitura têm `readOnlyHint: true`; só `vault_delete` tem `destructiveHint: true`.
+- [ ] **Step 1:** Teste: toda tool tem `title` e `annotations`; as de leitura têm `readOnlyHint: true`; só `vault_learn`, entre as de escrita, tem `destructiveHint: false` (é a única que só acrescenta — pela definição do spec, substituir, trocar trecho e mover não são aditivos).
 - [ ] **Step 2:** `ToolDefinition.title` e `.annotations`, repassados no `registerTool`; o smoke exige annotations.
 
 ### Task 15: log estruturado e validação de configuração

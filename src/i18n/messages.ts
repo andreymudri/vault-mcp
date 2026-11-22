@@ -176,6 +176,7 @@ const PT = {
 
   tools: {
     vault_search: {
+      title: 'Buscar no vault',
       description:
         'Busca semântica-lexical no vault (BM25 + um salto de wiki-links). Chame antes de responder ' +
         'qualquer pergunta sobre decisões, padrões, gotchas ou histórico do usuário, e antes de gravar ' +
@@ -190,6 +191,7 @@ const PT = {
       include_raw: 'Inclui `01-raw/` (captura crua), fora dos resultados por padrão.',
     },
     vault_get_note: {
+      title: 'Ler uma nota',
       description:
         'Lê uma nota inteira pelo caminho relativo ao vault (ex.: `02-wiki/nestjs/auth-guard.md`), com ' +
         'frontmatter, links resolvidos e links quebrados. Use depois de vault_search quando o trecho ' +
@@ -200,6 +202,7 @@ const PT = {
         'só. Omita na primeira chamada; depois use o offset que a marca de corte anuncia.',
     },
     vault_list: {
+      title: 'Listar notas',
       description:
         'Lista notas por metadado — tipo, tags, status, pasta — sem olhar o conteúdo. Use para ' +
         'inventário ("quais projetos ativos existem?", "quais notas têm a tag jwt?"), não para buscar ' +
@@ -212,12 +215,14 @@ const PT = {
       offset: 'Quantas notas pular, em ordem de caminho. Use o valor que a resposta anterior anunciou.',
     },
     vault_backlinks: {
+      title: 'Notas que apontam para uma nota',
       description:
         'Lista as notas que apontam para a nota informada. Use para medir o quanto um assunto está ' +
         'conectado, achar o MOC que indexa a nota, ou avaliar o impacto de mudar/renomear uma nota.',
       path: 'Caminho relativo ao vault, com `.md`.',
     },
     vault_graph: {
+      title: 'Grafo de links',
       description:
         'Devolve o grafo de wiki-links do vault: as notas como nós (caminho, título, tipo, status, ' +
         'tags, área, domínio, graus) e os links entre elas como arestas, também como dado estruturado ' +
@@ -236,6 +241,7 @@ const PT = {
         'acima disso a resposta vem marcada como truncada.',
     },
     vault_status: {
+      title: 'Estado do servidor e do vault',
       description:
         'Diz o estado do servidor e do vault: versão, quantas notas e chunks estão indexados, se o ' +
         'vault é um repositório git, o branch, os commits ainda não enviados, os commits que ' +
@@ -244,6 +250,7 @@ const PT = {
         'trás. Não muda nada.',
     },
     vault_write_note: {
+      title: 'Escrever uma nota',
       description:
         'Cria ou substitui uma nota inteira, com frontmatter garantido, e commita no git do vault. ' +
         'Substitui o arquivo inteiro: para mudar um trecho use vault_edit_note, e para registrar um ' +
@@ -253,6 +260,7 @@ const PT = {
       frontmatter: 'Campos do frontmatter, ex.: `{ "tipo": "wiki", "tags": ["jwt"] }`.',
     },
     vault_edit_note: {
+      title: 'Editar um trecho de uma nota',
       description:
         'Substitui UM trecho exato de uma nota existente e commita. Falha, sem escrever, se o trecho ' +
         'não aparecer ou aparecer mais de uma vez — nesse caso mande mais contexto em old_text.',
@@ -261,6 +269,7 @@ const PT = {
       new_text: 'Texto que entra no lugar.',
     },
     vault_learn: {
+      title: 'Registrar um aprendizado',
       description:
         'Registra um aprendizado no vault. Chame sempre que, durante a sessão, aparecer algo não óbvio ' +
         'e reutilizável — uma decisão de arquitetura, um pattern, um gotcha, uma armadilha de ' +
@@ -281,6 +290,7 @@ const PT = {
       confirm_novo_dominio: 'Confirma a criação de um domínio que ainda não existe em `02-wiki/`.',
     },
     vault_move: {
+      title: 'Mover ou renomear uma nota',
       description:
         'Move, renomeia, promove ou arquiva uma nota, corrigindo sozinho todo link que passaria a ' +
         'apontar para outro lugar, migrando a entrada dela entre os MOCs de domínio e commitando tudo ' +
@@ -293,6 +303,7 @@ const PT = {
       confirm_novo_dominio: 'Confirma a criação do MOC de um domínio de destino que ainda não tem um.',
     },
     vault_delete: {
+      title: 'Apagar uma nota',
       description:
         'Apaga uma nota e commita, tirando a linha dela do MOC do domínio. Recusa, sem apagar, se a ' +
         'nota não tiver versão commitada no HEAD (aí não haveria como desfazer), se ela for estrutural ' +
@@ -480,6 +491,7 @@ const EN: Messages = {
 
   tools: {
     vault_search: {
+      title: 'Search the vault',
       description:
         'Lexical-semantic search over the vault (BM25 plus one wiki-link hop). Call it before ' +
         'answering any question about the user\'s decisions, patterns, gotchas or history, and before ' +
@@ -494,6 +506,7 @@ const EN: Messages = {
       include_raw: 'Include `01-raw/` (unvetted capture), left out of results by default.',
     },
     vault_get_note: {
+      title: 'Read a note',
       description:
         'Reads a whole note by its vault-relative path (e.g. `02-wiki/nestjs/auth-guard.md`), with ' +
         'frontmatter, resolved links and broken links. Use it after vault_search when the snippet is ' +
@@ -504,6 +517,7 @@ const EN: Messages = {
         'answer. Omit it on the first call; afterwards use the offset the cut marker announces.',
     },
     vault_list: {
+      title: 'List notes',
       description:
         'Lists notes by metadata — tipo, tags, status, folder — without looking at content. Use it for ' +
         'inventory ("which projects are active?", "which notes carry the jwt tag?"), not to search by ' +
@@ -516,12 +530,14 @@ const EN: Messages = {
       offset: 'How many notes to skip, in path order. Use the value the previous answer announced.',
     },
     vault_backlinks: {
+      title: 'Notes linking to a note',
       description:
         'Lists the notes pointing at the given note. Use it to gauge how connected a subject is, to ' +
         'find the MOC that indexes the note, or to weigh the impact of changing or renaming it.',
       path: 'Vault-relative path, with `.md`.',
     },
     vault_graph: {
+      title: 'Link graph',
       description:
         'Returns the vault\'s wiki-link graph: notes as nodes (path, title, tipo, status, tags, area, ' +
         'domain, degrees) and the links between them as edges, also as structured data for a client ' +
@@ -540,6 +556,7 @@ const EN: Messages = {
         'beyond that the answer is marked as truncated.',
     },
     vault_status: {
+      title: 'Server and vault status',
       description:
         'Reports the state of the server and of the vault: version, how many notes and chunks are ' +
         'indexed, whether the vault is a git repository, the branch, commits not pushed yet, ' +
@@ -548,6 +565,7 @@ const EN: Messages = {
         'left behind. Changes nothing.',
     },
     vault_write_note: {
+      title: 'Write a note',
       description:
         'Creates or replaces a whole note, with frontmatter guaranteed, and commits it to the vault\'s ' +
         'git. It replaces the entire file: to change one passage use vault_edit_note, and to record a ' +
@@ -557,6 +575,7 @@ const EN: Messages = {
       frontmatter: 'Frontmatter fields, e.g. `{ "tipo": "wiki", "tags": ["jwt"] }`.',
     },
     vault_edit_note: {
+      title: 'Edit a passage of a note',
       description:
         'Replaces ONE exact passage of an existing note and commits. Fails, without writing, if the ' +
         'passage does not appear or appears more than once — in that case send more context in old_text.',
@@ -565,6 +584,7 @@ const EN: Messages = {
       new_text: 'The text that takes its place.',
     },
     vault_learn: {
+      title: 'Record a learning',
       description:
         'Records a learning in the vault. Call it whenever something non-obvious and reusable comes up ' +
         'during the session — an architecture decision, a pattern, a gotcha, a configuration trap — ' +
@@ -585,6 +605,7 @@ const EN: Messages = {
       confirm_novo_dominio: 'Confirms creating a domain that does not yet exist under `02-wiki/`.',
     },
     vault_move: {
+      title: 'Move or rename a note',
       description:
         'Moves, renames, promotes or archives a note, fixing on its own every link that would otherwise ' +
         'start pointing somewhere else, migrating its entry between domain MOCs and committing it all at ' +
@@ -598,6 +619,7 @@ const EN: Messages = {
       confirm_novo_dominio: 'Confirms creating the MOC of a destination domain that does not have one yet.',
     },
     vault_delete: {
+      title: 'Delete a note',
       description:
         'Deletes a note and commits, removing its line from the domain MOC. Refuses, without deleting, ' +
         'if the note has no committed version in HEAD (there would be no way to undo), if it is ' +

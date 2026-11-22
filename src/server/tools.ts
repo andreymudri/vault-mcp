@@ -39,9 +39,64 @@ export interface ToolResult {
   structuredContent?: Record<string, unknown>;
 }
 
+/**
+ * What a tool does to the vault, in the terms the MCP spec gives a client to decide with — whether
+ * to ask the user first, whether a call can be retried, whether calls can run side by side.
+ *
+ * They are hints and they are claims: a client is told not to trust them from a server it does not
+ * trust, and this one should be able to stand behind each. `destructiveHint: false` means "only
+ * ever adds", which is true of exactly one writer here.
+ */
+export interface ToolAnnotations {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
+const READ_ONLY: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  // The vault is a closed set of files on this machine. Nothing a tool reads comes from elsewhere.
+  openWorldHint: false,
+};
+
+/** A writer that can replace or remove what was there, and that is not the same call twice. */
+const REPLACES: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+
+/**
+ * One entry per tool, by name. `createTools` refuses to build a tool that is missing here, so a
+ * twelfth tool cannot ship without somebody deciding what it does to the vault.
+ */
+const ANNOTATIONS: Readonly<Record<string, ToolAnnotations>> = {
+  vault_search: READ_ONLY,
+  vault_get_note: READ_ONLY,
+  vault_list: READ_ONLY,
+  vault_backlinks: READ_ONLY,
+  vault_graph: READ_ONLY,
+  vault_status: READ_ONLY,
+  // Writing the same content to the same path twice leaves what the first call left.
+  vault_write_note: { ...REPLACES, idempotentHint: true },
+  vault_edit_note: REPLACES,
+  // Creates a note or appends to one, and appends to the MOC and the daily note: additive. Not
+  // idempotent — said twice, the learning is recorded twice.
+  vault_learn: { ...REPLACES, destructiveHint: false },
+  vault_move: REPLACES,
+  vault_delete: REPLACES,
+};
+
 export interface ToolDefinition {
   name: string;
+  /** A short human name for the tool, in the server's language. */
+  title: string;
   description: string;
+  annotations: ToolAnnotations;
   /** A zod object schema. `index.ts` converts it to JSON Schema for `tools/list`. */
   inputSchema: z.ZodObject;
   /**
@@ -635,9 +690,16 @@ function defineStructured<Shape extends z.ZodRawShape>(
   // published JSON Schema says the same thing (`additionalProperties: false`), so a client that
   // validates before sending catches it too.
   const inputSchema = z.object(shape).strict();
+  const annotations = ANNOTATIONS[name];
+  const title = (m.tools as Record<string, { title?: string } | undefined>)[name]?.title;
+  if (annotations === undefined || title === undefined) {
+    throw new Error(`tool ${name} has no annotations or no title`);
+  }
   return {
     name,
+    title,
     description,
+    annotations,
     inputSchema,
     ...(outputSchema === undefined ? {} : { outputSchema }),
     handler: async (args) => {

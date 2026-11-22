@@ -2771,7 +2771,9 @@ describe('servidor MCP', () => {
     const vaultRoot = await makeVault();
     const explosiva: ToolDefinition = {
       name: 'vault_explode',
+      title: 'Explodir',
       description: 'tool de teste',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: createTools({
         retriever: new Retriever({ scanner: new VaultScanner({ vaultRoot }) }),
         scanner: new VaultScanner({ vaultRoot }),
@@ -3279,6 +3281,57 @@ describe('argumento desconhecido', () => {
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result.content)).toContain('pasta');
+
+    await client.close();
+    await server.close();
+  });
+});
+
+describe('annotations e títulos', () => {
+  const READ_ONLY = ['vault_search', 'vault_get_note', 'vault_list', 'vault_backlinks', 'vault_graph', 'vault_status'];
+
+  it('toda tool tem título e annotations, e nenhuma fala com o mundo de fora', async () => {
+    const { tools } = makeTools(await makeVault());
+    for (const tool of tools) {
+      expect(tool.title.length, tool.name).toBeGreaterThan(3);
+      expect(tool.annotations.openWorldHint, tool.name).toBe(false);
+    }
+    expect(new Set(tools.map((tool) => tool.title)).size).toBe(tools.length);
+  });
+
+  it('as tools de leitura se dizem somente-leitura, e as de escrita não', async () => {
+    const { tools } = makeTools(await makeVault());
+    const readOnly = tools.filter((tool) => tool.annotations.readOnlyHint).map((tool) => tool.name);
+    expect(readOnly.sort()).toEqual([...READ_ONLY].sort());
+  });
+
+  it('só o vault_learn é aditivo; as outras escritas podem substituir ou remover', async () => {
+    // `destructiveHint: false` quer dizer "só acrescenta". `vault_write_note` substitui a nota
+    // inteira, `vault_edit_note` troca um trecho, `vault_move` tira a nota do caminho antigo e
+    // `vault_delete` apaga: nenhuma delas é só acréscimo, mesmo com o git guardando o que havia.
+    const { tools } = makeTools(await makeVault());
+    const writers = tools.filter((tool) => !tool.annotations.readOnlyHint);
+    const additive = writers.filter((tool) => tool.annotations.destructiveHint === false).map((tool) => tool.name);
+    expect(additive).toEqual(['vault_learn']);
+    // Escrever a mesma nota duas vezes dá no mesmo; nenhuma outra escrita é idempotente.
+    expect(writers.filter((tool) => tool.annotations.idempotentHint).map((tool) => tool.name)).toEqual([
+      'vault_write_note',
+    ]);
+  });
+
+  it('chegam ao cliente pelo protocolo, no idioma do servidor', async () => {
+    const server = createVaultServer(await makeVault(), 'pt');
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
+    const search = tools.find((tool) => tool.name === 'vault_search');
+    expect(search?.title).toBe('Buscar no vault');
+    expect(search?.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
+    const del = tools.find((tool) => tool.name === 'vault_delete');
+    expect(del?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
 
     await client.close();
     await server.close();
