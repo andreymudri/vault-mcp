@@ -314,7 +314,8 @@ publishes. The Portuguese names older versions used — `titulo`, `contexto`, `d
 Every tool publishes a title and MCP annotations: the six that read are `readOnlyHint`, and of the
 five that write only `vault_learn` is non-destructive (it only ever adds). Every refusal carries
 its code beside the text, in the result's `_meta["io.github.andreymudri/vault-mcp.error"]` as `{ code, params? }` —
-`path.outsideVault`, `lock.timeout`, `preview_stale`, an errno for a filesystem error. It is in
+`path.outsideVault`, `lock.timeout`, `preview_stale`, `input.invalid`, an errno for a filesystem
+error. It is in
 `_meta` and not in `structuredContent` because a tool that publishes an output schema owes that
 schema on every answer, and clients hold it to that even on an error.
 
@@ -465,7 +466,7 @@ Nothing a tool returns, accepts or indexes is unbounded:
 | `vault_get_note` body | 20,000 characters per answer; `offset` reads on |
 | `vault_list` | 200 notes per answer by default, 1,000 at most; `offset` reads on |
 | `vault_graph` | 2,000 nodes by default, 5,000 at most |
-| Diff relayed in the text of a write tool's answer | 20,000 characters; the note itself is written whole, and `vault_learn`'s structured result still carries the diff uncut |
+| Diff relayed by a write tool, and each of `diff`, `before` and `after` in `vault_learn`'s structured result | 20,000 characters, with a flag saying it was cut; the note itself is written whole |
 | `content`, `old_text`, `new_text` | 1,000,000 characters |
 | `insight` / `context` | 200,000 / 20,000 characters |
 | A note the scanner will index | `VAULT_MAX_NOTE_BYTES`, 5 MB by default; a file with a NUL byte is not indexed at all |
@@ -522,7 +523,7 @@ Five things this server does not do, each chosen rather than overlooked:
 
 `docs/followups.md` keeps the record of every defect found so far: the measurement that
 characterised it, the fix applied and the test that pins it, plus the full reasoning behind each
-acceptance above. Its item 33 lists what the last review found and left open.
+acceptance above.
 
 ## Development
 

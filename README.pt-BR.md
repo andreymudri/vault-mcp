@@ -302,8 +302,8 @@ schema publica. Os nomes em português das versões anteriores — `titulo`, `co
 Toda tool publica título e annotations do MCP: as seis de leitura são `readOnlyHint`, e das cinco
 de escrita só o `vault_learn` é não destrutivo (ele só acrescenta). Toda recusa carrega o código
 ao lado do texto, no `_meta["io.github.andreymudri/vault-mcp.error"]` do resultado, como `{ code, params? }` —
-`path.outsideVault`, `lock.timeout`, `preview_stale`, o errno de um erro de sistema de arquivos.
-Fica no `_meta` e não no `structuredContent` porque uma tool que publica schema de saída deve esse
+`path.outsideVault`, `lock.timeout`, `preview_stale`, `input.invalid`, o errno de um erro de sistema
+de arquivos. Fica no `_meta` e não no `structuredContent` porque uma tool que publica schema de saída deve esse
 schema em toda resposta, e os clientes cobram isso até num erro.
 
 ## Como o `vault_learn` Decide
@@ -453,7 +453,7 @@ Nada do que uma tool devolve, aceita ou indexa é ilimitado:
 | Corpo no `vault_get_note` | 20.000 caracteres por resposta; o `offset` continua |
 | `vault_list` | 200 notas por resposta por padrão, 1.000 no máximo; o `offset` continua |
 | `vault_graph` | 2.000 nós por padrão, 5.000 no máximo |
-| Diff repassado no texto da resposta de uma tool de escrita | 20.000 caracteres; a nota em si é escrita inteira, e o resultado estruturado do `vault_learn` ainda leva o diff sem corte |
+| Diff repassado por uma tool de escrita, e cada `diff`, `before` e `after` do resultado estruturado do `vault_learn` | 20.000 caracteres, com uma marca dizendo que foi cortado; a nota em si é escrita inteira |
 | `content`, `old_text`, `new_text` | 1.000.000 de caracteres |
 | `insight` / `context` | 200.000 / 20.000 caracteres |
 | Nota que o scanner indexa | `VAULT_MAX_NOTE_BYTES`, 5 MB por padrão; arquivo com byte NUL não é indexado |
@@ -512,7 +512,7 @@ Cinco coisas que este servidor não faz, todas escolhidas e não esquecidas:
 
 `docs/followups.md` guarda o histórico de cada defeito achado até aqui: a medição que o
 caracterizava, a correção aplicada e o teste que a fixa, mais o raciocínio inteiro por trás de cada
-aceitação acima. O item 33 lista o que o último review achou e ficou aberto.
+aceitação acima.
 
 ## Desenvolvimento
 

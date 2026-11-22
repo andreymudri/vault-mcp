@@ -9,8 +9,7 @@ o teste que impede a volta — mais a seção final, **Aceito deliberadamente**,
 
 A suíte está verde, o `tsc` está limpo sobre `src/` E sobre `test/`, o lint não tem aviso e o binário
 responde o handshake MCP com as onze tools. (A contagem de testes saiu desta frase de propósito: ela
-envelheceu três vezes em quatro lugares.) Os itens 20 em diante vieram da auditoria de 2026-11-22; o 33 lista o que o review final achou e
-ficou ABERTO.
+envelheceu três vezes em quatro lugares.) Os itens 20 em diante vieram da auditoria de 2026-11-22.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
 pelo motivo certo, e só então a correção. Onde o defeito era uma LACUNA DE COBERTURA e não um bug de
@@ -500,8 +499,9 @@ postings viraram arrays tipados: 186 MB, start frio de 4,2 s para 3,2 s. `script
 
 ## 29. Produto: só servia ao vault do autor — CORRIGIDO
 
-Nomes de parâmetro em inglês no schema, com os antigos aceitos no handler e num decorador do
-transporte (o SDK valida antes do handler); pastas e seções configuráveis em `.vault-mcp.json`;
+Nomes de parâmetro em inglês no schema, com os antigos aceitos no handler (que é quem valida: o
+servidor responde o `tools/call` ele mesmo, ver o item 33); pastas e seções configuráveis em
+`.vault-mcp.json`;
 avisos e motivos traduzidos por frase com chave (`src/i18n/phrases.ts`). `test/layout.test.ts`,
 `test/i18n.test.ts`, `test/tools.test.ts`.
 
@@ -524,8 +524,8 @@ Dependabot, relato privado de vulnerabilidade, apagar branch depois do merge, e 
 branch `feat/research-preview`, já contido em `main`, foi apagado do remoto. Cada uma das sete
 tags antigas (0.1.0 a 0.5.0) ganhou um GitHub Release com a seção dela no `CHANGELOG.md`.
 
-**Fica com o dono:** cadastrar o trusted publisher no npmjs.com (repositório + `release.yml`),
-publicar a 0.6.0, publicar no MCP Registry e, se quiser, assinar commits.
+**Fica com o dono:** cadastrar o trusted publisher no npm, uma vez (item 34), e, se quiser,
+assinar commits. Publicar no npm, criar a tag e publicar no MCP Registry deixaram de ser passos.
 
 ## 32. Review final de 2026-11-22: quatro achados `high` — CORRIGIDOS
 
@@ -552,51 +552,74 @@ Um review só, no fim, sobre o diff inteiro, com duas lentes (correção e teste
   domínio") podia voltar com a suíte verde. O teste novo passa a tag que a nota TEM; com a regra
   antiga de volta ele falha com `expected 'appended' to be 'created'`.
 
-## 33. Review final de 2026-11-22: achados `medium` e `low` — ABERTOS
+## 33. Review final de 2026-11-22: achados `medium` e `low` — CORRIGIDOS
 
-Reproduzidos pelos revisores e NÃO corrigidos: a regra da casa é corrigir só o `high` do review
-final. Ficam aqui para não serem redescobertos.
+Os oito `medium` e os sete `low` que o review deixou, cada um reproduzido por um teste que falhava
+antes da correção. Ficaram abertos por algumas horas, pela regra de corrigir só o `high` do review
+final; foram fechados a pedido.
 
 Correção:
 
-- **(medium) O caminho do lock depende de o `git` responder.** `lockPathFor` pergunta ao binário
-  (`rev-parse --absolute-git-dir`) e, se ele falha, cai em `<vault>/.vault-mcp.lock`. Dois
-  servidores no mesmo vault, um com `git` no PATH e outro sem, travam arquivos diferentes: com 12
-  processos, metade sem `git`, ficaram 9 e 10 de 12 edições em duas de quatro rodadas. Derivar de
-  `.git` pelo sistema de arquivos, como o plano previa, fecha isso.
-- **(medium) O lock nasce com a idade da espera.** `acquire()` carimba `at` antes de esperar, e a
-  idade do lock é medida por esse `at`. Com os padrões a margem real cai de 120 s para 90 s; com
-  `VAULT_LOCK_TIMEOUT_MS` acima de 120000, quem esperou mais de 2 min cria um lock já vencido.
-  Carimbar na hora em que o lock é obtido fecha isso.
-- **(medium) O teto do diff vale só para o texto.** O `structuredContent` do `vault_learn` leva o
-  `diff` inteiro e, na prévia, `before`/`after` de cada arquivo: 581 mil caracteres para um
-  insight de 187 mil. Limitado só pelo teto de entrada.
-- **(low) `stderr` fechado derruba o servidor.** O `EPIPE` chega como evento assíncrono, cai no
-  `uncaughtException` novo e o processo sai com 1 na chamada seguinte.
-- **(low) O teto de 220 bytes do nome vale também para a ORIGEM do `vault_move` e para o
-  `vault_delete`.** Uma nota que já existe com nome de 221 a 255 bytes não pode ser renomeada nem
-  apagada pelo servidor.
-- **(low) `.git` sem permissão de escrita recusa toda escrita** com `lock.failed`. A 0.5.0
-  gravava a nota e avisava do commit.
-- **(low) `input.invalid` e a mensagem traduzida de argumento desconhecido não chegam pelo
-  protocolo.** O SDK valida antes do handler, com o mesmo schema estrito, e responde com o texto
-  dele, em inglês e sem código. A recusa acontece; o que se perde é a tradução e o código.
+- **O caminho do lock dependia de o `git` responder.** `lockPathFor` perguntava ao binário, e um
+  servidor sem `git` no PATH travava outro arquivo: com 12 processos, metade sem `git`, 11 de 12
+  edições em duas de três rodadas. Agora o caminho vem do DISCO — o `.git` mais próximo, seguido
+  quando é arquivo (`gitdir:`), a partir do `realpath` do vault. `test/git.test.ts`
+  ("is derived from the filesystem alone") e `test/cross-process.test.ts`.
+- **O lock nascia com a idade da espera.** `acquire()` carimbava `at` antes de esperar. Carimba a
+  cada tentativa de criação. `test/vault-lock.test.ts`.
+- **`.git` sem permissão de escrita recusava toda escrita.** O lock vai para a raiz do vault
+  quando o diretório do git não pode ser escrito, e um diário de commits pendentes que não pode
+  ser gravado deixou de derrubar `commitFiles` (que promete nunca lançar): a nota é gravada e o
+  commit vira aviso, como na 0.5.0. Não coberto: dois servidores rodando como usuários DIFERENTES,
+  com direitos diferentes sobre o `.git`.
+- **O teto do diff valia só para o texto.** No `structuredContent` do `vault_learn`, `diff` e, na
+  prévia, `before`/`after`/`diff` de cada arquivo são cortados em 20.000 caracteres, com
+  `diffTruncated` e `files[].truncated` dizendo que foram.
+- **`input.invalid` e a recusa traduzida não chegavam pelo protocolo.** O front end `McpServer` do
+  SDK validava antes do handler e respondia sozinho, em inglês e sem código. O servidor passou a
+  responder `tools/list` e `tools/call` ele mesmo, sobre o `Server` do SDK: toda chamada chega
+  ao handler, que renomeia os argumentos antigos, valida e recusa num lugar só — e o decorador de
+  transporte que existia só para os nomes antigos saiu. O `tools/list` publica os mesmos schemas
+  (conferido contra o de antes, nas duas línguas); a única diferença anunciada é a capability, que
+  deixou de prometer `listChanged`. Tool desconhecida vira recusa com `tool.unknown`, e uma
+  resposta de sucesso fora do `outputSchema` vira `output.invalid` e vai para o log.
+- **`stderr` fechado derrubava o servidor.** O `EPIPE` chega como evento `error` do stream; agora
+  há quem o ouça, e o log simplesmente para de ser escrito.
+- **O teto de 220 bytes do nome valia para a origem do `vault_move` e para o `vault_delete`.**
+  Vale para o que o servidor CRIA; uma nota que já existe só precisa caber no sistema de arquivos.
 
-Testes (cada um é uma mutação que a suíte não vê):
+Testes: cada lacuna ganhou um teste, e cada teste foi conferido pela mutação que o revisor
+descreveu — dezoito mutações, todas vermelhas. Para testar SIGINT, a saída forçada e o erro fatal
+sem mandar sinal ao processo da suíte, `installProcessHandlers` passou a receber o que usa de
+`process`.
 
-- **(medium)** o teste do teto da resposta do `vault_learn` mede só o texto;
-- **(medium)** o teste de redação dos parâmetros do erro usa `lock.timeout`, que nunca carrega
-  caminho, então não consegue falhar;
-- **(medium)** o `invalidate()` na SAÍDA do lock, que é o que vale para `vault_learn`,
-  `vault_move` e `vault_delete`, não tem teste;
-- **(medium)** o caminho da variável de ambiente até o componente não tem teste para
-  `VAULT_MAX_NOTE_BYTES`, `VAULT_SCAN_TTL_MS` e `VAULT_LOCK_TIMEOUT_MS`;
-- **(medium)** do desligamento só o SIGTERM feliz tem teste: SIGINT, a saída forçada depois dos
-  5 s, os handlers de erro fatal e o `releaseLocks()` não têm;
-- **(low)** "o push fica fora do lock" e o aviso de lock perdido na resposta não têm teste;
-- **(low)** o teto de 1.000 do `limit` do `vault_list`, o de `old_text`/`new_text` e o de
-  `context` não têm teste;
-- **(low)** o reaproveitamento do scan só é testado no scanner, não pelas tools.
+## 34. Release automático — FEITO em 2026-11-22
+
+Publicar era uma sequência feita à mão — `npm publish` num terminal de verdade por causa do
+passkey, `git tag`, `gh release create`, `mcp-publisher` — e o que é mecânico e feito à mão é o
+que se esquece: sete tags sem Release, e o servidor nunca chegou ao MCP Registry.
+
+`.github/workflows/release.yml` roda em todo push para `main`. Se a versão do `package.json` ainda
+não tem tag, ele:
+
+1. **confere** (`scripts/release-check.mjs`): a versão é a mesma em `package.json`,
+   `package-lock.json` e nos dois lugares do `server.json`, o nome do registry é o `mcpName`, e o
+   CHANGELOG tem a seção;
+2. **verifica e empacota**, num job sem identidade nenhuma: lint, auditoria, suíte, build, smoke,
+   `npm pack`, e o smoke de novo sobre o tarball instalado num prefixo vazio;
+3. **publica** o tarball, num job que não faz checkout nem instala dependência: npm por OIDC
+   (trusted publishing, com proveniência), depois a tag e o GitHub Release no commit verificado,
+   depois o MCP Registry com o `mcp-publisher` numa versão fixa e verificada com cosign.
+
+Cada passo confere antes se já foi feito, então um release que parou no meio é repetido com
+"Re-run failed jobs".
+
+**Fica com o dono, uma vez:** cadastrar este workflow como trusted publisher do pacote. O comando
+está no topo do `release.yml`. O npm descarta um cadastro que não publicar nada em dois dias.
+
+**Não testável daqui:** o workflow em si. O que tem teste é o `release-check`, a forma do workflow
+(`test/package.test.ts`: quem tem `id-token`, a ordem dos passos, as versões fixadas) e, à mão em
+2026-11-22, cada trecho de shell que não publica nada.
 
 ---
 

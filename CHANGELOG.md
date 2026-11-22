@@ -53,6 +53,9 @@ The audit release: every finding of the 2026-11-22 review, measured before it wa
   which broke `vault_learn`'s own output schema: a client that validates structured content (the
   SDK's does, error or not) got a protocol error instead of the refusal. The code is now in `_meta`
   with every other, and an error never carries `structuredContent`.
+- **A refusal for a bad argument is this server's own**: in the caller's language, naming the
+  argument, with `input.invalid` beside it. The SDK used to answer first, in English. The server
+  no longer advertises `tools.listChanged`; its tool list never changes while it runs.
 - **An argument a tool does not declare is refused**, by name. It used to be dropped, so a mistyped
   filter answered with the whole vault.
 - **`vault_learn` only appends inside the domain the learning was filed under.** A shared tag used
@@ -62,8 +65,9 @@ The audit release: every finding of the 2026-11-22 review, measured before it wa
   the vault this was built for, 36% of all chunks were empty template sections and they took 23% of
   the result slots. Ties are broken by line number, not by the chunk id as a string.
 - **Answers and inputs are bounded.** `vault_list` answers 200 notes by default (1,000 at most); a
-  diff relayed by a write tool stops at 20,000 characters; `content` is limited to 1,000,000
-  characters, `insight` to 200,000 and `context` to 20,000.
+  diff relayed by a write tool stops at 20,000 characters, in the text and in `vault_learn`'s
+  structured result alike; `content` is limited to 1,000,000 characters, `insight` to 200,000 and
+  `context` to 20,000.
 - **The scanner refuses what is not a note.** A file above 5 MB or with a NUL byte is not indexed,
   and it, like a skipped symlink, is reported in the diagnostics.
 - **A scan of a large vault is reused** for ten times what it cost, two seconds at most; a vault
@@ -89,7 +93,10 @@ The audit release: every finding of the 2026-11-22 review, measured before it wa
 
 - `npm audit` on the runtime dependencies went from 14 advisories (1 critical, 7 high) to none.
 - CI runs with read-only permissions and actions pinned by commit, and gates on the audit, the lint
-  and a coverage floor. Releases are published from a tag by a workflow, with npm provenance.
+  and a coverage floor.
+- Releases are automatic: a version merged into `main` with no tag yet is published to npm through
+  OIDC with provenance, then tagged and released on GitHub, then published to the MCP Registry.
+  The job that holds the publishing identity installs no dependency and runs no test.
 - `SECURITY.md` states the threat model and how to report a vulnerability.
 
 ## [0.5.0] - 2026-10-05

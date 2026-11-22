@@ -49,8 +49,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 - Test: `test/git.test.ts`
 - Test: `test/cross-process.test.ts`
 
-- [ ] **Step 1:** Testes: `lockPathFor` responde `<vault>/.git/vault-mcp.lock` com o PATH sem `git`; segue `.git` arquivo (`gitdir:`); sobe até o repositório quando o vault é subpasta; sem repositório, o dotfile; com `.git` sem permissão de escrita, o dotfile. Processos reais, metade sem `git`: todas as edições ficam.
-- [ ] **Step 2:** `lockPathFor` anda o sistema de arquivos a partir do `realpath` do vault, sem chamar o binário.
+- [x] **Step 1:** Testes: `lockPathFor` responde `<vault>/.git/vault-mcp.lock` com o PATH sem `git`; segue `.git` arquivo (`gitdir:`); sobe até o repositório quando o vault é subpasta; sem repositório, o dotfile; com `.git` sem permissão de escrita, o dotfile. Processos reais, metade sem `git`: todas as edições ficam.
+- [x] **Step 2:** `lockPathFor` anda o sistema de arquivos a partir do `realpath` do vault, sem chamar o binário.
 
 ### Task 2: carimbo do lock na obtenção
 
@@ -58,8 +58,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 - Modify: `src/write/vault-lock.ts`
 - Test: `test/vault-lock.test.ts`
 
-- [ ] **Step 1:** Teste: quem esperou por um lock o obtém com `at` posterior à soltura do anterior.
-- [ ] **Step 2:** `acquire()` monta o conteúdo do lock a cada tentativa de criação.
+- [x] **Step 1:** Teste: quem esperou por um lock o obtém com `at` posterior à soltura do anterior.
+- [x] **Step 2:** `acquire()` monta o conteúdo do lock a cada tentativa de criação.
 
 ### Task 3: o servidor responde `tools/list` e `tools/call`
 
@@ -69,8 +69,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 
 **Depends:** T2
 
-- [ ] **Step 1:** Fotografar o `tools/list` atual. Testes: argumento desconhecido e conflito de alias chegam ao cliente real como recusa traduzida com `input.invalid` no `_meta`; nome antigo aceito; tool não publicada recusada; saída fora do schema vira erro.
-- [ ] **Step 2:** `Server` no lugar de `McpServer`, com os dois handlers; sai o decorador de transporte. O `tools/list` novo é igual à fotografia.
+- [x] **Step 1:** Fotografar o `tools/list` atual. Testes: argumento desconhecido e conflito de alias chegam ao cliente real como recusa traduzida com `input.invalid` no `_meta`; nome antigo aceito; tool não publicada recusada; saída fora do schema vira erro.
+- [x] **Step 2:** `Server` no lugar de `McpServer`, com os dois handlers; sai o decorador de transporte. O `tools/list` novo é igual à fotografia.
 
 ### Task 4: teto no resultado estruturado do `vault_learn`
 
@@ -81,8 +81,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 
 **Depends:** T3
 
-- [ ] **Step 1:** Teste: com um insight de 187 mil caracteres, o `structuredContent` inteiro fica abaixo de um teto, na escrita e na prévia, e diz o que foi cortado.
-- [ ] **Step 2:** `diff`, `before` e `after` cortados no mesmo teto do texto, com marca no schema de saída.
+- [x] **Step 1:** Teste: com um insight de 187 mil caracteres, o `structuredContent` inteiro fica abaixo de um teto, na escrita e na prévia, e diz o que foi cortado.
+- [x] **Step 2:** `diff`, `before` e `after` cortados no mesmo teto do texto, com marca no schema de saída.
 
 ### Task 5: stderr fechado e teto de nome só para o que é criado
 
@@ -95,8 +95,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 
 **Depends:** T3
 
-- [ ] **Step 1:** Testes: processo real com o stderr fechado responde a segunda chamada; nota de 229 bytes de nome é movida para nome curto e apagada.
-- [ ] **Step 2:** Listener de erro no stderr; `existing: true` no guard de caminho para a origem do move e para o delete.
+- [x] **Step 1:** Testes: processo real com o stderr fechado responde a segunda chamada; nota de 229 bytes de nome é movida para nome curto e apagada.
+- [x] **Step 2:** Listener de erro no stderr; `existing: true` no guard de caminho para a origem do move e para o delete.
 
 ### Task 6: as lacunas de teste do review
 
@@ -107,8 +107,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 
 **Depends:** T4, T5
 
-- [ ] **Step 1:** Um teste por lacuna: redação dos parâmetros do erro; `invalidate` na saída do lock; as três variáveis de limite até o componente; SIGINT, saída forçada, erro fatal e `releaseLocks`; push fora do lock e aviso de lock perdido; tetos de `limit`, `old_text`/`new_text` e `context`; reaproveitamento do scan pelas tools.
-- [ ] **Step 2:** Cada teste conferido pela mutação que o revisor descreveu.
+- [x] **Step 1:** Um teste por lacuna: redação dos parâmetros do erro; `invalidate` na saída do lock; as três variáveis de limite até o componente; SIGINT, saída forçada, erro fatal e `releaseLocks`; push fora do lock e aviso de lock perdido; tetos de `limit`, `old_text`/`new_text` e `context`; reaproveitamento do scan pelas tools.
+- [x] **Step 2:** Cada teste conferido pela mutação que o revisor descreveu.
 
 ### Task 7: release automático
 
@@ -118,8 +118,8 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 - Modify: `CONTRIBUTING.md`
 - Test: `test/package.test.ts`
 
-- [ ] **Step 1:** `scripts/release-check.mjs`: versão igual em `package.json`, `package-lock.json` e `server.json`, `mcpName` igual ao nome do `server.json`, seção no CHANGELOG. Testado.
-- [ ] **Step 2:** `release.yml` em push para `main` e disparo manual: job que decide, job que verifica e empacota sem identidade de publicação, job que publica o tarball no npm por OIDC, cria tag e Release e publica no MCP Registry com `mcp-publisher` fixado e verificado.
+- [x] **Step 1:** `scripts/release-check.mjs`: versão igual em `package.json`, `package-lock.json` e `server.json`, `mcpName` igual ao nome do `server.json`, seção no CHANGELOG. Testado.
+- [x] **Step 2:** `release.yml` em push para `main` e disparo manual: job que decide, job que verifica e empacota sem identidade de publicação, job que publica o tarball no npm por OIDC, cria tag e Release e publica no MCP Registry com `mcp-publisher` fixado e verificado.
 
 ### Task 8: documentação, PR e CI
 
@@ -132,5 +132,5 @@ ninguém rodar comando; e o branch está num PR com o CI do GitHub verde.
 
 **Depends:** T1, T2, T3, T4, T5, T6, T7
 
-- [ ] **Step 1:** Item 33 fechado; limites e release nos documentos.
+- [x] **Step 1:** Item 33 fechado; limites e release nos documentos.
 - [ ] **Step 2:** Um review sobre o diff desta rodada, CI local, push, PR, `gh pr checks`.

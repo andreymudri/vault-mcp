@@ -38,7 +38,7 @@ to make the server read or write outside the vault, forge part of its own output
 | A tool argument or a note built to stall the single-threaded server | Queries, tokens, the suggestion search, frontmatter rendering, diffs, tool inputs and tool outputs are all bounded. Files above `VAULT_MAX_NOTE_BYTES` and binary files are not indexed. |
 | Shell injection through a path or a title | git is run with `execFile` and literal pathspecs, never through a shell. Every git invocation is time-bounded and cannot prompt. |
 | Two servers writing the same vault | A cross-process lock around every write, a retry on `index.lock`, and a journal of commits that failed. |
-| A dependency published by someone else | Releases are published from CI with npm provenance. Runtime dependencies are three, and `npm audit` on them gates CI. |
+| A dependency published by someone else | Runtime dependencies are three, and `npm audit` on them gates CI. Releases are published by a workflow, through OIDC and with npm provenance, from a job that installs no dependency and runs no test: the code of third parties runs in a job with no publishing identity. Actions are pinned by commit, and the one binary the release downloads is pinned and signature-checked. |
 
 ## What it does not defend
 
