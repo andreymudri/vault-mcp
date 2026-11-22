@@ -192,8 +192,14 @@ export interface DuplicateDecision {
 
 /**
  * Conjunctive rule: the top hit must both stand out from the runner-up in another
- * note, and share a tag or the domain. Raw BM25 scores are not comparable across
- * queries, so the score test is relative, never absolute.
+ * note, and live in the domain the learning was filed under. Raw BM25 scores are not
+ * comparable across queries, so the score test is relative, never absolute.
+ *
+ * The second half used to read "share a tag OR the domain", and the tag arm is what filed a
+ * `trading` learning into a note under `02-wiki/rustot/` (recorded in the vault on 2026-11-08):
+ * both carried one generic tag, and a tag is shared by notes that have nothing else in common.
+ * The domain is the one thing the caller stated outright about where the learning belongs, so a
+ * look-alike elsewhere is reported in the reason — for the caller to link — and never appended to.
  *
  * The runner-up is the best chunk of ANOTHER note, never the next chunk of the same one: a
  * strong hit routinely fills the whole result window with its own chunks, and comparing a note
@@ -207,12 +213,7 @@ export interface DuplicateDecision {
  * matched BM25 directly keeps `viaGraph: false` even when a neighbour's damped score raises its
  * number.
  */
-export function decideDuplicate(
-  results: ScoredChunk[],
-  tags: string[],
-  dominio: string,
-  noteTags: (path: string) => string[],
-): DuplicateDecision {
+export function decideDuplicate(results: ScoredChunk[], dominio: string): DuplicateDecision {
   const top = results[0];
   if (!top) return { isDuplicate: false, reason: 'nenhum match' };
 
@@ -245,10 +246,9 @@ export function decideDuplicate(
     return { isDuplicate: false, reason: `topo não se destaca (razão ${ratio.toFixed(2)})` };
   }
 
-  const shared = noteTags(top.chunk.path).some((t) => tags.includes(t));
-  const sameDomain = top.chunk.path.startsWith(`${WIKI_PREFIX}${dominio}/`);
-  if (!shared && !sameDomain) {
-    return { isDuplicate: false, reason: 'sem overlap de tag nem de domínio' };
+  // The trailing slash makes this a whole path segment: `patternsX/` is not `patterns/`.
+  if (!top.chunk.path.startsWith(`${WIKI_PREFIX}${dominio}/`)) {
+    return { isDuplicate: false, reason: `nota parecida em outro domínio: ${top.chunk.path}` };
   }
 
   return { isDuplicate: true, targetPath: top.chunk.path, reason: `duplicata de ${top.chunk.path}` };
@@ -379,8 +379,7 @@ const MAX_BLANK_BYTES = 1024 * 1024;
  * two modules in this directory must not disagree about what blank means: treated as a note, a
  * placeholder gets APPENDED to by `editNote`, which runs neither `ensureFrontmatter` nor
  * `applyTemplate` — the result carries no `tipo: wiki`, no tags, no `# H1` and no skeleton, so the
- * next scan reads it as an untyped note, `vault_list({tipo:'wiki'})` never returns it, and the
- * tag-overlap arm of `decideDuplicate` can never fire for it again.
+ * next scan reads it as an untyped note and `vault_list({tipo:'wiki'})` never returns it.
  */
 type PathState = 'free' | 'blank' | 'note' | 'foreign';
 
@@ -515,14 +514,6 @@ async function skeletonContent(
 }
 
 /** Tags of a note as the index knows them, read off the result set rather than re-reading disk. */
-function tagsByPath(results: ScoredChunk[]): (path: string) => string[] {
-  const byPath = new Map<string, string[]>();
-  for (const scored of results) {
-    if (!byPath.has(scored.chunk.path)) byPath.set(scored.chunk.path, scored.chunk.tags);
-  }
-  return (path) => byPath.get(path) ?? [];
-}
-
 /**
  * A link name as a wiki-link target: no brackets, no `.md`, no line of its own.
  *
@@ -801,7 +792,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const tags = (opts.tags ?? []).filter((tag): tag is string => typeof tag === 'string');
   const { query, truncated } = duplicateQuery(titulo, opts.insight);
   const { results } = opts.retriever.search({ query });
-  const decision = decideDuplicate(results, tags, opts.dominio, tagsByPath(results));
+  const decision = decideDuplicate(results, opts.dominio);
 
   const date = formatLocal(opts.now, 'YYYY-MM-DD');
   let newRelPath = `${WIKI_PREFIX}${opts.dominio}/${noteSlug}.md`;
