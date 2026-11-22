@@ -18,7 +18,7 @@ import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
 import { createLogger, type LogEntry } from '../src/server/logger.js';
-import { NO_HOSTILE_FILENAMES } from './platform.js';
+import { NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
 import { messagesFor } from '../src/i18n/messages.js';
 import {
   MAX_DIFF_CHARS,
@@ -3457,5 +3457,78 @@ describe('log do servidor', () => {
 
     await client.close();
     await server.close();
+  });
+});
+
+describe('desligamento', () => {
+  /**
+   * Um servidor de verdade, com o stdin aberto, que o teste pode sinalizar no meio de uma escrita.
+   * `runServer` não serve: ele fecha o stdin e espera o fim, e aqui o fim é o que se provoca.
+   */
+  async function serverInFlight(vaultRoot: string) {
+    const child = spawn(process.execPath, [await buildServer()], {
+      env: { ...process.env, VAULT_PATH: vaultRoot, VAULT_LANG: undefined, VAULT_AUTO_PUSH: undefined },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (stdout += chunk));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+      child.on('exit', (code, signal) => resolve({ code, signal })),
+    );
+    const send = (message: unknown): void => void child.stdin.write(`${JSON.stringify(message)}\n`);
+    return { child, send, exited, stdout: () => stdout };
+  }
+
+  it.skipIf(NO_SHELL_HOOKS)(
+    'SIGTERM no meio de uma escrita deixa a escrita terminar, solta o lock e sai com 0',
+    async () => {
+      const vaultRoot = await makeVault(true);
+      // Um commit que demora: é dentro dele que o sinal chega.
+      const hook = path.join(vaultRoot, '.git', 'hooks', 'pre-commit');
+      await fs.writeFile(hook, '#!/bin/sh\nsleep 2\n', 'utf8');
+      await fs.chmod(hook, 0o755);
+      const lockPath = await lockPathFor(vaultRoot);
+      const server = await serverInFlight(vaultRoot);
+
+      server.send(INITIALIZE);
+      server.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+      server.send({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'vault_write_note', arguments: { path: '02-wiki/docker/no-meio.md', content: '# No meio\n' } },
+      });
+
+      // A nota no disco E o lock tomado: a escrita está entre o `rename` e o fim do commit.
+      await vi.waitFor(
+        async () => {
+          await fs.access(path.join(vaultRoot, '02-wiki/docker/no-meio.md'));
+          await fs.access(lockPath);
+        },
+        { timeout: 10_000, interval: 20 },
+      );
+      const sinalizado = Date.now();
+      server.child.kill('SIGTERM');
+      const fim = await server.exited;
+
+      expect(fim).toEqual({ code: 0, signal: null });
+      // Esperou o commit, que o hook segura por dois segundos, em vez de morrer na hora.
+      expect(Date.now() - sinalizado).toBeGreaterThan(500);
+      expect(await git(vaultRoot, ['log', '--format=%s', '-1'])).toContain('No Meio');
+      expect(await git(vaultRoot, ['status', '--porcelain'])).toBe('');
+      await expect(fs.access(lockPath)).rejects.toThrow();
+      // E quem chamou recebeu a resposta da escrita antes de o processo sair.
+      const resposta = jsonLines(server.stdout()).find((message) => message['id'] === 2);
+      expect(JSON.stringify(resposta)).toContain('Commit: yes');
+    },
+    30_000,
+  );
+
+  it('fechar o stdin sem nada em andamento encerra o processo, sem lock para trás', async () => {
+    const vaultRoot = await makeVault(true);
+    const { code } = await runServer(await buildServer(), { VAULT_PATH: vaultRoot }, [INITIALIZE]);
+    expect(code).toBe(0);
+    await expect(fs.access(await lockPathFor(vaultRoot))).rejects.toThrow();
   });
 });

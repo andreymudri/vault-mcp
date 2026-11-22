@@ -15,7 +15,7 @@ import { messagesFor, type Messages } from '../i18n/messages.js';
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
 import { autoPushEnabled } from '../write/git.js';
-import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
+import { createToolset, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
 
 /**
  * The process a user starts: `npx @andreymudri/vault-mcp`, or `node
@@ -157,11 +157,29 @@ export type ServerOptions = Partial<ServerConfig> & { logger?: Logger };
 /** The MCP name of each of this server's log levels. */
 const MCP_LEVEL = { error: 'error', warn: 'warning', info: 'info', debug: 'debug' } as const;
 
+/** The server, plus the two things its process needs in order to stop without leaving a mess. */
+export interface VaultApp {
+  server: McpServer;
+  /** Resolves when no write is in flight. */
+  idle(): Promise<void>;
+  /** Removes any vault lock this process still holds. Synchronous: it runs on the way out. */
+  releaseLocks(): void;
+}
+
+/** The server alone, for a caller that only speaks the protocol to it. */
 export function createVaultServer(
   vaultRoot: string,
   lang: Lang = 'en',
   config: ServerOptions = {},
 ): McpServer {
+  return createVaultApp(vaultRoot, lang, config).server;
+}
+
+export function createVaultApp(
+  vaultRoot: string,
+  lang: Lang = 'en',
+  config: ServerOptions = {},
+): VaultApp {
   const logger = config.logger ?? NULL_LOGGER;
   const scanner = new VaultScanner({
     vaultRoot,
@@ -189,7 +207,7 @@ export function createVaultServer(
   });
 
   const redact = makeRedactor(vaultRoot);
-  const tools = createTools({
+  const toolset = createToolset({
     retriever,
     scanner,
     vaultRoot,
@@ -198,7 +216,7 @@ export function createVaultServer(
     logger,
     ...(config.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: config.lockTimeoutMs }),
   });
-  for (const tool of tools) {
+  for (const tool of toolset.tools) {
     server.registerTool(
       tool.name,
       {
@@ -213,7 +231,58 @@ export function createVaultServer(
     );
   }
 
-  return server;
+  return { server, idle: toolset.idle, releaseLocks: toolset.releaseLocks };
+}
+
+/**
+ * How long a termination signal waits for a write in flight before the process leaves anyway.
+ *
+ * A write is a file rename followed by a commit, tens of milliseconds unless a hook is slow; five
+ * seconds covers a slow hook and stays under the ten most supervisors give before they stop asking.
+ */
+export const SHUTDOWN_GRACE_MS = 5_000;
+
+/**
+ * What the process does when it is told to stop, and when something escapes it.
+ *
+ * Without this a SIGTERM killed the server wherever it was. If that was between a note's `rename`
+ * and its commit, the note stayed on disk in no commit and the vault lock stayed behind for the
+ * next writer to wait on — and the client that had asked for the write got no answer. So a signal
+ * lets the write in flight finish, hands its answer to the transport, releases the lock and only
+ * then exits. A second signal is not caught: asked twice, the process just goes.
+ */
+function installProcessHandlers(app: VaultApp, logger: Logger): void {
+  const leave = (code: number): void => {
+    app.releaseLocks();
+    // stdout is the protocol channel: what was written to it gets out before the process does.
+    process.stdout.write('', () => process.exit(code));
+  };
+
+  const onSignal = (signal: NodeJS.Signals): void => {
+    logger.info('server.stop', { signal });
+    const grace = new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS).unref();
+    });
+    void Promise.race([app.idle().then(() => true), grace]).then((drained) => {
+      if (!drained) logger.warn('server.stopForced', { signal, graceMs: SHUTDOWN_GRACE_MS });
+      // One turn of the event loop first: the write that just finished still has to be rendered
+      // and handed to the transport, and all of that is already queued ahead of this.
+      setImmediate(() => leave(0));
+    });
+  };
+  process.once('SIGTERM', onSignal);
+  process.once('SIGINT', onSignal);
+
+  // Whatever the way out, a lock this process holds does not outlive it.
+  process.on('exit', () => app.releaseLocks());
+
+  const onFatal = (event: string) => (reason: unknown): void => {
+    logger.error(event, { error: reason instanceof Error ? reason.message : String(reason) });
+    app.releaseLocks();
+    process.exit(1);
+  };
+  process.on('uncaughtException', onFatal('server.uncaughtException'));
+  process.on('unhandledRejection', onFatal('server.unhandledRejection'));
 }
 
 /** Reads the environment, brings the server up on stdio, and never returns while it is connected. */
@@ -238,8 +307,9 @@ export async function main(): Promise<void> {
   // and the operator who set it believes otherwise.
   for (const warning of config.warnings) logger.warn('config.invalid', { ...warning });
 
-  const server = createVaultServer(vaultRoot, config.lang, { ...config, logger });
-  await server.connect(new StdioServerTransport());
+  const app = createVaultApp(vaultRoot, config.lang, { ...config, logger });
+  installProcessHandlers(app, logger);
+  await app.server.connect(new StdioServerTransport());
   logger.info('server.start', {
     version: VERSION,
     lang: config.lang,

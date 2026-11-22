@@ -1596,7 +1596,21 @@ const VAULT_STATUS_OUTPUT = z.object({
   lock: z.object({ pid: z.number(), host: z.string(), at: z.string() }).nullable(),
 });
 
+/** The tools, plus what a process that is shutting down needs to know about the writes behind them. */
+export interface Toolset {
+  tools: ToolDefinition[];
+  /** Resolves when no write is in flight — its commit and its push included. */
+  idle(): Promise<void>;
+  /** Removes, synchronously, any vault lock this process still holds. For the way out. */
+  releaseLocks(): void;
+}
+
+/** The tools alone. Everything that only needs to call them — every test, mostly — uses this. */
 export function createTools(deps: ToolDeps): ToolDefinition[] {
+  return createToolset(deps).tools;
+}
+
+export function createToolset(deps: ToolDeps): Toolset {
   const m = deps.messages;
   const writes = new WriteQueue();
   const redact = makeRedactor(deps.vaultRoot);
@@ -1645,7 +1659,23 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
    * vault for as long as it takes to time out. The task is therefore told `push: false`, and the
    * push happens here, after the lock is released.
    */
-  const lockedWrite = async <T extends Committed>(
+  /** Every write that has started and has not answered yet, for `idle`. */
+  const inFlight = new Set<Promise<void>>();
+  const lockedWrite = <T extends Committed>(
+    tool: string,
+    run: (git: DeferredPush) => Promise<T>,
+  ): Promise<{ value: T; warning?: string }> => {
+    const work = lockedWriteNow(tool, run);
+    const settled = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    inFlight.add(settled);
+    void settled.then(() => inFlight.delete(settled));
+    return work;
+  };
+
+  const lockedWriteNow = async <T extends Committed>(
     tool: string,
     run: (git: DeferredPush) => Promise<T>,
   ): Promise<{ value: T; warning?: string }> => {
@@ -2353,7 +2383,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     },
   );
 
-  return [
+  const tools = [
     vaultSearch,
     vaultGetNote,
     vaultList,
@@ -2366,4 +2396,16 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     vaultMove,
     vaultDelete,
   ];
+
+  return {
+    tools,
+    idle: async () => {
+      // A loop, because a write can start while the ones before it are being waited for.
+      while (inFlight.size > 0) await Promise.all([...inFlight]);
+    },
+    releaseLocks: () => {
+      deps.lock?.releaseSync();
+      for (const lock of locks.values()) lock.releaseSync();
+    },
+  };
 }
