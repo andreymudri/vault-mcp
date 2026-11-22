@@ -371,6 +371,18 @@ describe('os workflows do GitHub', () => {
     expect(publish).toMatch(/registry\.modelcontextprotocol\.io\/v0\.1\/servers\/.+\/versions\//);
   });
 
+  it('o tarball é passado ao npm por caminho absoluto', () => {
+    // `npm install --prefix <dir> release/pacote.tgz` procura o arquivo a partir do PREFIXO, não o
+    // acha, e trata `release/pacote.tgz` como o atalho `usuario/repo` do GitHub. Visto ao simular
+    // o job numa árvore limpa: "Refusing to fetch github:release/andreymudri-vault-mcp-0.6.0.tgz".
+    const text = code(release);
+    const npmWithTarball = text.split('\n').filter((line) => /npm (install|publish)\b/.test(line));
+    expect(npmWithTarball).toHaveLength(2);
+    expect(text).toContain('npm install --prefix "$prefix" --no-audit --no-fund "$PWD"/release/*.tgz');
+    expect(text).toContain('tarball="$PWD/$(ls release/*.tgz)"');
+    expect(text).toContain('npm publish "$tarball"');
+  });
+
   it('o mcp-publisher vem numa versão fixa e é verificado antes de rodar', () => {
     expect(release).toMatch(/MCP_PUBLISHER_VERSION: v\d+\.\d+\.\d+/);
     expect(code(release)).toContain('cosign verify-blob');

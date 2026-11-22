@@ -127,11 +127,15 @@ jobs:
       # O que o usuário vai receber é o tarball, não o diretório de trabalho: instalado num prefixo
       # vazio, o `bin` que saiu DE LÁ tem de subir e responder as tools. É o que pega um `files`
       # que deixou alguma coisa de fora.
+      #
+      # O caminho do tarball é ABSOLUTO de propósito. Com `--prefix` o npm resolve um caminho
+      # relativo a partir do prefixo, não o acha, e passa a lê-lo como o atalho `usuario/repo` do
+      # GitHub: `release/<pacote>.tgz` virava um repositório alheio a buscar.
       - name: Smoke do tarball instalado
         run: |
           set -euo pipefail
           prefix="$RUNNER_TEMP/installed"
-          npm install --prefix "$prefix" --no-audit --no-fund release/*.tgz
+          npm install --prefix "$prefix" --no-audit --no-fund "$PWD"/release/*.tgz
           node scripts/smoke.mjs "$prefix/node_modules/@andreymudri/vault-mcp/dist/server/index.js"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -177,7 +181,7 @@ jobs:
       - name: npm
         run: |
           set -euo pipefail
-          tarball="$(ls release/*.tgz)"
+          tarball="$PWD/$(ls release/*.tgz)"
           name="$(tar -xzOf "$tarball" package/package.json | node -p "JSON.parse(require('node:fs').readFileSync(0, 'utf8')).name")"
           if npm view "$name@$VERSION" version >/dev/null 2>&1; then
             echo "$name@$VERSION já está no npm; nada a publicar."
