@@ -1,4 +1,5 @@
 import { constants, promises as fs, readFileSync, unlinkSync } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 
@@ -230,7 +231,7 @@ export class VaultLock {
   }
 
   private async create(raw: string): Promise<boolean> {
-    let handle;
+    let handle: FileHandle;
     try {
       handle = await fs.open(
         this.lockPath,

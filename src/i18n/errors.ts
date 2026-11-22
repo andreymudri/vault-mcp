@@ -37,7 +37,7 @@ export function renderTemplate(
   params: Readonly<Record<string, string | number>> = {},
 ): string {
   return template.replace(/\{(\w+)\}/g, (whole, key: string) =>
-    Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : whole,
+    Object.hasOwn(params, key) ? String(params[key]) : whole,
   );
 }
 

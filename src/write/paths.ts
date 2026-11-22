@@ -1,5 +1,5 @@
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { promises as fs, type Stats } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { coded } from '../i18n/errors.js';
 
 export const DENIED_PREFIXES = ['99-archive', '_templates'] as const;

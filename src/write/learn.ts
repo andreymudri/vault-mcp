@@ -1,4 +1,5 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Stats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { previewRevision, type PlannedChange } from './preview.js';
 import { unifiedDiff } from './diff.js';
 import { StringDecoder } from 'node:string_decoder';
@@ -384,7 +385,7 @@ const MAX_BLANK_BYTES = 1024 * 1024;
 type PathState = 'free' | 'blank' | 'note' | 'foreign';
 
 async function pathState(absPath: string): Promise<PathState> {
-  let stat;
+  let stat: Stats;
   try {
     // `lstat`, never `stat`: a symlink has to be seen as itself, and a `stat` here would answer
     // for the target — including by hanging on a FIFO behind it.
@@ -402,7 +403,7 @@ async function pathState(absPath: string): Promise<PathState> {
   if (stat.size === 0) return 'blank';
   if (stat.size > MAX_BLANK_BYTES) return 'note';
 
-  let handle;
+  let handle: FileHandle;
   try {
     handle = await fs.open(absPath, 'r');
   } catch {
@@ -445,10 +446,10 @@ function isWritable(state: PathState): boolean {
 }
 
 /**
- * A human title from the file name, and the `_templates/wiki.md` skeleton with the body spliced
- * in above its first section — the same two rules `writeNote` applies when it CREATES a note
- * (`titleFromPath` and `spliceBody` in `src/write/writer.ts`), reproduced here for the one case
- * `writeNote` cannot cover.
+ * The complete note content for a path that already holds a blank placeholder: the
+ * `_templates/wiki.md` skeleton with the body spliced in above its first section — the rule
+ * `writeNote` applies when it CREATES a note (`spliceBody` in `src/write/writer.ts`), reproduced
+ * here for the one case `writeNote` cannot cover.
  *
  * That case is a BLANK placeholder standing on the new note's path: `writeNote` decides between
  * creating and replacing by whether it could READ the path, so it takes the replace branch and
@@ -470,18 +471,8 @@ function isWritable(state: PathState): boolean {
  * described here. The assertion names both calendar days the wall clock can be on, because a
  * single sample taken after the call fails on a correct note whenever the run crosses midnight.
  */
-function titleFromPath(relPath: string): string {
-  return basename(relPath, '.md')
-    .split(/[-_]+/)
-    .filter((word) => word !== '')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
-}
-
-/** The complete note content for a path that already holds a blank placeholder. */
 async function skeletonContent(
   opts: LearnOptions,
-  relPath: string,
   body: string,
   titulo: string,
   answered: readonly string[],
@@ -895,7 +886,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     for (let attempt = 0; ; attempt += 1) {
       const built =
         state === 'blank'
-          ? await skeletonContent(opts, newRelPath, body, titulo, answered)
+          ? await skeletonContent(opts, body, titulo, answered)
           : { content: body, warning: undefined };
       templateWarning = built.warning;
 

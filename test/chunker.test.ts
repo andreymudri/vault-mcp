@@ -211,6 +211,7 @@ describe('chunkNote', () => {
     expect(chunks[0]?.headingPath).toEqual(['Titulo']);
   });
 
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: the `${…}` is the format being named, not an interpolation that was forgotten
   it('id tem a forma ${path}#${lineStart}', () => {
     const { body, bodyStartLine } = loadFixture(BULLMQ_PATH);
     const chunks = chunkNote(BULLMQ_PATH, body, 'wiki', ['nestjs', 'bullmq', 'filas'], bodyStartLine);

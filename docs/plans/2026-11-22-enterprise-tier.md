@@ -351,14 +351,14 @@ consegue usar o servidor com nomes de parâmetro em inglês.
 ### Task 24: lint e cobertura
 
 **Files:**
-- Create: `eslint.config.js`
+- Create: `biome.jsonc`
 - Modify: `package.json`
 - Modify: `package-lock.json`
 - Modify: `vitest.config.ts`
 
 **Depends:** T10
 
-- [ ] **Step 1:** ESLint flat com typescript-eslint `recommended`; `npm run lint`; corrigir o que aparecer sem mudar comportamento.
+- [ ] **Step 1:** Biome (`lint`, formatter desligado); `npm run lint`; corrigir o que aparecer sem mudar comportamento. Era ESLint com typescript-eslint no plano: o typescript-eslint 8.73 exige `typescript <6.1` e este projeto usa a 7.
 - [ ] **Step 2:** `@vitest/coverage-v8`, `npm run coverage`, piso no valor medido menos um ponto.
 
 ### Task 25: correções menores

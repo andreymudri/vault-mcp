@@ -136,7 +136,7 @@ diagnósticos do scanner, modo somente-leitura. É a superfície de operação q
 
 ## 7. Higiene
 
-- ESLint com typescript-eslint; Prettier só se o código já estiver no formato dele.
+- Biome como linter (o typescript-eslint não aceita TypeScript 7); formatter desligado, para não reescrever a árvore inteira num diff só.
 - Cobertura com piso no valor medido.
 - Teste de corrida entre processos, de teto de tamanho e de contagem de `stat` no scan.
 - Link NFC contra arquivo NFD resolve; nome de arquivo longo demais vira erro com código.

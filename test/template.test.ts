@@ -731,7 +731,7 @@ describe('ensureFrontmatter — chaves que o YAML resolveria como não-string', 
     it(`preserva a identidade da chave \`${key}\``, () => {
       const out = ensureFrontmatter('corpo\n', { tipo: 'wiki', [key]: 'v' });
       const data = matter(out, {}).data as Record<string, unknown>;
-      expect(Object.prototype.hasOwnProperty.call(data, key), key).toBe(true);
+      expect(Object.hasOwn(data, key), key).toBe(true);
       expect(data[key], key).toBe('v');
       expect(ensureFrontmatter(out, { tipo: 'wiki', [key]: 'v' }), key).toBe(out);
     });
@@ -840,7 +840,7 @@ describe('ensureFrontmatter — grafias exóticas de chave nunca duplicam', () =
       // O invariante que importa: o bloco continua parseável, SEMPRE.
       const depois = matter(out, {}).data as Record<string, unknown>;
       expect(depois.criado).toBeInstanceOf(Date);
-      expect(Object.prototype.hasOwnProperty.call(depois, 'tipo')).toBe(true);
+      expect(Object.hasOwn(depois, 'tipo')).toBe(true);
 
       if (preenche) expect(depois.tipo).toBe('wiki');
       // Recusar é resposta legítima: devolve o conteúdo intacto.

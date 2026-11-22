@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { LinkGraph } from '../graph/graph.js';
 import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
-import { messagesFor, type Messages } from '../i18n/messages.js';
+import type { Messages } from '../i18n/messages.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import { RAW_PREFIX, hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';

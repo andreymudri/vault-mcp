@@ -664,8 +664,12 @@ async function applyTarget(
     const after = target.transform(before, hasContent);
     if (after === before) return;
 
-    if (opts.preview !== true) await atomicWrite(absPath, after);
-    else (result.changes ??= []).push({ path: target.relPath, before, after, diff: unifiedDiff(before, after, target.relPath) });
+    if (opts.preview !== true) {
+      await atomicWrite(absPath, after);
+    } else {
+      result.changes ??= [];
+      result.changes.push({ path: target.relPath, before, after, diff: unifiedDiff(before, after, target.relPath) });
+    }
     result.written.push(absPath);
     result.diffs.push(unifiedDiff(before, after, target.relPath));
   } catch (err) {

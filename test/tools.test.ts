@@ -2726,11 +2726,12 @@ describe('binário compilado (dist/server/index.js)', () => {
     const respostas = jsonLines(stdout);
     expect(respostas).toHaveLength(3);
     const lista = respostas.find((resposta) => resposta['id'] === 2);
-    const tools = (lista?.['result'] as { tools: Array<{ name: string }> }).tools;
+    const tools = (lista?.['result'] as { tools: Array<{ name: string }> } | undefined)?.tools ?? [];
     expect(tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
 
     const chamada = respostas.find((resposta) => resposta['id'] === 3);
-    const conteudo = (chamada?.['result'] as { content: Array<{ text: string }> }).content;
+    const conteudo =
+      (chamada?.['result'] as { content: Array<{ text: string }> } | undefined)?.content ?? [];
     expect(headers(conteudo.map((parte) => parte.text).join('\n')).length).toBeGreaterThan(0);
 
     // Nada de diagnóstico no canal do protocolo, e nada de ruído no stderr no caminho feliz.

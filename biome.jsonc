@@ -1,0 +1,31 @@
+{
+	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+	"files": {
+		"includes": ["**", "!test/fixtures", "!dist", "!coverage"]
+	},
+	// Lint only. The formatter is off on purpose: this tree was never run through one, and turning
+	// it on would rewrite every file in a single diff that says nothing.
+	"formatter": { "enabled": false },
+	"assist": { "enabled": false },
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"suspicious": {
+				// Matching control characters is this server's job, not an accident: `INVISIBLE_CHARS` and
+				// the sanitisers exist to find ESC, the C0/C1 range and the bidi controls in note text.
+				"noControlCharactersInRegex": "off"
+			},
+			"style": {
+				// `noUncheckedIndexedAccess` is on, so an index the code has just bounds-checked still
+				// types as possibly undefined. The `!` at those sites is the statement that it was checked.
+				"noNonNullAssertion": "off",
+				"useTemplate": "off"
+			},
+			"complexity": {
+				// `env['VAULT_PATH']` is written with brackets wherever the object has an index signature.
+				"useLiteralKeys": "off"
+			}
+		}
+	}
+}
