@@ -11,6 +11,7 @@ import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import { RAW_PREFIX, hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
 import type { VaultScanner } from '../vault/scanner.js';
+import type { Logger } from './logger.js';
 import { autoPushEnabled, lockPathFor, pushIfEnabled, repoState } from '../write/git.js';
 import { LearnError, learn } from '../write/learn.js';
 import { INVISIBLE_CHARS } from '../write/paths.js';
@@ -134,6 +135,8 @@ export interface ToolDeps {
    * knows it is `index.ts`, which imports this one.
    */
   version?: string;
+  /** Where a write that did not go as asked is recorded. Absent in tests that do not look. */
+  logger?: Logger;
 }
 
 /**
@@ -308,6 +311,7 @@ interface DeferredPush {
 interface Committed {
   committed: boolean;
   pushed?: boolean;
+  pending?: boolean;
   recovered?: number;
   dropped?: number;
 }
@@ -1642,6 +1646,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
    * push happens here, after the lock is released.
    */
   const lockedWrite = async <T extends Committed>(
+    tool: string,
     run: (git: DeferredPush) => Promise<T>,
   ): Promise<{ value: T; warning?: string }> => {
     const { value: held, warning: queueWarning } = await writes.runExclusive(async () =>
@@ -1655,6 +1660,17 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       const push = await pushInTurn();
       if (push.pushed !== undefined) value = { ...value, pushed: push.pushed } as T;
       warnings.push(push.warning);
+    }
+
+    // The caller is told all of this in the answer, once. The log is for whoever was not the
+    // caller: a note that is on disk and in no commit is the state an operator most needs to see.
+    const log = deps.logger;
+    if (log !== undefined) {
+      if (value.pending === true) log.warn('write.commitPending', { tool });
+      if (held.lost) log.warn('lock.lost', { tool });
+      if (value.pushed === false) log.warn('push.failed', { tool });
+      if (value.dropped !== undefined) log.warn('commit.dropped', { tool, count: value.dropped });
+      if (value.recovered !== undefined) log.info('commit.recovered', { tool, count: value.recovered });
     }
 
     const warning = warnings.filter((w): w is string => w !== undefined).join('; ');
@@ -2106,7 +2122,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       // skeleton, and splicing one under content the caller already authored gives the note two
       // `# H1`s and a set of empty sections nobody asked for. The skeleton belongs to `vault_learn`,
       // which composes the body itself; here the content is the note.
-      const { value: result, warning } = await lockedWrite((git) =>
+      const { value: result, warning } = await lockedWrite('vault_write_note', (git) =>
         withWriteDetail(deps.vaultRoot, input.path, () =>
           writeNote({
             vaultRoot: deps.vaultRoot,
@@ -2139,7 +2155,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .describe(m.tools.vault_edit_note.new_text),
     },
     async (input) => {
-      const { value: result, warning } = await lockedWrite((git) =>
+      const { value: result, warning } = await lockedWrite('vault_edit_note', (git) =>
         withWriteDetail(deps.vaultRoot, input.path, () =>
           editNote({
             vaultRoot: deps.vaultRoot,
@@ -2224,7 +2240,9 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
           ...git,
         });
       const { value: result, warning: queueWarning } =
-        input.preview === true ? await writes.runExclusive(() => run({})) : await lockedWrite(run);
+        input.preview === true
+          ? await writes.runExclusive(() => run({}))
+          : await lockedWrite('vault_learn', run);
 
       const lines = [
         result.action === 'created'
@@ -2260,9 +2278,10 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
    * slot, so no write of this process can land between the refresh and the operation.
    */
   const refreshedWrite = <T extends Committed>(
+    tool: string,
     run: (git: DeferredPush) => Promise<T>,
   ): Promise<{ value: T; warning?: string }> =>
-    lockedWrite((git) => {
+    lockedWrite(tool, (git) => {
       refreshVault(deps);
       return run(git);
     });
@@ -2284,7 +2303,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .describe(m.tools.vault_move.confirm_novo_dominio),
     },
     async (input) => {
-      const { value: result, warning } = await refreshedWrite((git) =>
+      const { value: result, warning } = await refreshedWrite('vault_move', (git) =>
         moveNote({
           vaultRoot: deps.vaultRoot,
           scanner: deps.scanner,
@@ -2320,7 +2339,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
         .describe(m.tools.vault_delete.confirm),
     },
     async (input) => {
-      const { value: result, warning } = await refreshedWrite((git) =>
+      const { value: result, warning } = await refreshedWrite('vault_delete', (git) =>
         deleteNote({
           vaultRoot: deps.vaultRoot,
           scanner: deps.scanner,

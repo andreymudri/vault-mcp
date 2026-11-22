@@ -25,6 +25,23 @@ describe('resolveConfig', () => {
     },
   );
 
+  it.each([['silent'], ['error'], ['warn'], ['info'], ['debug'], ['INFO'], [' debug ']])(
+    'reads VAULT_LOG_LEVEL=%s',
+    (value) => {
+      const config = resolveConfig({ VAULT_LOG_LEVEL: value });
+      expect(config.logLevel).toBe(value.trim().toLowerCase());
+      expect(config.warnings).toEqual([]);
+    },
+  );
+
+  it('warns about a log level it does not know and keeps the default', () => {
+    const config = resolveConfig({ VAULT_LOG_LEVEL: 'verbose' });
+    expect(config.logLevel).toBeUndefined();
+    expect(config.warnings).toEqual([
+      { variable: 'VAULT_LOG_LEVEL', value: 'verbose', expected: 'silent, error, warn, info or debug' },
+    ]);
+  });
+
   it('treats a blank variable as unset', () => {
     expect(resolveConfig({ VAULT_MAX_NOTE_BYTES: '  ' })).toEqual({ lang: 'en', warnings: [] });
   });

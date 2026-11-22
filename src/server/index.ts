@@ -10,9 +10,11 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { resolveLang, type Lang } from '../i18n/lang.js';
 import { resolveConfig, type ServerConfig } from './config.js';
+import { NULL_LOGGER, createLogger, type LogEntry, type Logger } from './logger.js';
 import { messagesFor, type Messages } from '../i18n/messages.js';
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
+import { autoPushEnabled } from '../write/git.js';
 import { createTools, forMessage, makeRedactor, type ToolDefinition, type ToolResult } from './tools.js';
 
 /**
@@ -111,12 +113,22 @@ export function toolCallback(
   tool: ToolDefinition,
   redact: (text: string) => string,
   messages: Messages,
+  logger: Logger = NULL_LOGGER,
 ): (args: unknown) => Promise<CallToolResult> {
   return async (args: unknown): Promise<CallToolResult> => {
+    const started = performance.now();
+    const elapsed = (): number => Math.round(performance.now() - started);
     try {
-      return toCallToolResult(await tool.handler(args));
+      const result = await tool.handler(args);
+      // One line per call, at `info`: which tool, how long, and whether it answered or refused. A
+      // refusal is ordinary operation — a path that names no note — so it is not a warning; what
+      // an operator wants from this line is the duration and the rate of each.
+      logger.info('tool.call', { tool: tool.name, ms: elapsed(), ok: result.isError !== true });
+      return toCallToolResult(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Reaching here means a handler let an exception out, which `define` exists to prevent.
+      logger.error('tool.crashed', { tool: tool.name, ms: elapsed(), error: message });
       return toCallToolResult({
         content: [
           { type: 'text', text: `${tool.name} ${messages.errors.toolFailed}: ${forMessage(redact(message))}` },
@@ -139,11 +151,18 @@ export function toolCallback(
  * scanner's change delta, and a second scanner over the same vault would answer from an index
  * nobody kept in step.
  */
+/** What `createVaultServer` takes beyond the vault and the language: the parsed environment, and a logger. */
+export type ServerOptions = Partial<ServerConfig> & { logger?: Logger };
+
+/** The MCP name of each of this server's log levels. */
+const MCP_LEVEL = { error: 'error', warn: 'warning', info: 'info', debug: 'debug' } as const;
+
 export function createVaultServer(
   vaultRoot: string,
   lang: Lang = 'en',
-  config: Partial<ServerConfig> = {},
+  config: ServerOptions = {},
 ): McpServer {
+  const logger = config.logger ?? NULL_LOGGER;
   const scanner = new VaultScanner({
     vaultRoot,
     ...(config.maxNoteBytes === undefined ? {} : { maxNoteBytes: config.maxNoteBytes }),
@@ -152,8 +171,22 @@ export function createVaultServer(
   const messages = messagesFor(lang);
   const server = new McpServer(
     { name: 'vault-mcp', version: VERSION },
-    { capabilities: { tools: {} }, instructions: messages.instructions },
+    { capabilities: { tools: {}, logging: {} }, instructions: messages.instructions },
   );
+
+  // The same events that go to stderr go to the client, as `notifications/message`. The SDK
+  // drops what is below the level the client asked for with `logging/setLevel`, and a server
+  // nobody is connected to rejects the send — which is every event logged before the handshake,
+  // and is why the rejection is swallowed rather than reported back into the log it came from.
+  logger.addSink((entry: LogEntry) => {
+    void server
+      .sendLoggingMessage({
+        level: MCP_LEVEL[entry.level],
+        logger: 'vault-mcp',
+        data: { event: entry.event, ...entry.fields },
+      })
+      .catch(() => undefined);
+  });
 
   const redact = makeRedactor(vaultRoot);
   const tools = createTools({
@@ -162,6 +195,7 @@ export function createVaultServer(
     vaultRoot,
     messages,
     version: VERSION,
+    logger,
     ...(config.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: config.lockTimeoutMs }),
   });
   for (const tool of tools) {
@@ -175,7 +209,7 @@ export function createVaultServer(
         // Where a tool has one, the SDK publishes it and validates each successful answer.
         ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
       },
-      toolCallback(tool, redact, messages),
+      toolCallback(tool, redact, messages, logger),
     );
   }
 
@@ -195,8 +229,24 @@ export async function main(): Promise<void> {
   }
 
   const config = resolveConfig(process.env);
-  const server = createVaultServer(vaultRoot, config.lang, config);
+  const logger = createLogger({
+    ...(config.logLevel === undefined ? {} : { level: config.logLevel }),
+    write: (line) => process.stderr.write(`${line}\n`),
+    redact: makeRedactor(vaultRoot),
+  });
+  // Said before anything else: a setting the server could not honour is in force as its DEFAULT,
+  // and the operator who set it believes otherwise.
+  for (const warning of config.warnings) logger.warn('config.invalid', { ...warning });
+
+  const server = createVaultServer(vaultRoot, config.lang, { ...config, logger });
   await server.connect(new StdioServerTransport());
+  logger.info('server.start', {
+    version: VERSION,
+    lang: config.lang,
+    autoPush: autoPushEnabled(),
+    node: process.version,
+    pid: process.pid,
+  });
 }
 
 /**

@@ -1,4 +1,5 @@
 import { LANGS, resolveLang, type Lang } from '../i18n/lang.js';
+import { LOG_LEVELS, type LogLevel } from './logger.js';
 
 /**
  * Everything the server reads from the environment besides `VAULT_PATH`, parsed in one place.
@@ -26,6 +27,8 @@ export interface ServerConfig {
   maxNoteBytes?: number;
   /** `VAULT_LOCK_TIMEOUT_MS`: how long a write waits for another process's write. */
   lockTimeoutMs?: number;
+  /** `VAULT_LOG_LEVEL`: how much the server writes to stderr. Default `warn`. */
+  logLevel?: LogLevel;
   warnings: ConfigWarning[];
 }
 
@@ -58,6 +61,20 @@ export function resolveConfig(env: NodeJS.ProcessEnv): ServerConfig {
     }
   }
 
+  let logLevel: LogLevel | undefined;
+  const rawLevel = env['VAULT_LOG_LEVEL']?.trim();
+  if (rawLevel !== undefined && rawLevel !== '') {
+    const candidate = rawLevel.toLowerCase();
+    if (LOG_LEVELS.includes(candidate as LogLevel)) logLevel = candidate as LogLevel;
+    else {
+      warnings.push({
+        variable: 'VAULT_LOG_LEVEL',
+        value: rawLevel,
+        expected: `${LOG_LEVELS.slice(0, -1).join(', ')} or ${LOG_LEVELS.at(-1)}`,
+      });
+    }
+  }
+
   const maxNoteBytes = positiveInt(env, 'VAULT_MAX_NOTE_BYTES', warnings);
   const lockTimeoutMs = positiveInt(env, 'VAULT_LOCK_TIMEOUT_MS', warnings);
 
@@ -65,6 +82,7 @@ export function resolveConfig(env: NodeJS.ProcessEnv): ServerConfig {
     lang,
     ...(maxNoteBytes === undefined ? {} : { maxNoteBytes }),
     ...(lockTimeoutMs === undefined ? {} : { lockTimeoutMs }),
+    ...(logLevel === undefined ? {} : { logLevel }),
     warnings,
   };
 }

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { LoggingMessageNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { TRUNCATION_MARKER } from '../src/retrieval/budget.js';
 import { parseFile } from '../src/vault/frontmatter.js';
@@ -16,6 +17,7 @@ import { VaultLock } from '../src/write/vault-lock.js';
 import { writeNote } from '../src/write/writer.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
+import { createLogger, type LogEntry } from '../src/server/logger.js';
 import { NO_HOSTILE_FILENAMES } from './platform.js';
 import { messagesFor } from '../src/i18n/messages.js';
 import {
@@ -3332,6 +3334,126 @@ describe('annotations e títulos', () => {
     expect(search?.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
     const del = tools.find((tool) => tool.name === 'vault_delete');
     expect(del?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
+
+    await client.close();
+    await server.close();
+  });
+});
+
+describe('log do servidor', () => {
+  /** Um logger que guarda o que deixou passar, no nível mais falante. */
+  const collecting = () => {
+    const entries: LogEntry[] = [];
+    const logger = createLogger({ level: 'debug', write: () => undefined });
+    logger.addSink((entry) => entries.push(entry));
+    return { logger, entries };
+  };
+  const stderrEvents = (stderr: string): Array<Record<string, unknown>> =>
+    stderr
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+  it('cada chamada de tool é registrada com nome, duração e desfecho', async () => {
+    const vaultRoot = await makeVault();
+    const { logger, entries } = collecting();
+    const { tool } = makeTools(vaultRoot);
+    const redact = makeRedactor(vaultRoot);
+
+    await toolCallback(tool('vault_search'), redact, messagesFor('pt'), logger)({ query: 'jwt' });
+    await toolCallback(tool('vault_get_note'), redact, messagesFor('pt'), logger)({ path: 'nao-existe.md' });
+
+    const calls = entries.filter((entry) => entry.event === 'tool.call');
+    expect(calls.map((entry) => [entry.fields['tool'], entry.fields['ok']])).toEqual([
+      ['vault_search', true],
+      ['vault_get_note', false],
+    ]);
+    for (const call of calls) {
+      expect(call.level).toBe('info');
+      expect(typeof call.fields['ms']).toBe('number');
+    }
+  });
+
+  it('uma escrita que não conseguiu commitar vira aviso no log', async () => {
+    const vaultRoot = await makeVault(true);
+    await fs.writeFile(path.join(vaultRoot, '.gitignore'), 'recusada.md\n', 'utf8');
+    const { logger, entries } = collecting();
+    const scanner = new VaultScanner({ vaultRoot });
+    const tools = createTools({
+      retriever: new Retriever({ scanner }),
+      scanner,
+      vaultRoot,
+      messages: messagesFor('pt'),
+      logger,
+    });
+
+    await tools
+      .find((candidate) => candidate.name === 'vault_write_note')
+      ?.handler({ path: '02-wiki/docker/recusada.md', content: '# Recusada\n' });
+
+    expect(entries.filter((entry) => entry.level === 'warn')).toMatchObject([
+      { event: 'write.commitPending', fields: { tool: 'vault_write_note' } },
+    ]);
+  });
+
+  it('por padrão o servidor não escreve nada em stderr num start sadio', async () => {
+    const vaultRoot = await makeVault(true);
+    const { stderr, code } = await runServer(await buildServer(), { VAULT_PATH: vaultRoot }, [INITIALIZE]);
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+  });
+
+  it('com VAULT_LOG_LEVEL=info registra o start, sem o caminho absoluto do vault', async () => {
+    const vaultRoot = await makeVault(true);
+    const { stderr } = await runServer(
+      await buildServer(),
+      { VAULT_PATH: vaultRoot, VAULT_LOG_LEVEL: 'info' },
+      [INITIALIZE],
+    );
+
+    const start = stderrEvents(stderr).find((entry) => entry['event'] === 'server.start');
+    expect(start).toMatchObject({ level: 'info', lang: 'en', autoPush: false });
+    expect(typeof start?.['version']).toBe('string');
+    expect(stderr).not.toContain(vaultRoot);
+  });
+
+  it('avisa da configuração que não conseguiu honrar, mesmo no nível padrão', async () => {
+    const vaultRoot = await makeVault(true);
+    const { stderr, code } = await runServer(
+      await buildServer(),
+      { VAULT_PATH: vaultRoot, VAULT_LANG: 'klingon', VAULT_MAX_NOTE_BYTES: 'muito' },
+      [INITIALIZE],
+    );
+
+    expect(code).toBe(0);
+    const warnings = stderrEvents(stderr).filter((entry) => entry['event'] === 'config.invalid');
+    expect(warnings.map((entry) => entry['variable']).sort()).toEqual(['VAULT_LANG', 'VAULT_MAX_NOTE_BYTES']);
+    expect(warnings.every((entry) => entry['level'] === 'warn')).toBe(true);
+  });
+
+  it('declara a capability de logging e manda os eventos ao cliente, respeitando o nível que ele pede', async () => {
+    const { logger } = collecting();
+    const server = createVaultServer(await makeVault(), 'pt', { logger });
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const received: Array<{ level: string; logger?: string | undefined; data: unknown }> = [];
+    client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => {
+      received.push(notification.params);
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    expect(client.getServerCapabilities()?.logging).toBeDefined();
+
+    logger.warn('probe.event', { n: 1 });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(received[0]).toEqual({ level: 'warning', logger: 'vault-mcp', data: { event: 'probe.event', n: 1 } });
+
+    await client.setLoggingLevel('error');
+    logger.warn('probe.quiet');
+    logger.error('probe.loud');
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    expect(received[1]).toMatchObject({ level: 'error', data: { event: 'probe.loud' } });
 
     await client.close();
     await server.close();
