@@ -11,6 +11,8 @@ export interface DirEntry {
   readonly name: string;
   isDirectory(): boolean;
   isFile(): boolean;
+  /** True for a link, whatever it points at: both of the above answer for the link, not its target. */
+  isSymbolicLink(): boolean;
 }
 
 /**
@@ -22,13 +24,17 @@ export interface DirEntry {
  * assertion pass while Node walked both in full underneath — and against the user's real vault,
  * which is a git repository, every `refresh()` would traverse the entire object store.
  */
+/** What the scanner asks of one node: the write guard's facts, plus when it changed and how big it is. */
+export type NoteStat = StatLike & { mtimeMs: number; size: number };
+
 export interface FsOps {
   readdir(dir: string): DirEntry[];
   /**
    * `nlink` and `isFile()` beyond the mtime: the same `Stats` that answers "is this stale"
-   * answers "is this a note", so the two can never describe different nodes.
+   * answers "is this a note", so the two can never describe different nodes. `size` rides along
+   * for the same reason — the ceiling is decided on the node that was just judged a note.
    */
-  stat(path: string): StatLike & { mtimeMs: number };
+  stat(path: string): NoteStat;
   readFile(path: string): string;
 }
 
@@ -59,9 +65,33 @@ function isIgnored(name: string): boolean {
   return name.startsWith('.') || IGNORED_DIRECTORIES.has(name);
 }
 
+/**
+ * The largest file the scanner reads as a note, unless `VAULT_MAX_NOTE_BYTES` says otherwise.
+ *
+ * The largest note in the vault this was written for is 39 KB, so five megabytes is two orders of
+ * magnitude of headroom — and it is what stands between the index and whatever lands in the vault
+ * with an `.md` extension. Measured on 2026-11-22: one 64 MB file held the first search for 3.3 s
+ * and cost about a gigabyte of resident memory, because the scanner keeps the body, the chunker
+ * keeps it again in pieces, and the index keeps every term of it.
+ */
+export const DEFAULT_MAX_NOTE_BYTES = 5 * 1024 * 1024;
+
+/** How far into a file the NUL check looks. A binary format announces itself well before this. */
+const BINARY_PROBE_CHARS = 8_192;
+
+/**
+ * True when the text carries a NUL in its first stretch — the one byte no note has and nearly
+ * every binary format does (a PDF, an image, an archive saved with the wrong extension).
+ */
+function looksBinary(raw: string): boolean {
+  return raw.slice(0, BINARY_PROBE_CHARS).includes('\0');
+}
+
 export interface VaultScannerOptions {
   vaultRoot: string;
   fs?: FsOps;
+  /** Files larger than this are left out of the index, loudly. Default `DEFAULT_MAX_NOTE_BYTES`. */
+  maxNoteBytes?: number;
 }
 
 /**
@@ -76,6 +106,13 @@ export class VaultScanner {
   diagnostics: Diagnostic[] = [];
 
   private readonly fs: FsOps;
+  private readonly maxNoteBytes: number;
+  /**
+   * Files that were READ and then refused for what they contain, by the mtime they had. Without
+   * it a binary `.md` is never in `notes`, so every refresh — which is every search — would open
+   * and read it again just to refuse it again.
+   */
+  private readonly refused = new Map<string, { mtimeMs: number; diagnostic: Diagnostic }>();
   private readonly notes = new Map<string, Note>();
   private readonly mtimes = new Map<string, number>();
   /** Per-path diagnostics, kept across refreshes so an unread file keeps reporting its own. */
@@ -86,6 +123,7 @@ export class VaultScanner {
   constructor(options: VaultScannerOptions) {
     this.root = options.vaultRoot;
     this.fs = options.fs ?? REAL_FS;
+    this.maxNoteBytes = options.maxNoteBytes ?? DEFAULT_MAX_NOTE_BYTES;
   }
 
   getNote(path: string): Note | undefined {
@@ -114,7 +152,7 @@ export class VaultScanner {
     for (const path of found) {
       const absolute = this.absolute(path);
 
-      let stat: StatLike & { mtimeMs: number };
+      let stat: NoteStat;
       try {
         stat = this.fs.stat(absolute);
       } catch (err) {
@@ -147,10 +185,29 @@ export class VaultScanner {
         continue;
       }
 
+      // Decided from the `stat`, before anything is opened: the point of a ceiling is that the
+      // file past it is never read into memory at all. A note that GREW past it is not marked as
+      // seen either, so the copy indexed while it was small is removed below.
+      if (stat.size > this.maxNoteBytes) {
+        walkDiagnostics.push({
+          path,
+          message: `ignorado: ${stat.size} bytes, acima do teto de ${this.maxNoteBytes} (VAULT_MAX_NOTE_BYTES)`,
+          code: 'diag.tooLarge',
+          params: { size: stat.size, max: this.maxNoteBytes },
+        });
+        continue;
+      }
+
       const mtimeMs = stat.mtimeMs;
 
       if (this.notes.has(path) && this.mtimes.get(path) === mtimeMs) {
         seen.add(path);
+        continue;
+      }
+
+      const refusedBefore = this.refused.get(path);
+      if (refusedBefore !== undefined && refusedBefore.mtimeMs === mtimeMs) {
+        walkDiagnostics.push(refusedBefore.diagnostic);
         continue;
       }
 
@@ -170,6 +227,18 @@ export class VaultScanner {
         continue;
       }
 
+      if (looksBinary(raw)) {
+        const diagnostic: Diagnostic = {
+          path,
+          message: 'ignorado: o arquivo tem byte NUL, não é texto',
+          code: 'diag.binary',
+        };
+        this.refused.set(path, { mtimeMs, diagnostic });
+        walkDiagnostics.push(diagnostic);
+        continue;
+      }
+      this.refused.delete(path);
+
       seen.add(path);
       const parsed = parseFile(path, raw);
       this.notes.set(path, {
@@ -188,6 +257,10 @@ export class VaultScanner {
       else this.fileDiagnostics.set(path, parsed.diagnostic);
       changed.push(path);
     }
+
+    // A refused file that is gone has nothing left to be remembered for.
+    const onDisk = new Set(found);
+    for (const path of this.refused.keys()) if (!onDisk.has(path)) this.refused.delete(path);
 
     const removed: string[] = [];
     for (const path of this.notes.keys()) if (!seen.has(path)) removed.push(path);
@@ -243,7 +316,32 @@ export class VaultScanner {
       const path = relativeDir === '' ? entry.name : `${relativeDir}/${entry.name}`;
       if (entry.isDirectory()) this.walk(path, out, diagnostics);
       else if (entry.isFile() && entry.name.endsWith('.md')) out.push(path);
+      else if (entry.isSymbolicLink()) this.reportSymlink(path, diagnostics);
     }
+  }
+
+  /**
+   * A link is never followed — the walk would leave the vault through it — and until now it was
+   * skipped without a word, the one silent drop left after hard links got a diagnostic. It is
+   * reported when it could have hidden notes: when it is named like one, or when it leads to a
+   * directory. A link to an ordinary file that is not a note (an image, an attachment) hides
+   * nothing and would only be noise.
+   */
+  private reportSymlink(path: string, diagnostics: Diagnostic[]): void {
+    if (!path.endsWith('.md')) {
+      try {
+        // `stat` follows the link, so this answers for the TARGET.
+        if (this.fs.stat(this.absolute(path)).isFile()) return;
+      } catch {
+        // A dangling link leads nowhere, so it hides nothing.
+        return;
+      }
+    }
+    diagnostics.push({
+      path,
+      message: 'ignorado: é um symlink, e o destino pode viver fora do vault',
+      code: 'diag.symlink',
+    });
   }
 
   private resolveAllLinks(): void {

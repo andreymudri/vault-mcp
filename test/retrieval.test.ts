@@ -55,7 +55,7 @@ function loadFixture(): Map<string, MemFile> {
 }
 
 function memEntry(name: string, directory: boolean): DirEntry {
-  return { name, isDirectory: () => directory, isFile: () => !directory };
+  return { name, isDirectory: () => directory, isFile: () => !directory, isSymbolicLink: () => false };
 }
 
 const MEM_ROOT = '/vault';
@@ -87,7 +87,8 @@ class MemoryFs implements FsOps {
   stat(path: string) {
     // `nlink: 1` and a real `isFile`: the scanner runs the write guard's `classifyStat` over
     // this same object, so a fake that omits them is a fake of a node the scanner refuses.
-    return { mtimeMs: this.file(path).mtimeMs, nlink: 1, isFile: () => true };
+    const file = this.file(path);
+    return { mtimeMs: file.mtimeMs, nlink: 1, isFile: () => true, size: Buffer.byteLength(file.text) };
   }
 
   readFile(path: string): string {

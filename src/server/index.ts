@@ -9,6 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { resolveLang, type Lang } from '../i18n/lang.js';
+import { resolveConfig, type ServerConfig } from './config.js';
 import { messagesFor, type Messages } from '../i18n/messages.js';
 import { Retriever } from '../retrieval/retrieval.js';
 import { VaultScanner } from '../vault/scanner.js';
@@ -138,8 +139,15 @@ export function toolCallback(
  * scanner's change delta, and a second scanner over the same vault would answer from an index
  * nobody kept in step.
  */
-export function createVaultServer(vaultRoot: string, lang: Lang = 'en'): McpServer {
-  const scanner = new VaultScanner({ vaultRoot });
+export function createVaultServer(
+  vaultRoot: string,
+  lang: Lang = 'en',
+  config: Partial<ServerConfig> = {},
+): McpServer {
+  const scanner = new VaultScanner({
+    vaultRoot,
+    ...(config.maxNoteBytes === undefined ? {} : { maxNoteBytes: config.maxNoteBytes }),
+  });
   const retriever = new Retriever({ scanner });
   const messages = messagesFor(lang);
   const server = new McpServer(
@@ -148,7 +156,15 @@ export function createVaultServer(vaultRoot: string, lang: Lang = 'en'): McpServ
   );
 
   const redact = makeRedactor(vaultRoot);
-  for (const tool of createTools({ retriever, scanner, vaultRoot, messages, version: VERSION })) {
+  const tools = createTools({
+    retriever,
+    scanner,
+    vaultRoot,
+    messages,
+    version: VERSION,
+    ...(config.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: config.lockTimeoutMs }),
+  });
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
       {
@@ -176,7 +192,8 @@ export async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const server = createVaultServer(vaultRoot, resolveLang(process.env));
+  const config = resolveConfig(process.env);
+  const server = createVaultServer(vaultRoot, config.lang, config);
   await server.connect(new StdioServerTransport());
 }
 

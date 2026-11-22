@@ -1,11 +1,12 @@
-import { cpSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Note } from '../src/types.js';
-import { VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
+import { DEFAULT_MAX_NOTE_BYTES, VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
+import { IS_WINDOWS } from './platform.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -559,5 +560,110 @@ describe('VaultScanner: hard link', () => {
     // O original compartilha o mesmo inode, então cai pela mesma regra.
     expect(scanner.getNote('02-wiki/nestjs/auth-guard.md')).toBeUndefined();
     expect(scanner.diagnostics.map((d) => d.path)).toContain('02-wiki/copia.md');
+  });
+});
+
+/**
+ * O scanner lia qualquer `.md`, de qualquer tamanho e com qualquer conteúdo. Medido em 2026-11-22:
+ * um único arquivo de 64 MB travou a primeira busca por 3,3 s e custou cerca de 1 GB de RSS, e um
+ * binário de 8 MB com extensão `.md` foi indexado sem uma palavra.
+ */
+describe('VaultScanner: tetos', () => {
+  const LIMITE = 100_000;
+  const diag = (scanner: VaultScanner, path: string) => scanner.diagnostics.find((d) => d.path === path);
+
+  it('o teto padrão é de 5 MB', () => {
+    expect(DEFAULT_MAX_NOTE_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it('não LÊ um arquivo acima do teto de bytes, e diz por quê', () => {
+    writeFileSync(join(root, '02-wiki', 'enorme.md'), `# Enorme\n\n${'x'.repeat(LIMITE * 2)}\n`);
+    const t = tracker();
+    const scanner = new VaultScanner({ vaultRoot: root, fs: t.fs, maxNoteBytes: LIMITE });
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/enorme.md')).toBeUndefined();
+    // O teto é decidido pelo `stat`: o arquivo nunca chega a ser aberto.
+    expect(t.readFileCalls).not.toContain('02-wiki/enorme.md');
+    expect(diag(scanner, '02-wiki/enorme.md')?.code).toBe('diag.tooLarge');
+    expect(diag(scanner, '02-wiki/enorme.md')?.params).toMatchObject({ max: LIMITE });
+    expect(paths(scanner)).toEqual(ALL_PATHS);
+  });
+
+  it('um arquivo exatamente no teto ainda é nota', () => {
+    const corpo = '# No teto\n\n';
+    writeFileSync(join(root, '02-wiki', 'no-teto.md'), corpo + 'x'.repeat(LIMITE - corpo.length));
+    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE });
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/no-teto.md')?.title).toBe('No teto');
+  });
+
+  it('uma nota que cresce além do teto sai do índice', () => {
+    writeFileSync(join(root, '02-wiki', 'cresce.md'), '# Cresce\n');
+    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE });
+    scanner.refresh();
+    expect(scanner.getNote('02-wiki/cresce.md')).toBeDefined();
+
+    writeFileSync(join(root, '02-wiki', 'cresce.md'), `# Cresce\n\n${'x'.repeat(LIMITE * 2)}\n`);
+    touch('02-wiki/cresce.md', 5);
+    const { removed } = scanner.refresh();
+
+    expect(removed).toContain('02-wiki/cresce.md');
+    expect(scanner.getNote('02-wiki/cresce.md')).toBeUndefined();
+    expect(diag(scanner, '02-wiki/cresce.md')?.code).toBe('diag.tooLarge');
+  });
+
+  it('não indexa arquivo com byte NUL, e não o relê enquanto ele não mudar', () => {
+    writeFileSync(join(root, '02-wiki', 'binario.md'), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01, 0x02]));
+    const t = tracker();
+    const scanner = scannerWith(t);
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/binario.md')).toBeUndefined();
+    expect(diag(scanner, '02-wiki/binario.md')?.code).toBe('diag.binary');
+    expect(paths(scanner)).toEqual(ALL_PATHS);
+
+    // Recusado uma vez, não é aberto de novo a cada busca: o mtime igual responde por ele.
+    t.reset();
+    scanner.refresh();
+    expect(t.readFileCalls).toEqual([]);
+    expect(diag(scanner, '02-wiki/binario.md')?.code).toBe('diag.binary');
+  });
+
+  it('volta a indexar o arquivo quando ele deixa de ser binário', () => {
+    writeFileSync(join(root, '02-wiki', 'binario.md'), Buffer.from([0x00, 0x01]));
+    const scanner = new VaultScanner({ vaultRoot: root });
+    scanner.refresh();
+    expect(scanner.getNote('02-wiki/binario.md')).toBeUndefined();
+
+    writeFileSync(join(root, '02-wiki', 'binario.md'), '# Agora é texto\n');
+    touch('02-wiki/binario.md', 5);
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/binario.md')?.title).toBe('Agora é texto');
+    expect(diag(scanner, '02-wiki/binario.md')).toBeUndefined();
+  });
+
+  it.skipIf(IS_WINDOWS)('reporta o symlink que pulou, em vez de sumir com a nota em silêncio', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'vault-scanner-fora-'));
+    try {
+      writeFileSync(join(outside, 'segredo.md'), '# Segredo\n\nnão pertence ao vault\n');
+      symlinkSync(join(outside, 'segredo.md'), join(root, '02-wiki', 'atalho.md'));
+      symlinkSync(outside, join(root, '02-wiki', 'pasta-ligada'));
+      // Um symlink para um arquivo comum que não é nota não esconde nada, e não gera ruído.
+      writeFileSync(join(outside, 'imagem.png'), 'png');
+      symlinkSync(join(outside, 'imagem.png'), join(root, '02-wiki', 'imagem.png'));
+
+      const scanner = new VaultScanner({ vaultRoot: root });
+      scanner.refresh();
+
+      expect(paths(scanner)).toEqual(ALL_PATHS);
+      expect(diag(scanner, '02-wiki/atalho.md')?.code).toBe('diag.symlink');
+      expect(diag(scanner, '02-wiki/pasta-ligada')?.code).toBe('diag.symlink');
+      expect(diag(scanner, '02-wiki/imagem.png')).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
