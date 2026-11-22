@@ -19,6 +19,7 @@ import { VaultScanner } from '../src/vault/scanner.js';
 import { NO_HOSTILE_FILENAMES } from './platform.js';
 import { messagesFor } from '../src/i18n/messages.js';
 import {
+  MAX_DIFF_CHARS,
   MAX_NOTE_CHARS,
   WriteQueue,
   createTools,
@@ -3109,5 +3110,134 @@ describe('vault_status', () => {
     const { text, data } = await status(vaultRoot);
     expect(data).toMatchObject({ ahead: 1, behind: 0 });
     expect(text).toContain('1 à frente');
+  });
+});
+
+describe('tetos de resposta e de entrada', () => {
+  /** `count` notas mínimas numa pasta própria, para o inventário ter o que paginar. */
+  const lote = async (vaultRoot: string, count: number): Promise<void> => {
+    const dir = path.join(vaultRoot, '02-wiki', 'lote');
+    await fs.mkdir(dir, { recursive: true });
+    await Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        fs.writeFile(
+          path.join(dir, `nota-${String(i).padStart(4, '0')}.md`),
+          `---\ntipo: wiki\n---\n\n# Nota ${i}\n`,
+          'utf8',
+        ),
+      ),
+    );
+  };
+  const listadas = (rendered: string): string[] =>
+    rendered
+      .split('\n')
+      .map((line) => /^- (02-wiki\/lote\/\S+\.md) /.exec(line)?.[1])
+      .filter((p): p is string => p !== undefined);
+
+  it('vault_list sem limite devolve 200 notas, diz o total e de onde continuar', async () => {
+    // Medido no vault real em 2026-11-22: sem filtro, 135.051 caracteres (uns 34 mil tokens) numa
+    // resposta só, e 2,3 MB num vault sintético de 20 mil notas. O teto é o padrão, não uma opção.
+    const vaultRoot = await makeVault();
+    await lote(vaultRoot, 450);
+    const rendered = await makeTools(vaultRoot).text('vault_list', { folder: '02-wiki/lote' });
+
+    expect(listadas(rendered)).toHaveLength(200);
+    expect(rendered.split('\n')[0]).toContain('1–200 de 450');
+    expect(rendered.split('\n')[0]).toContain('offset: 200');
+  });
+
+  it('limit e offset percorrem o inventário inteiro, sem repetir e sem pular', async () => {
+    const vaultRoot = await makeVault();
+    await lote(vaultRoot, 450);
+    const { text } = makeTools(vaultRoot);
+
+    const vistas: string[] = [];
+    let offset: number | undefined = 0;
+    let paginas = 0;
+    while (offset !== undefined) {
+      const rendered: string = await text('vault_list', { folder: '02-wiki/lote', limit: 120, offset });
+      vistas.push(...listadas(rendered));
+      const proximo: RegExpExecArray | null = /offset: (\d+)/.exec(rendered);
+      offset = proximo === null ? undefined : Number(proximo[1]);
+      paginas += 1;
+      expect(paginas).toBeLessThan(10);
+    }
+
+    expect(paginas).toBe(4);
+    expect(vistas).toHaveLength(450);
+    expect(new Set(vistas).size).toBe(450);
+    expect(vistas).toEqual([...vistas].sort());
+  });
+
+  it('recusa offset além do fim, dizendo quantas notas há', async () => {
+    const vaultRoot = await makeVault();
+    await lote(vaultRoot, 30);
+    const result = await makeTools(vaultRoot).call('vault_list', { folder: '02-wiki/lote', offset: 30 });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('30');
+    expect(textOf(result)).toContain('offset');
+  });
+
+  it('um inventário que cabe inteiro responde como sempre, sem linha de continuação', async () => {
+    const rendered = await makeTools(await makeVault()).text('vault_list', { folder: '02-wiki/nestjs' });
+    expect(rendered).toMatch(/^\d+ nota\(s\):/);
+    expect(rendered).not.toContain('offset:');
+  });
+
+  it('o diff repassado tem teto, e a nota vai inteira para o disco', async () => {
+    const vaultRoot = await makeVault(true);
+    const corpo = `${Array.from({ length: 900 }, (_, i) => `linha ${i} com algum texto para encher o diff`).join('\n')}\n`;
+    expect(corpo.length).toBeGreaterThan(MAX_DIFF_CHARS);
+
+    const rendered = await makeTools(vaultRoot).text('vault_write_note', {
+      path: '02-wiki/docker/grande.md',
+      content: corpo,
+    });
+
+    expect(rendered.length).toBeLessThan(MAX_DIFF_CHARS + 1_000);
+    expect(rendered).toMatch(/diff cortado em 20000 de \d+ caracteres/);
+    // O corte é da RESPOSTA: o que foi escrito é a nota inteira.
+    expect(await read(vaultRoot, '02-wiki/docker/grande.md')).toContain('linha 899 com algum texto');
+  });
+
+  it('a resposta do vault_learn também tem teto', async () => {
+    // Medido: um `insight` de 2 MB voltava numa resposta de 2.001.083 caracteres.
+    const vaultRoot = await makeVault(true);
+    const insight = Array.from({ length: 900 }, (_, i) => `zzlinha ${i} de um aprendizado comprido demais`).join('\n');
+
+    const rendered = await makeTools(vaultRoot).text('vault_learn', {
+      titulo: 'Aprendizado comprido',
+      insight,
+      contexto: 'teste de teto',
+      dominio: 'nestjs',
+    });
+
+    expect(rendered.length).toBeLessThan(MAX_DIFF_CHARS + 1_500);
+    expect(rendered).toMatch(/diff cortado em 20000 de \d+ caracteres/);
+    expect(await vaultContains(vaultRoot, 'zzlinha 899 de um aprendizado')).not.toHaveLength(0);
+  });
+
+  it('recusa conteúdo acima de 1 MB e insight acima de 200 mil caracteres, sem escrever nada', async () => {
+    const vaultRoot = await makeVault(true);
+    const { call } = makeTools(vaultRoot);
+
+    const nota = await call('vault_write_note', {
+      path: '02-wiki/docker/enorme.md',
+      content: 'a'.repeat(1_000_001),
+    });
+    expect(nota.isError).toBe(true);
+    expect(textOf(nota)).toContain('1000000');
+    await expect(fs.access(path.join(vaultRoot, '02-wiki/docker/enorme.md'))).rejects.toThrow();
+
+    const aprendizado = await call('vault_learn', {
+      titulo: 'Enorme',
+      insight: 'zzenorme '.repeat(25_000),
+      contexto: 'teste de teto',
+      dominio: 'nestjs',
+    });
+    expect(aprendizado.isError).toBe(true);
+    expect(textOf(aprendizado)).toContain('200000');
+    expect(await vaultContains(vaultRoot, 'zzenorme')).toHaveLength(0);
   });
 });

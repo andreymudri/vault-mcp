@@ -160,6 +160,37 @@ export function makeRedactor(vaultRoot: string): (text: string) => string {
 export const MAX_NOTE_CHARS = 20_000;
 
 /**
+ * How many characters of a diff a write tool relays.
+ *
+ * A diff is as long as what was written, and what was written goes into the caller's context a
+ * second time: measured on 0.5.0, a 2 MB `insight` came back as an answer of 2,001,083 characters.
+ * The cap is on the ANSWER — the note is whole on disk, and the marker says so.
+ */
+export const MAX_DIFF_CHARS = 20_000;
+
+/**
+ * How many notes `vault_list` answers with when the caller names no limit, and the most it takes.
+ *
+ * It used to answer with every note that matched. On the real vault (709 notes) that was 135,051
+ * characters with no filter, and 2.3 MB on a synthetic one of twenty thousand notes — an inventory
+ * call that silently costs the caller its whole context window.
+ */
+export const LIST_DEFAULT_LIMIT = 200;
+export const LIST_MAX_LIMIT = 1_000;
+
+/**
+ * Ceilings on what a write tool accepts.
+ *
+ * A megabyte is far past any note a person or an agent writes — the largest in the real vault is
+ * 39 KB — and the server otherwise holds whatever it is handed several times over: the argument,
+ * the composed note, the diff of the two. An `insight` is one paragraph or a few, and it is also
+ * tokenized for the duplicate check, so its ceiling is tighter.
+ */
+export const MAX_WRITE_CHARS = 1_000_000;
+export const MAX_INSIGHT_CHARS = 200_000;
+export const MAX_CONTEXT_CHARS = 20_000;
+
+/**
  * `index` recuado até o começo do ponto de código que o contém.
  *
  * O par de `sliceAtCodePointBoundary`, que cuida do FIM de uma fatia: aqui o que se protege é o
@@ -920,8 +951,15 @@ function quoteSnippet(text: string): string {
  * middle of a diff this server vouches for is the same forgery as the snippet one, on the write
  * path.
  */
-function relayDiff(diff: string): string {
-  return sanitizeQuoted(diff, false);
+function relayDiff(diff: string, m: Messages): string {
+  const safe = sanitizeQuoted(diff, false);
+  if (safe.length <= MAX_DIFF_CHARS) return safe;
+  // Cut at the last whole line that fits, so the tail of the relayed diff is never half a line
+  // with a `+` in front of it — and never half a surrogate pair.
+  const head = sliceAtCodePointBoundary(safe, MAX_DIFF_CHARS);
+  const lastBreak = head.lastIndexOf('\n');
+  const kept = lastBreak > 0 ? head.slice(0, lastBreak) : head;
+  return `${kept}\n[…${renderTemplate(m.results.diffTruncated, { max: MAX_DIFF_CHARS, total: safe.length })}]`;
 }
 
 /** One rendered result: the citation line the vault's `CLAUDE.md` requires, then the text. */
@@ -980,7 +1018,7 @@ function renderWrite(
   for (const warning of [result.warning, queueWarning]) {
     if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
   }
-  lines.push('', `${m.results.diff}:`, result.diff === '' ? m.results.noContentChange : relayDiff(result.diff));
+  lines.push('', `${m.results.diff}:`, result.diff === '' ? m.results.noContentChange : relayDiff(result.diff, m));
   return lines.join('\n');
 }
 
@@ -1022,7 +1060,7 @@ function renderRelocate(
   for (const warning of [...result.warnings, queueWarning]) {
     if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
   }
-  lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff));
+  lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff, m));
   return lines.join('\n');
 }
 
@@ -1694,6 +1732,8 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       tags: z.array(z.string()).optional().describe(m.tools.vault_list.tags),
       status: z.string().optional().describe(m.tools.vault_list.status),
       folder: z.string().optional().describe(m.tools.vault_list.folder),
+      limit: z.number().int().min(1).max(LIST_MAX_LIMIT).optional().describe(m.tools.vault_list.limit),
+      offset: z.number().int().min(0).optional().describe(m.tools.vault_list.offset),
     },
     async (input) => {
       refreshVault(deps);
@@ -1707,8 +1747,33 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       if (notes.length === 0) {
         return withDiagnostics(m.results.noNotesMatchingFilters, deps, redact, m);
       }
+
+      const offset = input.offset ?? 0;
+      // Refused, like an offset past the end of a note in `vault_get_note`: an empty page would
+      // make "I have read them all" and "I asked for the wrong place" look the same.
+      if (offset >= notes.length) {
+        throw coded(
+          new ToolError(`offset ${offset} além do fim: há ${notes.length} nota(s) com esses filtros`),
+          'list.offsetPastEnd',
+          { offset, total: notes.length },
+        );
+      }
+      const page = notes.slice(offset, offset + (input.limit ?? LIST_DEFAULT_LIMIT));
+      const next = offset + page.length;
+
+      // The headline of an answer that carries everything stays the one it always was. Only a
+      // page says it is a page — with the total, and with where the next one starts.
+      const whole = offset === 0 && next === notes.length;
+      const headline = whole
+        ? `${notes.length} ${m.results.notesCount}`
+        : renderTemplate(next < notes.length ? m.results.listPage : m.results.listLastPage, {
+            from: offset + 1,
+            to: next,
+            total: notes.length,
+            next,
+          });
       return withDiagnostics(
-        [`${notes.length} ${m.results.notesCount}:`, ...notes.map(renderNoteLine)].join('\n'),
+        [`${headline}:`, ...page.map(renderNoteLine)].join('\n'),
         deps,
         redact,
         m,
@@ -1934,7 +1999,10 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     m.tools.vault_write_note.description,
     {
       path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_write_note.path),
-      content: z.string().describe(m.tools.vault_write_note.content),
+      content: z
+        .string()
+        .max(MAX_WRITE_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_WRITE_CHARS }))
+        .describe(m.tools.vault_write_note.content),
       frontmatter: z
         .record(z.unknown())
         .optional()
@@ -1970,8 +2038,15 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
     m.tools.vault_edit_note.description,
     {
       path: z.string().min(1, m.validation.pathEmpty).describe(m.tools.vault_edit_note.path),
-      old_text: z.string().min(1, m.validation.oldTextEmpty).describe(m.tools.vault_edit_note.old_text),
-      new_text: z.string().describe(m.tools.vault_edit_note.new_text),
+      old_text: z
+        .string()
+        .min(1, m.validation.oldTextEmpty)
+        .max(MAX_WRITE_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_WRITE_CHARS }))
+        .describe(m.tools.vault_edit_note.old_text),
+      new_text: z
+        .string()
+        .max(MAX_WRITE_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_WRITE_CHARS }))
+        .describe(m.tools.vault_edit_note.new_text),
     },
     async (input) => {
       const { value: result, warning } = await lockedWrite((git) =>
@@ -2000,8 +2075,16 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       preview_time: z.string().datetime().optional().describe('Use the timestamp returned by the approved preview.'),
       expected_revision: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('Refuse a write if the approved preview is stale.'),
       titulo: z.string().min(1, m.validation.tituloEmpty).describe(m.tools.vault_learn.titulo),
-      insight: z.string().min(1, m.validation.insightEmpty).describe(m.tools.vault_learn.insight),
-      contexto: z.string().min(1, m.validation.contextoEmpty).describe(m.tools.vault_learn.contexto),
+      insight: z
+        .string()
+        .min(1, m.validation.insightEmpty)
+        .max(MAX_INSIGHT_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_INSIGHT_CHARS }))
+        .describe(m.tools.vault_learn.insight),
+      contexto: z
+        .string()
+        .min(1, m.validation.contextoEmpty)
+        .max(MAX_CONTEXT_CHARS, renderTemplate(m.validation.tooLong, { max: MAX_CONTEXT_CHARS }))
+        .describe(m.tools.vault_learn.contexto),
       dominio: z
         .string()
         .min(1, m.validation.dominioEmpty)
@@ -2071,7 +2154,7 @@ export function createTools(deps: ToolDeps): ToolDefinition[] {
       for (const aviso of [result.warning, queueWarning]) {
         if (aviso !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(aviso))}`);
       }
-      lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff));
+      lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff, m));
       return { text: lines.join('\n'), structured: { ...result, previewTime: at.toISOString() } };
     },
   );

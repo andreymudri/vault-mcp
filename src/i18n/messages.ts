@@ -72,6 +72,9 @@ const PT = {
     learnedAppended: 'Aprendizado ANEXADO à nota existente',
     reason: 'Motivo',
     recoveredCommits: 'Commits pendentes refeitos',
+    diffTruncated: 'diff cortado em {max} de {total} caracteres; o que foi escrito está inteiro no vault',
+    listPage: 'notas {from}–{to} de {total}; continue com offset: {next}',
+    listLastPage: 'notas {from}–{to} de {total}',
     droppedCommits: 'Commits pendentes abandonados',
   },
 
@@ -144,6 +147,7 @@ const PT = {
     'edit.notFound': 'trecho não encontrado em {path}',
     'lock.timeout': 'outro processo está escrevendo no vault há mais de {ms} ms (pid {pid}); nada foi escrito',
     'lock.failed': 'não foi possível criar o lock do vault: {detail}',
+    'list.offsetPastEnd': 'offset {offset} além do fim: há {total} nota(s) com esses filtros',
   },
 
   errors: {
@@ -157,6 +161,7 @@ const PT = {
     queryEmpty: 'query não pode ser vazia',
     pathEmpty: 'caminho não pode ser vazio',
     oldTextEmpty: 'old_text não pode ser vazio',
+    tooLong: 'no máximo {max} caracteres',
     tituloEmpty: 'título não pode ser vazio',
     insightEmpty: 'insight não pode ser vazio',
     contextoEmpty: 'contexto não pode ser vazio',
@@ -199,6 +204,8 @@ const PT = {
       tags: 'Todas estas tags precisam estar na nota.',
       status: '`status` do frontmatter, ex.: ativo, pausado.',
       folder: 'Pasta do vault, casada em fronteira de segmento.',
+      limit: 'Máximo de notas devolvidas (padrão 200, até 1000). A resposta diz o total e de onde continuar.',
+      offset: 'Quantas notas pular, em ordem de caminho. Use o valor que a resposta anterior anunciou.',
     },
     vault_backlinks: {
       description:
@@ -365,6 +372,9 @@ const EN: Messages = {
     learnedAppended: 'Learning APPENDED to the existing note',
     reason: 'Reason',
     recoveredCommits: 'Pending commits recovered',
+    diffTruncated: 'diff cut at {max} of {total} characters; what was written is whole in the vault',
+    listPage: 'notes {from}–{to} of {total}; continue with offset: {next}',
+    listLastPage: 'notes {from}–{to} of {total}',
     droppedCommits: 'Pending commits given up on',
   },
 
@@ -437,6 +447,7 @@ const EN: Messages = {
     'edit.notFound': 'snippet not found in {path}',
     'lock.timeout': 'another process has been writing to the vault for more than {ms} ms (pid {pid}); nothing was written',
     'lock.failed': 'could not create the vault lock: {detail}',
+    'list.offsetPastEnd': 'offset {offset} is past the end: {total} note(s) match these filters',
   },
 
   errors: {
@@ -450,6 +461,7 @@ const EN: Messages = {
     queryEmpty: 'query cannot be empty',
     pathEmpty: 'path cannot be empty',
     oldTextEmpty: 'old_text cannot be empty',
+    tooLong: 'at most {max} characters',
     tituloEmpty: 'titulo cannot be empty',
     insightEmpty: 'insight cannot be empty',
     contextoEmpty: 'contexto cannot be empty',
@@ -492,6 +504,8 @@ const EN: Messages = {
       tags: 'Every one of these tags must be on the note.',
       status: 'Frontmatter `status`, e.g. ativo, pausado.',
       folder: 'Vault folder, matched on a segment boundary.',
+      limit: 'Maximum notes returned (default 200, up to 1000). The answer gives the total and where to continue.',
+      offset: 'How many notes to skip, in path order. Use the value the previous answer announced.',
     },
     vault_backlinks: {
       description:
