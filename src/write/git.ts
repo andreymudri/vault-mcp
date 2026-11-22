@@ -3,6 +3,8 @@ import { existsSync, promises as fs } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 
+import { PHRASES } from '../i18n/phrases.js';
+
 const execFileAsync = promisify(execFile);
 
 export interface CommitResult {
@@ -115,7 +117,6 @@ const MAX_PENDING_PER_CALL = 20;
 
 const PENDING_FILE = 'vault-mcp-pending.json';
 const LOCK_FILE = 'vault-mcp.lock';
-const PENDING_NOTE = 'o commit ficou pendente e será refeito na próxima escrita';
 
 /** A commit that failed after its files were written, kept so a later write can make it. */
 export interface PendingCommit {
@@ -225,7 +226,7 @@ async function commitOnce(
       runGit(['-C', repoRoot, '--literal-pathspecs', 'add', '--', ...absPaths], timeoutMs),
     );
   } catch (err) {
-    return { status: 'failed', warning: `falha ao adicionar arquivos ao git: ${errorMessage(err)}` };
+    return { status: 'failed', warning: `${PHRASES.gitAddFailed}${errorMessage(err)}` };
   }
 
   // Ask git's own bookkeeping whether anything is actually staged for these
@@ -256,12 +257,12 @@ async function commitOnce(
       timeoutMs,
     );
     // Exit 0: no staged difference for these paths. The benign no-op.
-    return { status: 'nothing', warning: 'nada a commitar: arquivos sem alteração' };
+    return { status: 'nothing', warning: PHRASES.gitNothingChanged };
   } catch (err) {
     // Exit 1 is `--quiet`'s "there are differences" signal: proceed to commit.
     // Anything else (128, a spawn failure) is a genuine error.
     if (exitCode(err) !== 1) {
-      return { status: 'failed', warning: `falha ao verificar alterações no git: ${errorMessage(err)}` };
+      return { status: 'failed', warning: `${PHRASES.gitDiffFailed}${errorMessage(err)}` };
     }
   }
 
@@ -275,7 +276,7 @@ async function commitOnce(
   } catch (err) {
     // There *was* something staged, so a failure here is real: a rejecting
     // hook, an unset identity, a locked index. Surface the diagnostic.
-    return { status: 'failed', warning: `falha ao commitar: ${errorMessage(err)}` };
+    return { status: 'failed', warning: `${PHRASES.gitCommitFailed}${errorMessage(err)}` };
   }
   return { status: 'committed' };
 }
@@ -385,7 +386,7 @@ export async function commitFiles(
   // Refuse to run git in that case rather than risk sweeping in a stranger's
   // changes under this tool's commit message.
   if (absPaths.length === 0) {
-    return { committed: false, warning: 'nada a commitar: nenhum arquivo informado' };
+    return { committed: false, warning: PHRASES.gitNothingGiven };
   }
 
   const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
@@ -399,14 +400,14 @@ export async function commitFiles(
     return {
       committed: false,
       warningCode: 'git.notARepo',
-      warning: 'o vault não é um repositório git: a nota foi salva, mas não versionada',
+      warning: PHRASES.gitNotARepo,
     };
   }
   if (where.dir === undefined && where.reason === 'gitMissing') {
     return {
       committed: false,
       warningCode: 'git.gitMissing',
-      warning: 'o git não foi encontrado no PATH: a nota foi salva, mas não versionada',
+      warning: PHRASES.gitMissing,
     };
   }
   const dir = where.dir;
@@ -436,7 +437,7 @@ export async function commitFiles(
     result = {
       committed: false,
       pending: true,
-      warning: `${outcome.warning}; ${PENDING_NOTE}`,
+      warning: `${outcome.warning}; ${PHRASES.gitPending}`,
       ...recovery,
     };
   }
@@ -640,14 +641,11 @@ async function pushBranch(
     return { pushed: true };
   } catch (err) {
     const detail = timedOut(err)
-      ? `o push passou de ${timeoutMs} ms e foi encerrado`
+      ? `${PHRASES.pushTimedOutHead}${timeoutMs}${PHRASES.pushTimedOutTail}`
       : errorMessage(err);
     return {
       pushed: false,
-      warning:
-        `commit feito, mas o push falhou: ${detail}. A nota está salva e commitada localmente; ` +
-        'nada foi desfeito e nenhum rebase foi tentado. Se o remote andou na frente, ' +
-        'resolva com um pull no vault antes do próximo push.',
+      warning: `${PHRASES.pushFailed}${detail}${PHRASES.pushFailedAdvice}`,
     };
   }
 }

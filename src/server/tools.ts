@@ -8,6 +8,7 @@ import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
 import { LinkGraph } from '../graph/graph.js';
 import { coded, errorContext, renderTemplate } from '../i18n/errors.js';
 import type { Messages } from '../i18n/messages.js';
+import { PHRASES, translatePhrases } from '../i18n/phrases.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import { hasAllTags, inFolder, type Retriever } from '../retrieval/retrieval.js';
 import type { Diagnostic, Frontmatter, Note, ScoredChunk } from '../types.js';
@@ -298,17 +299,13 @@ function refreshVault(deps: ToolDeps): void {
  */
 export const WRITE_SLOT_TIMEOUT_MS = 60_000;
 
-const EXCLUSIVITY_WARNING =
-  `uma escrita anterior passou de ${WRITE_SLOT_TIMEOUT_MS} ms e pode ainda estar em andamento; ` +
-  'esta chamada não teve exclusão garantida contra ela';
+const EXCLUSIVITY_WARNING = `${PHRASES.writeOverranHead}${WRITE_SLOT_TIMEOUT_MS}${PHRASES.writeOverranTail}`;
 
 /**
  * The cross-process twin of `EXCLUSIVITY_WARNING`: the vault lock this write held was taken over
  * before the write let go of it, which only happens to a holder older than `LOCK_STALE_MS`.
  */
-const LOCK_LOST_WARNING =
-  'o lock do vault foi tomado por outro processo durante esta escrita; ' +
-  'a exclusão contra ele não foi garantida';
+const LOCK_LOST_WARNING = PHRASES.lockLost;
 
 /** What a write function is told about pushing when the tool layer pushes on its behalf. */
 interface DeferredPush {
@@ -1212,7 +1209,9 @@ function renderWrite(
     ...recoveryLines(result, m),
   ];
   for (const warning of [result.warning, queueWarning]) {
-    if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
+    if (warning !== undefined) {
+      lines.push(`${m.results.warning}: ${forMessage(redact(translatePhrases(warning, m.phrases)))}`);
+    }
   }
   lines.push('', `${m.results.diff}:`, result.diff === '' ? m.results.noContentChange : relayDiff(result.diff, m));
   return lines.join('\n');
@@ -1254,7 +1253,9 @@ function renderRelocate(
     lines.push(`${m.results.undoFromVault}: ${forMessage(result.undo)}`);
   }
   for (const warning of [...result.warnings, queueWarning]) {
-    if (warning !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(warning))}`);
+    if (warning !== undefined) {
+      lines.push(`${m.results.warning}: ${forMessage(redact(translatePhrases(warning, m.phrases)))}`);
+    }
   }
   lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff, m));
   return lines.join('\n');
@@ -2402,7 +2403,7 @@ export function createToolset(deps: ToolDeps): Toolset {
           : `${m.results.learnedAppended}: ${forMessage(result.path)}`,
         // `reason` and `warning` name paths read off the vault index, so they carry whatever a
         // file name carries.
-        `${m.results.reason}: ${forMessage(redact(result.reason))}`,
+        `${m.results.reason}: ${forMessage(redact(translatePhrases(result.reason, m.phrases)))}`,
         `${m.results.propagatedTo}: ${
           result.propagated.length === 0 ? m.results.nothing : forMessage(result.propagated.join(', '))
         }`,
@@ -2412,10 +2413,21 @@ export function createToolset(deps: ToolDeps): Toolset {
         ...recoveryLines(result, m),
       ];
       for (const aviso of [result.warning, queueWarning]) {
-        if (aviso !== undefined) lines.push(`${m.results.warning}: ${forMessage(redact(aviso))}`);
+        if (aviso !== undefined) {
+          lines.push(`${m.results.warning}: ${forMessage(redact(translatePhrases(aviso, m.phrases)))}`);
+        }
       }
       lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff, m));
-      return { text: lines.join('\n'), structured: { ...result, previewTime: at.toISOString() } };
+      // The same two sentences as DATA speak the same language as the text.
+      return {
+        text: lines.join('\n'),
+        structured: {
+          ...result,
+          reason: translatePhrases(result.reason, m.phrases),
+          ...(result.warning === undefined ? {} : { warning: translatePhrases(result.warning, m.phrases) }),
+          previewTime: at.toISOString(),
+        },
+      };
     },
   );
 

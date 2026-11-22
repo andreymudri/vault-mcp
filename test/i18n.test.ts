@@ -1,10 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { resolveLang, LANGS, type Lang } from '../src/i18n/lang.js';
 import { messagesFor } from '../src/i18n/messages.js';
+import { PHRASES } from '../src/i18n/phrases.js';
 import { createTools } from '../src/server/tools.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { VaultScanner } from '../src/vault/scanner.js';
@@ -292,5 +294,100 @@ describe('erros da camada de escrita também falam o idioma', () => {
     expect(textoEn).toContain('domain cannot contain a space');
     expect(textoEn).not.toContain('domínio');
     expect((await pt!.handler(args)).content[0]!.text).toContain('domínio não pode conter espaço');
+  });
+});
+
+/**
+ * A terceira família de `lang.ts`: os avisos e os motivos que a camada de escrita monta — falha de
+ * commit, de push, de template, o `Reason` do `vault_learn`. Eram a exceção declarada: saíam em
+ * português dentro de uma resposta inglesa, porque são strings concatenadas em quatro módulos.
+ * Agora cada frase fixa tem uma chave (`src/i18n/phrases.ts`), e a fronteira da tool troca a frase
+ * portuguesa pela do catálogo.
+ */
+describe('avisos e motivos também falam o idioma', () => {
+  const git = (root: string, ...args: string[]): string =>
+    execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
+
+  async function gitVault(): Promise<string> {
+    const root = await makeVault();
+    git(root, 'init', '-q', '-b', 'main');
+    git(root, 'config', 'gc.auto', '0');
+    git(root, 'config', 'user.name', 'Vault MCP Test');
+    git(root, 'config', 'user.email', 'vault-mcp-test@example.com');
+    git(root, 'config', 'commit.gpgsign', 'false');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'init');
+    return root;
+  }
+
+  function at(vaultRoot: string, lang: Lang) {
+    const scanner = new VaultScanner({ vaultRoot });
+    const all = createTools({ retriever: new Retriever({ scanner }), scanner, vaultRoot, messages: messagesFor(lang) });
+    return async (name: string, args: Record<string, unknown>): Promise<string> =>
+      (await all.find((tool) => tool.name === name)!.handler(args)).content.map((part) => part.text).join('\n');
+  }
+
+  /** As linhas que o SERVIDOR escreve sobre o que aconteceu — não o diff, que é conteúdo do vault. */
+  const serverLines = (rendered: string): string => rendered.split(/\n\nDiff/)[0] ?? rendered;
+
+  it('nenhuma frase do catálogo português sobrevive numa resposta em inglês', async () => {
+    const respostas: string[] = [];
+
+    // Sem repositório: o aviso de uma frase só.
+    const semGit = await makeVault();
+    respostas.push(await at(semGit, 'en')('vault_write_note', { path: '02-wiki/docker/a.md', content: '# A\n' }));
+    expect(respostas.at(-1)).toContain('the vault is not a git repository');
+
+    // Commit que falha: a saída do git, o aviso de pendência — e o template que não existe.
+    const comGit = await gitVault();
+    await fs.writeFile(path.join(comGit, '.gitignore'), 'recusada.md\n', 'utf8');
+    const en = at(comGit, 'en');
+    respostas.push(await en('vault_write_note', { path: '02-wiki/docker/recusada.md', content: '# R\n' }));
+    expect(respostas.at(-1)).toContain('failed to add files to git');
+    expect(respostas.at(-1)).toContain('the commit is pending');
+
+    respostas.push(
+      await en('vault_learn', { title: 'Token bucket por tenant', insight: 'zzbucket: limite por tenant.', context: 'gateway', domain: 'docker' }),
+    );
+    expect(respostas.at(-1)).toContain('template not found');
+    expect(respostas.at(-1)).toMatch(/Reason: (no match|the top hit|a similar note|duplicate of)/);
+
+    // Um aprendizado sobre o assunto de uma nota de OUTRO domínio.
+    respostas.push(
+      await en('vault_learn', { title: 'Guarda de autenticação com jwt', insight: 'Guarda de autenticação com jwt token, de novo.', context: 'c', domain: 'docker' }),
+    );
+    expect(respostas.at(-1)).toMatch(/Reason: (a similar note exists in another domain|the top hit does not stand out)/);
+
+    // Apagar uma nota com edição não commitada.
+    await fs.appendFile(path.join(comGit, '02-wiki/nestjs/auth-guard.md'), '\nedição local\n', 'utf8');
+    respostas.push(await en('vault_delete', { path: '02-wiki/nestjs/auth-guard.md', confirm: true }));
+    expect(respostas.at(-1)).toContain('has uncommitted edits');
+
+    for (const resposta of respostas) {
+      for (const [key, frase] of Object.entries(PHRASES)) {
+        expect(serverLines(resposta), `${key} em: ${serverLines(resposta)}`).not.toContain(frase);
+      }
+    }
+  });
+
+  it('em português as mesmas respostas continuam como eram', async () => {
+    const semGit = await makeVault();
+    const rendered = await at(semGit, 'pt')('vault_write_note', { path: '02-wiki/docker/a.md', content: '# A\n' });
+    expect(rendered).toContain(PHRASES.gitNotARepo);
+
+    const comGit = await gitVault();
+    const aprendido = await at(comGit, 'pt')('vault_learn', { title: 'Token bucket', insight: 'zzbucket: limite por tenant.', context: 'gateway', domain: 'docker' });
+    expect(aprendido).toContain(PHRASES.templateNotFound);
+  });
+
+  it('cada frase tem tradução própria, e o catálogo português É a tabela que o código usa', () => {
+    const pt = messagesFor('pt').phrases as Record<string, string>;
+    const en = messagesFor('en').phrases as Record<string, string>;
+    expect(pt).toEqual(PHRASES);
+    expect(Object.keys(en).sort()).toEqual(Object.keys(pt).sort());
+    for (const key of Object.keys(pt)) {
+      expect(en[key]?.trim(), key).not.toBe('');
+      expect(en[key], key).not.toBe(pt[key]);
+    }
   });
 });

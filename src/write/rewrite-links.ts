@@ -2,6 +2,7 @@ import { posix } from 'node:path';
 
 import { resolveLinkTarget, WIKI_LINK } from '../vault/links.js';
 import { fencedLines } from './propagate.js';
+import { PHRASES } from '../i18n/phrases.js';
 
 /**
  * Link correction for a note that MOVED, as a pure function of text and two vault indexes.
@@ -121,7 +122,7 @@ export function rewriteLinks(options: RewriteLinksOptions): RewriteLinksResult {
       const replacement = targetFor(desired, target, notePathAfter, after);
       if (replacement === undefined) {
         const warning =
-          `[[${target}]] apontava para ${wasAt} e não pôde ser reescrito para ${desired}`;
+          `[[${target}]]${PHRASES.linkPointedTo}${wasAt}${PHRASES.linkNotRewritten}${desired}`;
         if (!warnings.includes(warning)) warnings.push(warning);
         return whole;
       }

@@ -1,4 +1,5 @@
 import type { Lang } from './lang.js';
+import { PHRASES } from './phrases.js';
 
 /**
  * O catálogo de tudo que o servidor DIZ. O que ele ESCREVE no vault não está aqui, e a razão
@@ -13,6 +14,10 @@ const PT = {
   instructions:
     'Servidor do vault de conhecimento. Busque antes de responder sobre decisões, padrões ou ' +
     'histórico do usuário, cite sempre `caminho:linha`, e registre aprendizados com vault_learn.',
+
+  // The fixed text of the write layer's warnings and reasons. The Portuguese table IS the one the
+  // code builds its sentences from (`phrases.ts`), so in Portuguese nothing is translated at all.
+  phrases: PHRASES,
 
   startup: {
     vaultPathMissing:
@@ -333,6 +338,58 @@ const EN: Messages = {
   instructions:
     'Knowledge vault server. Search before answering anything about the user\'s decisions, ' +
     'patterns or history, always cite `path:line`, and record learnings with vault_learn.',
+
+  phrases: {
+    gitAddFailed: 'failed to add files to git: ',
+    gitNothingChanged: 'nothing to commit: the files are unchanged',
+    gitNothingGiven: 'nothing to commit: no file was given',
+    gitDiffFailed: 'failed to check for changes in git: ',
+    gitCommitFailed: 'commit failed: ',
+    gitPending: 'the commit is pending and will be retried on the next write',
+    gitNotARepo: 'the vault is not a git repository: the note was saved, but not versioned',
+    gitMissing: 'git was not found on PATH: the note was saved, but not versioned',
+    pushFailed: 'committed, but the push failed: ',
+    pushFailedAdvice:
+      '. The note is saved and committed locally; nothing was undone and no rebase was attempted. ' +
+      'If the remote moved ahead, resolve it with a pull in the vault before the next push.',
+    pushTimedOutHead: 'the push went past ',
+    pushTimedOutTail: ' ms and was stopped',
+    writeOverranHead: 'an earlier write went past ',
+    writeOverranTail:
+      ' ms and may still be running; this call had no guaranteed exclusion against it',
+    lockLost:
+      'the vault lock was taken over by another process during this write; ' +
+      'exclusion against it was not guaranteed',
+    noMatch: 'no match',
+    topOutside: 'the top hit is outside ',
+    topViaGraph: 'the top hit came in through graph expansion, not a direct match',
+    topNotStandingOut: 'the top hit does not stand out (ratio ',
+    similarElsewhere: 'a similar note exists in another domain: ',
+    duplicateOf: 'duplicate of ',
+    noteExistsAt: '; a note already exists at ',
+    appendedToIt: ', appended to it',
+    appendedAt: 'appended to ',
+    appendedByTitle: ' because the title matched; the duplicate check did not point at this note (',
+    appendedByTitleAdvice: ') — check that the subject is the same',
+    cannotAppend: 'could not append to ',
+    recordedIn: '; learning recorded in ',
+    insightTruncatedHead: 'insight truncated at ',
+    insightTruncatedTail: ' characters for the duplicate check',
+    templateIgnored: 'template ignored: ',
+    templateIgnoredTail: ' is not a regular file',
+    templateNotFound: 'template not found: ',
+    frontmatterUnfilled: 'frontmatter not filled in (the YAML block cannot be edited safely): ',
+    diffUnavailable: 'the diff could not be generated (',
+    propagateDomainFailed: 'failed to propagate domain ',
+    propagateFailed: 'failed to propagate to ',
+    rewriteFailed: 'failed to rewrite ',
+    updateFailed: 'failed to update ',
+    uncommittedEdits:
+      ' has uncommitted edits; restoring brings back the committed version, not what is on disk now',
+    indexMissing: ' does not exist; the new domain was not indexed',
+    linkPointedTo: ' pointed to ',
+    linkNotRewritten: ' and could not be rewritten to ',
+  },
 
   startup: {
     vaultPathMissing:

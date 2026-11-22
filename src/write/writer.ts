@@ -13,6 +13,7 @@ import {
 } from './paths.js';
 import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
 import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
+import { PHRASES } from '../i18n/phrases.js';
 import { commitFiles, commitRecovery } from './git.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
@@ -337,7 +338,7 @@ function safeDiff(
         `${countLines(after)} linhas depois`,
       '',
     ].join('\n');
-    return { diff, warning: `diff não pôde ser gerado (${reason})` };
+    return { diff, warning: `${PHRASES.diffUnavailable}${reason})` };
   }
 }
 
@@ -478,12 +479,12 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
     let templateText: string | undefined;
     const state = await classifyNode(templatePath);
     if (state === 'foreign') {
-      templateWarning = `template ignorado: _templates/${opts.tipo}.md não é um arquivo comum`;
+      templateWarning = `${PHRASES.templateIgnored}${layout.folders.templates}/${opts.tipo}.md${PHRASES.templateIgnoredTail}`;
     } else {
       try {
         templateText = await fs.readFile(templatePath, 'utf8');
       } catch {
-        templateWarning = `template não encontrado: _templates/${opts.tipo}.md`;
+        templateWarning = `${PHRASES.templateNotFound}${layout.folders.templates}/${opts.tipo}.md`;
       }
     }
     if (templateText !== undefined) {
@@ -515,7 +516,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
   const frontmatterWarning =
     missing.length === 0
       ? undefined
-      : `frontmatter não preenchido (bloco YAML não editável com segurança): ${missing.join(', ')}`;
+      : `${PHRASES.frontmatterUnfilled}${missing.join(', ')}`;
 
   return writeAndCommit(
     {

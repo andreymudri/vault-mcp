@@ -7,6 +7,7 @@ import { basename, join, relative, sep } from 'node:path';
 
 import { DEFAULT_LAYOUT, heading, type Layout } from '../config/layout.js';
 import { coded } from '../i18n/errors.js';
+import { PHRASES } from '../i18n/phrases.js';
 import { tokenize } from '../index/tokenizer.js';
 import { sliceAtCodePointBoundary } from '../retrieval/budget.js';
 import type { Retriever } from '../retrieval/retrieval.js';
@@ -222,7 +223,7 @@ export function decideDuplicate(
   wikiPrefix: string = WIKI_PREFIX,
 ): DuplicateDecision {
   const top = results[0];
-  if (!top) return { isDuplicate: false, reason: 'nenhum match' };
+  if (!top) return { isDuplicate: false, reason: PHRASES.noMatch };
 
   // An append target is a WIKI note or it is nothing. The best match for a learning is perfectly
   // capable of being a project README, a daily, the knowledge index or an archived note, and
@@ -230,7 +231,7 @@ export function decideDuplicate(
   // areas the write guard refuses outright, so routing there does not merely misfile the insight,
   // it is the one path that could throw it away.
   if (!top.chunk.path.startsWith(wikiPrefix)) {
-    return { isDuplicate: false, reason: `topo fora de ${wikiPrefix}: ${top.chunk.path}` };
+    return { isDuplicate: false, reason: `${PHRASES.topOutside}${wikiPrefix}: ${top.chunk.path}` };
   }
 
   // UNREACHABLE as retrieval stands, and kept as an assertion rather than as a live branch: a
@@ -244,21 +245,21 @@ export function decideDuplicate(
   // words never matched the query. The unit test below builds the state synthetically, which is
   // the only way to reach it.
   if (top.viaGraph) {
-    return { isDuplicate: false, reason: 'topo entrou por expansão do grafo, não por match direto' };
+    return { isDuplicate: false, reason: PHRASES.topViaGraph };
   }
 
   const runnerUp = results.find((r) => r.chunk.path !== top.chunk.path);
   const ratio = runnerUp ? top.score / runnerUp.score : Infinity;
   if (ratio < DUPLICATE_SCORE_RATIO) {
-    return { isDuplicate: false, reason: `topo não se destaca (razão ${ratio.toFixed(2)})` };
+    return { isDuplicate: false, reason: `${PHRASES.topNotStandingOut}${ratio.toFixed(2)})` };
   }
 
   // The trailing slash makes this a whole path segment: `patternsX/` is not `patterns/`.
   if (!top.chunk.path.startsWith(`${wikiPrefix}${dominio}/`)) {
-    return { isDuplicate: false, reason: `nota parecida em outro domínio: ${top.chunk.path}` };
+    return { isDuplicate: false, reason: `${PHRASES.similarElsewhere}${top.chunk.path}` };
   }
 
-  return { isDuplicate: true, targetPath: top.chunk.path, reason: `duplicata de ${top.chunk.path}` };
+  return { isDuplicate: true, targetPath: top.chunk.path, reason: `${PHRASES.duplicateOf}${top.chunk.path}` };
 }
 
 export interface LearnOptions {
@@ -494,7 +495,7 @@ async function skeletonContent(
   if ((await pathState(templatePath)) === 'foreign') {
     return {
       content: body,
-      warning: 'template ignorado: _templates/wiki.md não é um arquivo comum',
+      warning: `${PHRASES.templateIgnored}${layoutOf(opts).folders.templates}/wiki.md${PHRASES.templateIgnoredTail}`,
     };
   }
 
@@ -504,7 +505,10 @@ async function skeletonContent(
   } catch {
     // The same warning `writeNote` raises for the same missing file, since it will not raise it
     // itself on this route. The learning is still written: the body is what the user asked for.
-    return { content: body, warning: 'template não encontrado: _templates/wiki.md' };
+    return {
+      content: body,
+      warning: `${PHRASES.templateNotFound}${layoutOf(opts).folders.templates}/wiki.md`,
+    };
   }
   // `applyTemplate` throws on an unresolved Templater token, exactly as it does inside
   // `writeNote`: an unsubstituted `<% %>` written into the vault is the bug it exists to prevent.
@@ -672,7 +676,7 @@ async function attemptAppend(
   date: string,
 ): Promise<AppendAttempt> {
   const refusal = (detail: string): AppendAttempt => ({
-    failure: `não foi possível anexar em ${oneLine(relPath)} (${detail})`,
+    failure: `${PHRASES.cannotAppend}${oneLine(relPath)} (${detail})`,
   });
 
   let absPath: string;
@@ -857,13 +861,13 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
         // common case: repeating `vault_learn` under one title would scatter dated siblings
         // instead of growing the note, which is the accumulation the plan asks for. So the append
         // stands and the caller is told exactly what happened and what the rule actually decided.
-        reason = `${decision.reason}; nota já existe em ${newRelPath}, anexado nela`;
+        reason = `${decision.reason}${PHRASES.noteExistsAt}${newRelPath}${PHRASES.appendedToIt}`;
         titleCollision =
-          `anexado em ${newRelPath} por coincidência de título; a checagem de duplicata não ` +
+          `${PHRASES.appendedAt}${newRelPath}${PHRASES.appendedByTitle}` +
           // FOLDED here, not at the end: `joinWarnings` does not fold, and `decision.reason` names
           // a path read off the vault index — where a file called `nota\nWARNING: tudo certo.md`
           // is a name the scanner accepts and this warning would print as a second line.
-          `indicou essa nota (${oneLine(decision.reason)}) — confira se o assunto é o mesmo`;
+          `${oneLine(decision.reason)}${PHRASES.appendedByTitleAdvice}`;
       } else if (attempt.failure !== undefined) {
         failures.push(attempt.failure);
       }
@@ -944,7 +948,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
   const appendFailure =
     failures.length === 0
       ? undefined
-      : `${failures.join('; ')}; aprendizado gravado em ${oneLine(write.path)}`;
+      : `${failures.join('; ')}${PHRASES.recordedIn}${oneLine(write.path)}`;
   if (appendFailure !== undefined) reason = `${reason}; ${appendFailure}`;
 
   // `projeto` lands inside the daily capture line, which is one of the machine-written index
@@ -1003,7 +1007,7 @@ export async function learn(opts: LearnOptions): Promise<LearnResult> {
     titleCollision,
     appendFailure,
     truncated
-      ? `insight truncado em ${MAX_QUERY_SOURCE_CHARS} caracteres para a checagem de duplicata`
+      ? `${PHRASES.insightTruncatedHead}${MAX_QUERY_SOURCE_CHARS}${PHRASES.insightTruncatedTail}`
       : undefined,
     write.warning,
     ...prop.warnings,

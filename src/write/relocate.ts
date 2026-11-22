@@ -19,6 +19,7 @@ import {
 import { buildVaultIndex, rewriteLinks, type VaultIndex } from './rewrite-links.js';
 import { formatLocal } from './template.js';
 import { coded } from '../i18n/errors.js';
+import { PHRASES } from '../i18n/phrases.js';
 
 /**
  * Moving, renaming, promoting, archiving and deleting a note — the four operations that
@@ -385,7 +386,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
       const absIndex = resolve(opts.vaultRoot, KNOWLEDGE_INDEX);
       const indexBefore = await readIfPresent(absIndex, KNOWLEDGE_INDEX);
       if (indexBefore === '') {
-        warnings.push(`${KNOWLEDGE_INDEX} não existe; o domínio novo não foi indexado`);
+        warnings.push(`${KNOWLEDGE_INDEX}${PHRASES.indexMissing}`);
       } else {
         const line =
           `- [[../${layout.folders.wiki}/${toDomain}/${toDomain}-moc|${toDomain}]]` +
@@ -441,7 +442,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
       written.push(plan.absPath);
     } catch (err) {
       warnings.push(
-        `falha ao reescrever ${forMessage(plan.relPath)}: ` +
+        `${PHRASES.rewriteFailed}${forMessage(plan.relPath)}: ` +
           forMessage(err instanceof Error ? err.message : String(err)),
       );
     }
@@ -518,8 +519,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   }
   if (head.modified) {
     warnings.push(
-      `${forMessage(relPath)} tem edições não commitadas; ` +
-        'restaurar traz de volta a versão commitada, não o que está em disco agora',
+      `${forMessage(relPath)}${PHRASES.uncommittedEdits}`,
     );
   }
 
@@ -587,7 +587,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
       written.push(plan.absPath);
     } catch (err) {
       warnings.push(
-        `falha ao atualizar ${forMessage(plan.relPath)}: ` +
+        `${PHRASES.updateFailed}${forMessage(plan.relPath)}: ` +
           forMessage(err instanceof Error ? err.message : String(err)),
       );
     }

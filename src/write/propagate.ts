@@ -13,6 +13,7 @@ import {
 import { ensureFrontmatter, formatLocal } from './template.js';
 import { DEFAULT_LAYOUT, heading, type Layout } from '../config/layout.js';
 import { coded } from '../i18n/errors.js';
+import { PHRASES } from '../i18n/phrases.js';
 
 /**
  * Automatic propagation of a learning into the three places that make it findable again:
@@ -683,7 +684,7 @@ async function applyTarget(
     // name is escaped, because a path is caller-influenced and a warning that can forge a
     // line can claim the write succeeded.
     result.warnings.push(
-      `falha ao propagar ${forMessage(target.relPath)}: ` +
+      `${PHRASES.propagateFailed}${forMessage(target.relPath)}: ` +
         forMessage(err instanceof Error ? err.message : String(err)),
     );
   }
@@ -713,7 +714,7 @@ export async function propagate(opts: PropagateOptions): Promise<PropagateResult
   if (problem !== undefined) {
     // Both domain-derived targets are skipped, and the daily still runs: the learning did
     // happen, and a capture line is better than nothing while the domain is fixed.
-    result.warnings.push(`falha ao propagar domínio ${forMessage(dominio)}: ${problem}`);
+    result.warnings.push(`${PHRASES.propagateDomainFailed}${forMessage(dominio)}: ${problem}`);
   } else {
     // 1. The domain MOC, created when the domain has none — `02-wiki/performance/` and
     //    `02-wiki/tauri/` in the real vault are exactly that case.
