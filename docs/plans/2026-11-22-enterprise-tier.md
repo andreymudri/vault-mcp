@@ -214,7 +214,7 @@ consegue usar o servidor com nomes de parâmetro em inglês.
 **Depends:** T12
 
 - [x] **Step 1:** Por `gh api`: secret scanning e push protection, alertas e correções do Dependabot, relato privado de vulnerabilidade, `delete_branch_on_merge`, ruleset em `main` (sem force-push, sem apagar).
-- [ ] **Step 2:** Apagar `origin/feat/research-preview`, já contido em `main`. Criar um GitHub Release para cada uma das sete tags, com a seção correspondente do CHANGELOG. Registrar o que foi ligado.
+- [x] **Step 2:** Apagar `origin/feat/research-preview`, já contido em `main`. Criar um GitHub Release para cada uma das sete tags, com a seção correspondente do CHANGELOG. Registrar o que foi ligado.
 
 ### Task 14: annotations e títulos
 

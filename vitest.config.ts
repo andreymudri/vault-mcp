@@ -9,8 +9,8 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       reporter: ['text-summary', 'json-summary'],
       // A floor one point under what `npm test -- --coverage` measures, which is the command CI
-      // runs (2026-11-22, at the end of the 0.6.0 work: statements 94.63, branches 87.13,
-      // functions 95.2, lines 96.75). It is there to catch a change that arrives without tests,
+      // runs (2026-11-22, at the end of the 0.6.0 work: statements 94.64, branches 87.26,
+      // functions 95.21, lines 96.75). It is there to catch a change that arrives without tests,
       // not to be chased upward.
       //
       // What runs in a child process is not counted here, and that is most of what is missing:

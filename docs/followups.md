@@ -521,7 +521,8 @@ provenance; `SECURITY.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `dep
 No GitHub, ligado por `gh api`: secret scanning e push protection, alertas e correções do
 Dependabot, relato privado de vulnerabilidade, apagar branch depois do merge, e um ruleset em
 `main` que proíbe force-push e apagar o branch (NÃO exige PR: o dono dá push direto de release). O
-branch `feat/research-preview`, já contido em `main`, foi apagado do remoto.
+branch `feat/research-preview`, já contido em `main`, foi apagado do remoto. Cada uma das sete
+tags antigas (0.1.0 a 0.5.0) ganhou um GitHub Release com a seção dela no `CHANGELOG.md`.
 
 **Fica com o dono:** cadastrar o trusted publisher no npmjs.com (repositório + `release.yml`),
 publicar a 0.6.0, publicar no MCP Registry e, se quiser, assinar commits.
