@@ -23,7 +23,7 @@ import { writeTools } from './tools/write-tools.js';
  * the tests do — the protocol layer in `index.ts` is a thin adapter over this array.
  */
 
-export { LEGACY_ARGUMENTS, applyLegacyArguments, type LegacyConflict } from './tools/define.js';
+export { LEGACY_ARGUMENTS, applyLegacyArguments, refuse, type LegacyConflict } from './tools/define.js';
 export {
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,

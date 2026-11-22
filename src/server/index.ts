@@ -4,10 +4,15 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  type CallToolResult,
+  type Tool,
+} from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 
 import { loadLayout, withLayoutNames, type Layout } from '../config/layout.js';
 import { resolveLang, type Lang } from '../i18n/lang.js';
@@ -19,10 +24,10 @@ import { VaultScanner } from '../vault/scanner.js';
 import { autoPushEnabled } from '../write/git.js';
 import {
   ERROR_META_KEY,
-  applyLegacyArguments,
   createToolset,
   forMessage,
   makeRedactor,
+  refuse,
   type ToolDefinition,
   type ToolResult,
 } from './tools.js';
@@ -131,6 +136,23 @@ export function toolCallback(
     const elapsed = (): number => Math.round(performance.now() - started);
     try {
       const result = await tool.handler(args);
+      // A successful answer of a tool that publishes an output schema has to obey it — strictly,
+      // because the schema says `additionalProperties: false` and that is what a client validates
+      // against. A mismatch is a defect of this server, so it is logged as one and what goes out
+      // is a refusal: handing over structured content the client will reject helps nobody.
+      if (result.isError !== true && tool.outputSchema !== undefined) {
+        const checked = tool.outputSchema.strict().safeParse(result.structuredContent);
+        if (!checked.success) {
+          logger.error('tool.outputInvalid', {
+            tool: tool.name,
+            ms: elapsed(),
+            issues: checked.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.')}: ${issue.code}`),
+          });
+          return toCallToolResult(
+            refuse(`${tool.name} ${messages.errors.toolFailed}: ${messages.errors.outputInvalid}`, 'output.invalid'),
+          );
+        }
+      }
       // One line per call, at `info`: which tool, how long, and whether it answered or refused. A
       // refusal is ordinary operation — a path that names no note — so it is not a warning; what
       // an operator wants from this line is the duration and the rate of each.
@@ -159,18 +181,6 @@ export function toolCallback(
   };
 }
 
-/**
- * The server with the eleven tools registered, ready for any transport.
- *
- * `McpServer` is the SDK's registration front end over its own `Server` (it is reachable as
- * `.server`); it takes the zod schema each tool already carries, publishes the JSON Schema that
- * `tools/list` requires and validates arguments before the handler runs. Building the JSON Schema
- * by hand here would be a second, silently drifting copy of every input contract.
- *
- * The scanner instance is shared with the `Retriever` on purpose: the retriever consumes the
- * scanner's change delta, and a second scanner over the same vault would answer from an index
- * nobody kept in step.
- */
 /** What `createVaultServer` takes beyond the vault and the language: the parsed environment, and a logger. */
 export type ServerOptions = Partial<ServerConfig> & {
   logger?: Logger;
@@ -183,7 +193,7 @@ const MCP_LEVEL = { error: 'error', warn: 'warning', info: 'info', debug: 'debug
 
 /** The server, plus the two things its process needs in order to stop without leaving a mess. */
 export interface VaultApp {
-  server: McpServer;
+  server: Server;
   /** Resolves when no write is in flight. */
   idle(): Promise<void>;
   /** Removes any vault lock this process still holds. Synchronous: it runs on the way out. */
@@ -191,39 +201,14 @@ export interface VaultApp {
 }
 
 /**
- * Makes `transport` hand the server every `tools/call` with its legacy argument names already
- * replaced (`LEGACY_ARGUMENTS` in `tools.ts`).
+ * A tool's zod schema as the JSON Schema `tools/list` publishes.
  *
- * It has to happen HERE. The SDK validates a call against the published schema before the tool's
- * handler runs, that schema is strict and written in the new names, so a call spelled the old way
- * would be refused before any of this server's code saw it. The transport is the one seam ahead
- * of that validation that is public API: the SDK sets `onmessage`, and this wraps whatever it sets.
- *
- * A call carrying both spellings with different values is passed through untouched, and the
- * strict schema then refuses the legacy name — which is the refusal it deserves.
+ * Derived, never written out: a JSON Schema kept by hand beside the zod one would be a second,
+ * silently drifting copy of every contract. Draft 7 and the same `io` direction the SDK's own
+ * front end used, so what a client reads is byte for byte what it read before.
  */
-export function acceptLegacyArguments<T extends Transport>(transport: T): T {
-  let handler: Transport['onmessage'];
-  Object.defineProperty(transport, 'onmessage', {
-    configurable: true,
-    enumerable: true,
-    get: () => handler,
-    set: (next: Transport['onmessage']) => {
-      handler =
-        next === undefined
-          ? undefined
-          : (message, extra) => next(renameLegacyArguments(message), extra);
-    },
-  });
-  return transport;
-}
-
-function renameLegacyArguments<M>(message: M): M {
-  const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown } };
-  if (call.method !== 'tools/call' || typeof call.params?.name !== 'string') return message;
-  const renamed = applyLegacyArguments(call.params.name, call.params.arguments);
-  if (renamed.conflict !== undefined || renamed.args === call.params.arguments) return message;
-  return { ...message, params: { ...call.params, arguments: renamed.args } };
+function jsonSchemaOf(schema: z.ZodObject, io: 'input' | 'output'): Tool['inputSchema'] {
+  return z.toJSONSchema(schema, { target: 'draft-7', io }) as Tool['inputSchema'];
 }
 
 /** The server alone, for a caller that only speaks the protocol to it. */
@@ -231,10 +216,27 @@ export function createVaultServer(
   vaultRoot: string,
   lang: Lang = 'en',
   config: ServerOptions = {},
-): McpServer {
+): Server {
   return createVaultApp(vaultRoot, lang, config).server;
 }
 
+/**
+ * The server with its tools published, ready for any transport.
+ *
+ * It answers `tools/list` and `tools/call` ITSELF, on the SDK's protocol `Server`, rather than
+ * through the SDK's `McpServer` front end. That front end validates a call against the published
+ * schema before the tool's handler runs and answers a failure on its own — in English, as
+ * "MCP error -32602: Input validation error…", with nothing a program can read. So the refusal
+ * this server writes for a bad argument (in the caller's language, naming the argument, with
+ * `input.invalid` beside it) never left the building, a legacy argument name had to be renamed by
+ * wrapping the transport before the SDK could reject it, and the explanation for sending both
+ * spellings was unreachable. Here every call reaches the handler, which renames, validates and
+ * refuses in one place.
+ *
+ * The scanner instance is shared with the `Retriever` on purpose: the retriever consumes the
+ * scanner's change delta, and a second scanner over the same vault would answer from an index
+ * nobody kept in step.
+ */
 export function createVaultApp(
   vaultRoot: string,
   lang: Lang = 'en',
@@ -254,7 +256,9 @@ export function createVaultApp(
   // The catalog names folders — "a domain under `02-wiki/`" — and a model reads it to decide what
   // to pass, so it is told the names this vault actually uses.
   const messages = withLayoutNames(messagesFor(lang), layout);
-  const server = new McpServer(
+  // `tools: {}` and not `listChanged`: the set of tools is decided once, below, and never changes
+  // while the server runs, so there is no notification to promise.
+  const server = new Server(
     { name: 'vault-mcp', version: VERSION },
     { capabilities: { tools: {}, logging: {} }, instructions: messages.instructions },
   );
@@ -285,8 +289,8 @@ export function createVaultApp(
     ...(config.readOnly === true ? { readOnly: true } : {}),
     ...(config.lockTimeoutMs === undefined ? {} : { lockTimeoutMs: config.lockTimeoutMs }),
   });
-  // What is not published cannot be called: the SDK answers an unknown tool name itself. That is
-  // the whole mechanism of read-only mode, and why it is decided here and not inside each handler.
+  // What is not published cannot be called. That is the whole mechanism of read-only mode, and
+  // why it is decided here and not inside each handler.
   const disabled = new Set(config.disabledTools ?? []);
   const known = new Set(toolset.tools.map((tool) => tool.name));
   for (const name of disabled) {
@@ -296,26 +300,32 @@ export function createVaultApp(
     (tool) => !disabled.has(tool.name) && (config.readOnly !== true || tool.annotations.readOnlyHint),
   );
 
-  for (const tool of published) {
-    server.registerTool(
-      tool.name,
-      {
-        title: tool.title,
-        description: tool.description,
-        annotations: tool.annotations,
-        inputSchema: tool.inputSchema,
-        // Where a tool has one, the SDK publishes it and validates each successful answer.
-        ...(tool.outputSchema === undefined ? {} : { outputSchema: tool.outputSchema }),
-      },
-      toolCallback(tool, redact, messages, logger),
-    );
-  }
+  const listed: Tool[] = published.map((tool) => ({
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+    inputSchema: jsonSchemaOf(tool.inputSchema, 'input'),
+    annotations: tool.annotations,
+    // Said rather than left to the default: no call to this server can be turned into a task.
+    execution: { taskSupport: 'forbidden' as const },
+    ...(tool.outputSchema === undefined ? {} : { outputSchema: jsonSchemaOf(tool.outputSchema, 'output') }),
+  }));
+  const calls = new Map(published.map((tool) => [tool.name, toolCallback(tool, redact, messages, logger)]));
 
-  // Whatever transport the server is connected to, legacy argument names are renamed on the way
-  // in. Wrapping `connect` rather than asking each caller to wrap its transport means there is no
-  // way to stand a server up that forgot to.
-  const connect = server.connect.bind(server);
-  server.connect = (transport) => connect(acceptLegacyArguments(transport));
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: listed }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name } = request.params;
+    const call = calls.get(name);
+    if (call === undefined) {
+      logger.info('tool.call', { tool: name, ms: 0, ok: false, code: 'tool.unknown' });
+      return toCallToolResult(
+        refuse(`${messages.errors.unknownTool}: ${forMessage(name)}`, 'tool.unknown', { tool: forMessage(name) }),
+      );
+    }
+    // The protocol lets a caller leave `arguments` out, which is how a tool that takes none is
+    // called; the handler validates whatever arrives.
+    return call(request.params.arguments ?? {});
+  });
 
   return { server, idle: toolset.idle, releaseLocks: toolset.releaseLocks };
 }

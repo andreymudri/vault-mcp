@@ -2801,6 +2801,61 @@ describe('servidor MCP', () => {
     for (const linha of texto.split('\n')) expect(linha.startsWith('Aviso:')).toBe(false);
   });
 
+  it('o tools/list publica, de cada tool, o schema estrito, as annotations e que não aceita task', async () => {
+    const server = createVaultServer(await makeVault());
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
+    for (const tool of tools) {
+      expect(tool.inputSchema, tool.name).toMatchObject({ type: 'object', additionalProperties: false });
+      expect(typeof tool.title, tool.name).toBe('string');
+      expect(tool.annotations, tool.name).toMatchObject({ openWorldHint: false });
+      expect(tool.execution, tool.name).toEqual({ taskSupport: 'forbidden' });
+    }
+    const learn = tools.find((tool) => tool.name === 'vault_learn');
+    expect(learn?.inputSchema.required).toEqual(['title', 'insight', 'context', 'domain']);
+    expect(learn?.outputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+    // A lista de tools é decidida uma vez: não há `listChanged` a prometer.
+    expect(client.getServerCapabilities()?.tools).toEqual({});
+
+    await client.close();
+    await server.close();
+  });
+
+  it('uma resposta de sucesso fora do outputSchema da tool não sai: vira erro, e vai para o log', async () => {
+    // Quem conferia isto era o front end do SDK. O servidor responde o `tools/call` ele mesmo, então
+    // a conferência é dele — e é estrita, como o schema publicado (`additionalProperties: false`),
+    // que é contra o que um cliente valida.
+    const vaultRoot = await makeVault();
+    const real = makeTools(vaultRoot).tool('vault_status');
+    const entries: LogEntry[] = [];
+    const logger = createLogger({ level: 'debug', write: () => undefined });
+    logger.addSink((entry) => entries.push(entry));
+    const comSobra: ToolDefinition = {
+      ...real,
+      handler: async (args) => {
+        const result = await real.handler(args);
+        return { ...result, structuredContent: { ...result.structuredContent, campo_que_o_schema_nao_tem: 1 } };
+      },
+    };
+
+    const bom = await toolCallback(real, makeRedactor(vaultRoot), messagesFor('pt'), logger)({});
+    expect(bom.isError).not.toBe(true);
+    expect(bom.structuredContent).toBeDefined();
+
+    const ruim = await toolCallback(comSobra, makeRedactor(vaultRoot), messagesFor('pt'), logger)({});
+    expect(ruim.isError).toBe(true);
+    expect(ruim.structuredContent).toBeUndefined();
+    expect(ruim._meta?.[ERROR_META_KEY]).toEqual({ code: 'output.invalid' });
+    expect(entries.filter((entry) => entry.event === 'tool.outputInvalid')).toMatchObject([
+      { level: 'error', fields: { tool: 'vault_status' } },
+    ]);
+  });
+
   it.each(['en', 'pt'] as const)('resolveVaultPath exige VAULT_PATH (%s)', async (lang) => {
     expect(() => resolveVaultPath({ VAULT_LANG: lang })).toThrow(VaultPathError);
     expect(() => resolveVaultPath({ VAULT_LANG: lang, VAULT_PATH: '' })).toThrow(VaultPathError);
@@ -3714,6 +3769,51 @@ describe('código de erro estruturado', () => {
       ok: false,
       code: 'note.notFound',
     });
+
+    await client.close();
+    await server.close();
+  });
+
+  it('entrada inválida chega ao cliente como recusa DESTE servidor: traduzida e com código', async () => {
+    // Enquanto o front end do SDK validava antes do handler, quem respondia era ele: "MCP error
+    // -32602: Input validation error…", em inglês e sem código, e a mensagem do conflito de alias
+    // nunca saía. Agora o servidor responde o `tools/call` ele mesmo.
+    const server = createVaultServer(await makeVault(true), 'pt');
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    await client.listTools();
+    const textOfCall = (result: unknown): string =>
+      ((result as { content?: Array<{ text: string }> }).content ?? []).map((part) => part.text).join('\n');
+
+    const desconhecido = await client.callTool({ name: 'vault_search', arguments: { query: 'jwt', pasta: 'x' } });
+    expect(desconhecido.isError).toBe(true);
+    expect(desconhecido._meta?.[ERROR_META_KEY]).toEqual({ code: 'input.invalid' });
+    expect(textOfCall(desconhecido)).toContain('entrada inválida para vault_search');
+    expect(textOfCall(desconhecido)).toContain('argumento desconhecido: pasta');
+    expect(textOfCall(desconhecido)).not.toContain('MCP error');
+
+    const conflito = await client.callTool({
+      name: 'vault_search',
+      arguments: { query: 'jwt', tipo: 'wiki', type: 'moc' },
+    });
+    expect(conflito._meta?.[ERROR_META_KEY]).toEqual({ code: 'input.invalid' });
+    expect(textOfCall(conflito)).toContain('use só `type`');
+
+    // O nome antigo sozinho continua aceito, agora sem nada no transporte para trocá-lo.
+    const antigo = await client.callTool({ name: 'vault_list', arguments: { tipo: 'projeto' } });
+    expect(antigo.isError).not.toBe(true);
+    expect(textOfCall(antigo)).toContain(POTENTIA);
+
+    // E sem `arguments`, que o protocolo deixa omitir numa tool que não exige nenhum.
+    const semArgumentos = await client.callTool({ name: 'vault_status' });
+    expect(semArgumentos.isError).not.toBe(true);
+
+    const inexistente = await client.callTool({ name: 'vault_nao_existe', arguments: {} });
+    expect(inexistente.isError).toBe(true);
+    expect(inexistente._meta?.[ERROR_META_KEY]).toEqual({ code: 'tool.unknown', params: { tool: 'vault_nao_existe' } });
+    expect(textOfCall(inexistente)).toContain('vault_nao_existe');
 
     await client.close();
     await server.close();

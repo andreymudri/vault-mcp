@@ -165,6 +165,8 @@ const PT = {
   errors: {
     invalidInput: 'entrada inválida para',
     toolFailed: 'falhou',
+    unknownTool: 'tool desconhecida, ou não publicada por este servidor',
+    outputInvalid: 'a resposta não obedece ao schema de saída publicado; nada foi devolvido',
   },
 
   validation: {
@@ -537,6 +539,8 @@ const EN: Messages = {
   errors: {
     invalidInput: 'invalid input for',
     toolFailed: 'failed',
+    unknownTool: 'unknown tool, or one this server does not publish',
+    outputInvalid: 'the answer does not match the published output schema; nothing was returned',
   },
 
   validation: {

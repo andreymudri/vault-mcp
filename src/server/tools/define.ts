@@ -133,10 +133,9 @@ export function receivedType(value: unknown): string {
  * The published schema carries ONLY the new names: a model reads the schema on every session, so
  * it adapts by itself, and a schema that listed both would lose its `required` on four fields of
  * `vault_learn` (neither spelling could be marked mandatory). What cannot adapt by itself is a
- * script written against the old names, so those are still accepted — renamed here, before
- * validation, at both doors: the handler (`defineStructured`) and the transport
- * (`acceptLegacyArguments` in `index.ts`), which has to act before the SDK's own strict
- * validation sees the call.
+ * script written against the old names, so those are still accepted — renamed by the handler
+ * (`defineStructured`) before it validates. That is the only door: the server answers
+ * `tools/call` itself, so no validation runs ahead of the handler.
  */
 export const LEGACY_ARGUMENTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   vault_search: { tipo: 'type' },
