@@ -3305,6 +3305,53 @@ describe('tetos de resposta e de entrada', () => {
     expect(await vaultContains(vaultRoot, 'zzlinha 899 de um aprendizado')).not.toHaveLength(0);
   });
 
+  it('o resultado ESTRUTURADO do vault_learn tem o mesmo teto, na escrita e na prévia, e diz o que cortou', async () => {
+    // O teste acima mede só o texto. Ao lado dele ia `structuredContent` com o diff inteiro e, na
+    // prévia, o antes e o depois de cada arquivo: 581 mil caracteres para um insight de 187 mil,
+    // limitados só pelo teto de entrada.
+    const vaultRoot = await makeVault(true);
+    const { call, tool } = makeTools(vaultRoot);
+    const insight = Array.from({ length: 4_000 }, (_, i) => `zzlinha ${i} de um aprendizado comprido demais`).join('\n');
+    expect(insight.length).toBeGreaterThan(150_000);
+    const args = { title: 'Aprendizado comprido', insight, context: 'teste de teto', domain: 'nestjs' };
+    interface Learned {
+      diff: string;
+      diffTruncated?: boolean;
+      files?: Array<{ path: string; before: string; after: string; diff: string; truncated?: boolean }>;
+    }
+
+    // Um aprendizado que cabe não ganha marca nenhuma. (Antes do grande, que depois de escrito
+    // viraria o alvo do anexo — e aí o antes e o depois dele seriam cortados com razão.)
+    const pequeno = await call('vault_learn', { ...args, insight: 'zzcurto cabe inteiro', preview: true });
+    const small = pequeno.structuredContent as unknown as Learned;
+    expect(small.diffTruncated).toBeUndefined();
+    expect(small.files).toHaveLength(3);
+    expect(small.files?.every((file) => file.truncated === undefined)).toBe(true);
+
+    const previa = await call('vault_learn', { ...args, preview: true });
+    expect(previa.isError).not.toBe(true);
+    const planned = previa.structuredContent as unknown as Learned;
+    expect(planned.diff.length).toBeLessThanOrEqual(MAX_DIFF_CHARS);
+    expect(planned.diffTruncated).toBe(true);
+    for (const file of planned.files ?? []) {
+      for (const field of [file.before, file.after, file.diff]) expect(field.length).toBeLessThanOrEqual(MAX_DIFF_CHARS);
+    }
+    // Só o arquivo que foi cortado diz que foi: o MOC do domínio cabe inteiro.
+    expect(planned.files?.find((file) => file.path.endsWith('aprendizado-comprido.md'))?.truncated).toBe(true);
+    expect(planned.files?.find((file) => file.path.endsWith('nestjs-moc.md'))?.truncated).toBeUndefined();
+    expect(JSON.stringify(previa.structuredContent).length).toBeLessThan(4 * MAX_DIFF_CHARS);
+    // E continua obedecendo, estritamente, ao schema que a tool publica.
+    expect(tool('vault_learn').outputSchema?.strict().safeParse(previa.structuredContent).success).toBe(true);
+
+    const escrita = await call('vault_learn', args);
+    expect(escrita.isError).not.toBe(true);
+    expect((escrita.structuredContent as unknown as Learned).diffTruncated).toBe(true);
+    expect(JSON.stringify(escrita.structuredContent).length).toBeLessThan(MAX_DIFF_CHARS + 3_000);
+    expect(tool('vault_learn').outputSchema?.strict().safeParse(escrita.structuredContent).success).toBe(true);
+    // O corte é da RESPOSTA: a nota foi escrita inteira.
+    expect(await vaultContains(vaultRoot, 'zzlinha 3999 de um aprendizado')).not.toHaveLength(0);
+  });
+
   it('recusa conteúdo acima de 1 MB e insight acima de 200 mil caracteres, sem escrever nada', async () => {
     const vaultRoot = await makeVault(true);
     const { call } = makeTools(vaultRoot);

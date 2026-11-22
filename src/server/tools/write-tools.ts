@@ -8,7 +8,8 @@ import { LearnError, learn } from '../../write/learn.js';
 import { deleteNote, moveNote } from '../../write/relocate.js';
 import { EditError, editNote, writeNote } from '../../write/writer.js';
 import { ToolError, define, defineStructured, messageOf, refreshVault } from './define.js';
-import { MAX_CONTEXT_CHARS, MAX_INSIGHT_CHARS, MAX_WRITE_CHARS } from './limits.js';
+import { sliceAtCodePointBoundary } from '../../retrieval/budget.js';
+import { MAX_CONTEXT_CHARS, MAX_DIFF_CHARS, MAX_INSIGHT_CHARS, MAX_WRITE_CHARS } from './limits.js';
 import { recoveryLines, renderRelocate, renderWrite } from './render.js';
 import { forMessage, relayDiff } from './sanitize.js';
 import { coerceTags, toFrontmatter } from './tag-guard.js';
@@ -53,6 +54,19 @@ async function hardLinkHint(
     // Sem alvo legível não há o que explicar; o erro original já é a resposta.
   }
   return undefined;
+}
+
+/**
+ * `text` held to the ceiling a relayed diff has, and whether that cost it anything.
+ *
+ * For the DATA half of an answer. The text half is cut by `relayDiff`, which also says so in a
+ * line of its own; a field of structured content stays what it claims to be — a diff, a file's
+ * text — so the cut is reported beside it, in a flag, and not written into it.
+ */
+function capped(text: string): { text: string; cut: boolean } {
+  return text.length <= MAX_DIFF_CHARS
+    ? { text, cut: false }
+    : { text: sliceAtCodePointBoundary(text, MAX_DIFF_CHARS), cut: true };
 }
 
 /**
@@ -221,7 +235,11 @@ export function writeTools(ctx: ToolContext): ToolDefinition[] {
       propagated: z.array(z.string()), committed: z.boolean(), pushed: z.boolean().optional(), warning: z.string().optional(),
       pending: z.boolean().optional(), recovered: z.number().optional(), dropped: z.number().optional(),
       preview: z.boolean().optional(), revision: z.string().optional(), previewTime: z.string(),
-      files: z.array(z.object({ path: z.string(), before: z.string(), after: z.string(), diff: z.string() })).optional(),
+      files: z.array(z.object({
+        path: z.string(), before: z.string(), after: z.string(), diff: z.string(),
+        truncated: z.boolean().optional().describe('True when before, after or diff was cut to fit this answer.'),
+      })).optional(),
+      diffTruncated: z.boolean().optional().describe('True when diff was cut to fit this answer. What is written is never cut.'),
     }),
     async (input) => {
       const at = input.preview_time ? new Date(input.preview_time) : new Date();
@@ -280,11 +298,32 @@ export function writeTools(ctx: ToolContext): ToolDefinition[] {
         }
       }
       lines.push('', `${m.results.diffShowUser}:`, result.diff === '' ? m.results.empty : relayDiff(result.diff, m));
+      // The data half is held to the ceiling the text half has. It used to carry the diff whole
+      // and, on a preview, every file's text before and after: 581,085 characters for an insight
+      // of 187,889, bounded by nothing but the ceiling on the input. Each field is cut on its own
+      // and says so; nothing a caller needs is lost, since what is cut is its own insight or a
+      // note `vault_get_note` returns, and `revision` is computed from the whole plan.
+      const diff = capped(result.diff);
+      const files = result.files?.map((file) => {
+        const before = capped(file.before);
+        const after = capped(file.after);
+        const fileDiff = capped(file.diff);
+        return {
+          path: file.path,
+          before: before.text,
+          after: after.text,
+          diff: fileDiff.text,
+          ...(before.cut || after.cut || fileDiff.cut ? { truncated: true } : {}),
+        };
+      });
       // The same two sentences as DATA speak the same language as the text.
       return {
         text: lines.join('\n'),
         structured: {
           ...result,
+          diff: diff.text,
+          ...(diff.cut ? { diffTruncated: true } : {}),
+          ...(files === undefined ? {} : { files }),
           reason: translatePhrases(result.reason, m.phrases),
           ...(result.warning === undefined ? {} : { warning: translatePhrases(result.warning, m.phrases) }),
           previewTime: at.toISOString(),
