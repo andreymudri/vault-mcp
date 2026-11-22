@@ -83,23 +83,131 @@ function withoutLeadingHeadingLine(text: string): string {
 }
 
 /**
- * Índice invertido sobre chunks: termo -> chunkId -> frequência já ponderada por campo
+ * One term's postings, as two parallel typed arrays: which chunk (by ordinal) and how often.
+ *
+ * This used to be a `Map<chunkId, frequency>` per term. Measured on a synthetic vault of twenty
+ * thousand notes (3.9 million postings): those maps were 168 MB of a 329 MB index, about 43 bytes
+ * a posting, nearly all of it the map's own bookkeeping. Here a posting is twelve bytes.
+ *
+ * Postings are APPENDED in ordinal order and never moved: a chunk that is removed or re-indexed is
+ * marked dead in the index's ordinal table, and its postings are skipped on the way past. A list
+ * is rewritten without them once the dead outnumber the live, so removal stays proportional to
+ * the chunk being removed — the property `removeChunkById` was written to keep.
+ */
+class PostingList {
+  readonly term: string;
+  readonly id: number;
+  ordinals = new Uint32Array(4);
+  /** `Float64`, not `Float32`: a weighted frequency has to read back exactly as it was summed. */
+  freqs = new Float64Array(4);
+  /** Slots in use, dead ones included. */
+  length = 0;
+  /** Postings whose chunk is still indexed: the term's document frequency. */
+  live = 0;
+
+  constructor(term: string, id: number) {
+    this.term = term;
+    this.id = id;
+  }
+
+  push(ordinal: number, freq: number): void {
+    if (this.length === this.ordinals.length) this.resize(this.length * 2);
+    this.ordinals[this.length] = ordinal;
+    this.freqs[this.length] = freq;
+    this.length += 1;
+    this.live += 1;
+  }
+
+  /** Drops the postings of chunks that are no longer indexed. Order is preserved. */
+  compact(idByOrdinal: ReadonlyArray<string | undefined>): void {
+    let kept = 0;
+    for (let i = 0; i < this.length; i += 1) {
+      const ordinal = this.ordinals[i] ?? 0;
+      if (idByOrdinal[ordinal] === undefined) continue;
+      this.ordinals[kept] = ordinal;
+      this.freqs[kept] = this.freqs[i] ?? 0;
+      kept += 1;
+    }
+    this.length = kept;
+    // Give the memory back when the list shrank for real, and keep a little room to grow into.
+    if (kept * 4 < this.ordinals.length) this.resize(Math.max(4, kept * 2));
+  }
+
+  /** The slot holding `ordinal`, or -1. Ordinals only ever grow, so the list is sorted. */
+  slotOf(ordinal: number): number {
+    let low = 0;
+    let high = this.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >>> 1;
+      const value = this.ordinals[mid] ?? 0;
+      if (value === ordinal) return mid;
+      if (value < ordinal) low = mid + 1;
+      else high = mid - 1;
+    }
+    return -1;
+  }
+
+  private resize(capacity: number): void {
+    const ordinals = new Uint32Array(capacity);
+    ordinals.set(this.ordinals.subarray(0, this.length));
+    this.ordinals = ordinals;
+    const freqs = new Float64Array(capacity);
+    freqs.set(this.freqs.subarray(0, this.length));
+    this.freqs = freqs;
+  }
+}
+
+/** One term's postings as a caller reads them: chunk id to weighted frequency, live chunks only. */
+export interface TermPostings extends Iterable<[string, number]> {
+  /** How many indexed chunks carry the term — its document frequency. */
+  readonly size: number;
+  get(chunkId: string): number | undefined;
+  has(chunkId: string): boolean;
+  keys(): IterableIterator<string>;
+}
+
+/** The whole index as a caller reads it: term to postings. Read-only, and Map-shaped on purpose. */
+export interface Postings extends Iterable<[string, TermPostings]> {
+  /** How many distinct terms are indexed. */
+  readonly size: number;
+  get(term: string): TermPostings | undefined;
+  has(term: string): boolean;
+  keys(): IterableIterator<string>;
+}
+
+/**
+ * Índice invertido sobre chunks: termo -> chunk -> frequência já ponderada por campo
  * (`FIELD_WEIGHTS`). `chunkLengths` guarda a soma das frequências ponderadas de cada chunk (não
  * a contagem crua de tokens), para que um chunk inflado por bloco de código não seja penalizado
  * pela normalização de comprimento do BM25 como se fosse todo prosa.
+ *
+ * Inside, a chunk is an ORDINAL — a small integer handed out when it is added and never reused —
+ * and a term's postings are typed arrays of ordinals and frequencies (`PostingList`). Outside,
+ * `postings` still reads as term -> chunk id -> frequency.
  */
 export class InvertedIndex {
-  readonly postings = new Map<string, Map<string, number>>();
   readonly chunkLengths = new Map<string, number>();
   readonly chunks = new Map<string, Chunk>();
   totalLength = 0;
 
+  private readonly lists = new Map<string, PostingList>();
+  /** By `PostingList.id`. A slot is cleared when its term loses its last chunk. */
+  private readonly listById: Array<PostingList | undefined> = [];
+  /** By ordinal: the chunk's id, or `undefined` once it was removed or re-indexed. */
+  private readonly idByOrdinal: Array<string | undefined> = [];
+  /** By ordinal: the chunk's weighted length, read in the scoring loop without a map lookup. */
+  private readonly lengthByOrdinal: number[] = [];
+  private readonly ordinalById = new Map<string, number>();
+
   /**
-   * Termos indexados de cada chunk, guardados no momento do `addChunk` para que a remoção não
-   * precise varrer `postings` inteiro procurando quem referencia o chunk removido — ver
-   * `removeChunkById`.
+   * Os termos de cada chunk — os ids das listas deles —, guardados no momento do `addChunk` para
+   * que a remoção não precise varrer o vocabulário inteiro procurando quem referencia o chunk
+   * removido — ver `removeChunkById`.
    */
-  private readonly chunkTerms = new Map<string, string[]>();
+  private readonly chunkTerms = new Map<string, Uint32Array>();
+
+  /** Term -> chunk id -> weighted frequency, read-only. See `eachPosting` for the scoring loop. */
+  readonly postings: Postings = this.postingsView();
 
   /**
    * Tokeniza cada campo do chunk separadamente (heading a partir de `headingPath`, tags a partir
@@ -125,20 +233,29 @@ export class InvertedIndex {
     accumulate(prose, FIELD_WEIGHTS.prose);
     accumulate(code, FIELD_WEIGHTS.code);
 
+    const ordinal = this.idByOrdinal.length;
+    const termIds = new Uint32Array(weighted.size);
     let chunkLength = 0;
+    let slot = 0;
     for (const [term, freq] of weighted) {
       chunkLength += freq;
-      let postings = this.postings.get(term);
-      if (!postings) {
-        postings = new Map<string, number>();
-        this.postings.set(term, postings);
+      let list = this.lists.get(term);
+      if (list === undefined) {
+        list = new PostingList(term, this.listById.length);
+        this.listById.push(list);
+        this.lists.set(term, list);
       }
-      postings.set(chunk.id, freq);
+      list.push(ordinal, freq);
+      termIds[slot] = list.id;
+      slot += 1;
     }
 
+    this.idByOrdinal.push(chunk.id);
+    this.lengthByOrdinal.push(chunkLength);
+    this.ordinalById.set(chunk.id, ordinal);
     this.chunks.set(chunk.id, chunk);
     this.chunkLengths.set(chunk.id, chunkLength);
-    this.chunkTerms.set(chunk.id, [...weighted.keys()]);
+    this.chunkTerms.set(chunk.id, termIds);
     this.totalLength += chunkLength;
   }
 
@@ -150,24 +267,34 @@ export class InvertedIndex {
   }
 
   /**
-   * Remove um chunk usando a lista de termos guardada por `addChunk` em vez de varrer `postings`
-   * inteiro: sem isso, remover N chunks custa O(N × tamanho do vocabulário) e cresce com o vault
-   * todo (medido: ~501ms para remover uma nota de 200 chunks de um vocabulário de 100.000 termos),
-   * mesmo que cada chunk só referencie um punhado de termos. Com a lista, o custo por chunk é
-   * O(termos do próprio chunk).
+   * Remove um chunk usando a lista de termos guardada por `addChunk` em vez de varrer o
+   * vocabulário inteiro: sem isso, remover N chunks custa O(N × tamanho do vocabulário) e cresce
+   * com o vault todo (medido: ~501ms para remover uma nota de 200 chunks de um vocabulário de
+   * 100.000 termos), mesmo que cada chunk só referencie um punhado de termos. Com a lista, o custo
+   * por chunk é O(termos do próprio chunk).
+   *
+   * The postings themselves are not touched here: clearing the ordinal's slot is what kills them,
+   * and each list is rewritten without its dead entries once those outnumber the live ones.
    */
   private removeChunkById(chunkId: string): void {
-    if (!this.chunks.has(chunkId)) return;
-    const length = this.chunkLengths.get(chunkId) ?? 0;
-    this.totalLength -= length;
+    const ordinal = this.ordinalById.get(chunkId);
+    if (ordinal === undefined) return;
+    this.totalLength -= this.chunkLengths.get(chunkId) ?? 0;
     this.chunkLengths.delete(chunkId);
     this.chunks.delete(chunkId);
-    const terms = this.chunkTerms.get(chunkId);
+    this.ordinalById.delete(chunkId);
+    this.idByOrdinal[ordinal] = undefined;
+    const termIds = this.chunkTerms.get(chunkId);
     this.chunkTerms.delete(chunkId);
-    for (const term of terms ?? []) {
-      const postings = this.postings.get(term);
-      if (postings?.delete(chunkId) && postings.size === 0) {
-        this.postings.delete(term);
+    for (const id of termIds ?? []) {
+      const list = this.listById[id];
+      if (list === undefined) continue;
+      list.live -= 1;
+      if (list.live === 0) {
+        this.lists.delete(list.term);
+        this.listById[id] = undefined;
+      } else if (list.length - list.live > list.live) {
+        list.compact(this.idByOrdinal);
       }
     }
   }
@@ -180,7 +307,7 @@ export class InvertedIndex {
   }
 
   vocabulary(): IterableIterator<string> {
-    return this.postings.keys();
+    return this.lists.keys();
   }
 
   /** Número de chunks indexados — a unidade de "documento" para o BM25. */
@@ -190,5 +317,76 @@ export class InvertedIndex {
 
   avgLength(): number {
     return this.chunks.size === 0 ? 0 : this.totalLength / this.chunks.size;
+  }
+
+  /** How many indexed chunks carry `term`. Zero for a term that is not in the vocabulary. */
+  documentFrequency(term: string): number {
+    return this.lists.get(term)?.live ?? 0;
+  }
+
+  /**
+   * Calls `visit` once per indexed chunk carrying `term`, with the chunk's id, the term's weighted
+   * frequency in it and the chunk's weighted length — everything BM25 needs for one posting.
+   *
+   * The scoring loop goes through here rather than through `postings` because it runs once per
+   * posting of every query term: reading the arrays directly costs no iterator object and no map
+   * lookup for the length.
+   */
+  eachPosting(term: string, visit: (chunkId: string, freq: number, length: number) => void): void {
+    const list = this.lists.get(term);
+    if (list === undefined) return;
+    for (let i = 0; i < list.length; i += 1) {
+      const ordinal = list.ordinals[i] ?? 0;
+      const chunkId = this.idByOrdinal[ordinal];
+      if (chunkId === undefined) continue;
+      visit(chunkId, list.freqs[i] ?? 0, this.lengthByOrdinal[ordinal] ?? 0);
+    }
+  }
+
+  private termView(list: PostingList): TermPostings {
+    const idByOrdinal = this.idByOrdinal;
+    const ordinalById = this.ordinalById;
+    function* entries(): IterableIterator<[string, number]> {
+      for (let i = 0; i < list.length; i += 1) {
+        const chunkId = idByOrdinal[list.ordinals[i] ?? 0];
+        if (chunkId !== undefined) yield [chunkId, list.freqs[i] ?? 0];
+      }
+    }
+    const get = (chunkId: string): number | undefined => {
+      const ordinal = ordinalById.get(chunkId);
+      if (ordinal === undefined) return undefined;
+      const slot = list.slotOf(ordinal);
+      return slot === -1 ? undefined : list.freqs[slot];
+    };
+    return {
+      get size() {
+        return list.live;
+      },
+      get,
+      has: (chunkId) => get(chunkId) !== undefined,
+      *keys() {
+        for (const [chunkId] of entries()) yield chunkId;
+      },
+      [Symbol.iterator]: entries,
+    };
+  }
+
+  private postingsView(): Postings {
+    const lists = this.lists;
+    const view = (list: PostingList): TermPostings => this.termView(list);
+    return {
+      get size() {
+        return lists.size;
+      },
+      get: (term) => {
+        const list = lists.get(term);
+        return list === undefined ? undefined : view(list);
+      },
+      has: (term) => lists.has(term),
+      keys: () => lists.keys(),
+      *[Symbol.iterator]() {
+        for (const [term, list] of lists) yield [term, view(list)];
+      },
+    };
   }
 }

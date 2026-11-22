@@ -766,3 +766,97 @@ describe('ingestão — corpo de nota com corrida longa de hífens', () => {
     expect(search(poisonedIndex, BLOB, 5)).toEqual([]);
   });
 });
+
+/**
+ * Os postings deixaram de ser um `Map` por termo e passaram a arrays tipados com marcação de morto
+ * e compactação preguiçosa (`PostingList` em `inverted-index.ts`). A propriedade que isso tem de
+ * manter é uma só: depois de qualquer sequência de inclusões, trocas e remoções, o índice é
+ * indistinguível de um índice NOVO montado só com os chunks que sobraram.
+ */
+describe('InvertedIndex: postings compactos', () => {
+  const WORDS = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa'];
+
+  /** Tudo o que um leitor do índice consegue observar, em forma comparável. */
+  function snapshot(index: InvertedIndex) {
+    const postings = [...index.postings]
+      .map(([term, list]) => [term, list.size, [...list].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))] as const)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return {
+      size: index.size(),
+      avgLength: index.avgLength(),
+      vocabulary: [...index.vocabulary()].sort(),
+      postings,
+      lengths: [...index.chunkLengths].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    };
+  }
+
+  it('depois de churn aleatório, é indistinguível de um índice novo com os mesmos chunks', () => {
+    let seed = 7;
+    const random = (): number => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const text = (): string =>
+      Array.from({ length: 3 + Math.floor(random() * 6) }, () => WORDS[Math.floor(random() * WORDS.length)]).join(' ');
+
+    const churned = new InvertedIndex();
+    const surviving = new Map<string, Chunk>();
+    for (let step = 0; step < 4_000; step += 1) {
+      const note = `n${Math.floor(random() * 60)}.md`;
+      if (random() < 0.25) {
+        churned.removeByPath(note);
+        for (const id of [...surviving.keys()]) if (surviving.get(id)?.path === note) surviving.delete(id);
+        continue;
+      }
+      // O mesmo id volta com outro texto: é a troca, o caso que deixa posting morto para trás.
+      const chunk = makeChunk({ id: `${note}#${1 + Math.floor(random() * 3)}`, path: note, text: text() });
+      churned.addChunk(chunk);
+      surviving.set(chunk.id, chunk);
+    }
+
+    const fresh = new InvertedIndex();
+    for (const chunk of surviving.values()) fresh.addChunk(chunk);
+
+    expect(surviving.size).toBeGreaterThan(20);
+    expect(snapshot(churned)).toEqual(snapshot(fresh));
+    for (const query of ['alpha', 'beta gamma', 'kappa iota theta', 'zeta zeta alpha']) {
+      const byId = (index: InvertedIndex) =>
+        search(index, query, 500)
+          .map((scored) => [scored.chunk.id, scored.score] as const)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      expect(byId(churned)).toEqual(byId(fresh));
+    }
+  });
+
+  it('a frequência de documento conta só chunk vivo, e o termo sem chunk sai do vocabulário', () => {
+    const index = new InvertedIndex();
+    index.addChunk(makeChunk({ id: 'a.md#1', path: 'a.md', text: 'alpha beta' }));
+    index.addChunk(makeChunk({ id: 'b.md#1', path: 'b.md', text: 'alpha gamma' }));
+    expect(index.documentFrequency('alpha')).toBe(2);
+
+    // Trocado dez vezes: nove postings mortos de `alpha` ficaram para trás, e nenhum conta.
+    for (let i = 0; i < 10; i += 1) index.addChunk(makeChunk({ id: 'a.md#1', path: 'a.md', text: 'alpha beta' }));
+    expect(index.documentFrequency('alpha')).toBe(2);
+    expect(index.postings.get('alpha')?.size).toBe(2);
+    expect([...(index.postings.get('alpha')?.keys() ?? [])].sort()).toEqual(['a.md#1', 'b.md#1']);
+
+    index.removeByPath('a.md');
+    expect(index.documentFrequency('beta')).toBe(0);
+    expect(index.postings.has('beta')).toBe(false);
+    expect([...index.vocabulary()].sort()).toEqual(['alpha', 'gamma']);
+    expect(index.postings.get('alpha')?.get('a.md#1')).toBeUndefined();
+    expect(index.postings.get('alpha')?.get('b.md#1')).toBe(1.0);
+  });
+
+  it('remover a maioria dos chunks de um termo preserva exatamente os que ficaram', () => {
+    const index = new InvertedIndex();
+    for (let i = 0; i < 100; i += 1) {
+      index.addChunk(makeChunk({ id: `n${i}.md#1`, path: `n${i}.md`, text: `comum unico${i}` }));
+    }
+    for (let i = 0; i < 100; i += 1) if (i % 5 !== 0) index.removeByPath(`n${i}.md`);
+
+    const comum = index.postings.get('comum');
+    expect(comum?.size).toBe(20);
+    expect([...(comum ?? [])].map(([id]) => id)).toEqual(
+      Array.from({ length: 20 }, (_, k) => `n${k * 5}.md#1`),
+    );
+    expect(search(index, 'comum', 200)).toHaveLength(20);
+  });
+});
