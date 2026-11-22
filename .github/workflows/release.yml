@@ -1,0 +1,89 @@
+# Release por tag: `git tag v0.6.0 && git push origin v0.6.0`.
+#
+# Faz, nesta ordem, o que antes era feito à mão e de memória: confere que a tag é a versão do
+# package.json, roda o lint e a suíte, constrói, sobe o `dist/` no smoke, publica no npm e cria o
+# GitHub Release com a seção daquela versão no CHANGELOG.
+#
+# O publish é por TRUSTED PUBLISHING: o npm aceita o pacote porque o token OIDC deste job prova de
+# que repositório e de que workflow ele veio. Não há token de npm guardado em lugar nenhum — o que
+# não existe não vaza — e a atestação de procedência sai junto, automática.
+#
+# PASSO ÚNICO DO DONO, sem o qual o publish falha com 404: no npmjs.com, em
+# Settings → Trusted Publisher do pacote, cadastrar este repositório e este arquivo
+# (`release.yml`). Enquanto isso não for feito, o fluxo antigo continua valendo: publicar à mão e
+# depois empurrar a tag — o passo de publish vê que a versão já está no registro e segue adiante.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # Criar o GitHub Release.
+      contents: write
+      # Emitir o token OIDC que o npm confere. Sem isto o publish cai no fluxo de token e falha.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Sem `registry-url`: com ele o setup-node grava um .npmrc que espera NODE_AUTH_TOKEN, e esse
+      # caminho passa na frente do OIDC. O registro padrão do npm já é o certo.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+          cache: npm
+
+      - run: npm ci
+
+      - name: A tag é a versão do package.json
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::a tag $GITHUB_REF_NAME não bate com a versão $version do package.json"
+            exit 1
+          fi
+
+      - name: Identidade do git para os repositórios de teste
+        run: |
+          git config --global user.name 'CI'
+          git config --global user.email 'ci@example.com'
+          git config --global init.defaultBranch main
+
+      - run: npm run lint
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm test
+      - run: npm run build
+      - run: npm run smoke
+
+      - name: Notas da versão, tiradas do CHANGELOG
+        run: node scripts/release-notes.mjs "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+
+      # Idempotente de propósito: uma versão já publicada (à mão, ou por uma execução anterior que
+      # falhou depois deste passo) não é erro, e o job segue para criar o Release.
+      - name: Publicar no npm
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version já está no registro; nada a publicar."
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+          fi
