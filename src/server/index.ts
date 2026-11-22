@@ -394,9 +394,20 @@ export async function main(): Promise<void> {
   }
 
   const config = resolveConfig(process.env);
+  // stderr is a pipe, and somebody else holds its other end. When that reader goes away — a client
+  // that stopped draining it, a supervisor restarting its collector — a write fails with EPIPE,
+  // and the failure arrives as an `error` event on the stream, outside any try/catch around the
+  // write. With nobody listening that is an uncaught exception, and the server died of having
+  // nowhere to log. So it is listened for, and from then on the log is simply not written.
+  let stderrOpen = true;
+  process.stderr.on('error', () => {
+    stderrOpen = false;
+  });
   const logger = createLogger({
     ...(config.logLevel === undefined ? {} : { level: config.logLevel }),
-    write: (line) => process.stderr.write(`${line}\n`),
+    write: (line) => {
+      if (stderrOpen) process.stderr.write(`${line}\n`);
+    },
     redact: makeRedactor(vaultRoot),
   });
   // Said before anything else: a setting the server could not honour is in force as its DEFAULT,

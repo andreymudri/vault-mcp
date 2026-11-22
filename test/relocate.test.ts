@@ -59,6 +59,22 @@ async function exists(root: string, relPath: string): Promise<boolean> {
   }
 }
 
+/**
+ * Uma nota cujo NOME tem 229 bytes: legal no sistema de arquivos (o teto é 255), acima do que o
+ * servidor aceita CRIAR (220, por causa do arquivo temporário da escrita atômica). É o que um
+ * vault já pode conter — criada no Obsidian, ou por uma versão anterior deste servidor.
+ */
+const LONG_NAME = `${'ã'.repeat(113)}.md`;
+
+async function plantLongNamedNote(root: string, scanner: VaultScanner): Promise<string> {
+  const relPath = `02-wiki/docker/${LONG_NAME}`;
+  await fs.writeFile(path.join(root, relPath), '---\ntipo: wiki\n---\n\n# Nome comprido\n', 'utf8');
+  await git(root, ['add', '-A']);
+  await git(root, ['commit', '-m', 'chore: nota de nome comprido']);
+  scanner.refresh();
+  return relPath;
+}
+
 /** Quantos commits existem além do inicial. */
 async function commitsSince(root: string): Promise<number> {
   const log = await git(root, ['log', '--oneline']);
@@ -283,6 +299,47 @@ describe('moveNote', () => {
       Error,
     );
     expect(await commitsSince(root)).toBe(0);
+  });
+});
+
+describe('nota que já existe com nome acima do teto de criação', () => {
+  let root: string;
+  let scanner: VaultScanner;
+
+  beforeEach(async () => {
+    ({ root, scanner } = await makeVault());
+  });
+
+  afterEach(async () => {
+    await removeTree(root);
+  });
+
+  it('pode ser renomeada para um nome que cabe', async () => {
+    // O teto de 220 bytes existe para o que o servidor CRIA. Aplicado também à origem do move,
+    // deixava a nota presa: o único jeito de consertar o nome era fora do servidor.
+    expect(Buffer.byteLength(LONG_NAME)).toBe(229);
+    const from = await plantLongNamedNote(root, scanner);
+
+    const result = await moveNote({ vaultRoot: root, scanner, from, to: '02-wiki/docker/nome-curto.md', now: NOW });
+
+    expect(result.committed).toBe(true);
+    expect(await exists(root, from)).toBe(false);
+    expect(await read(root, '02-wiki/docker/nome-curto.md')).toContain('# Nome comprido');
+  });
+
+  it('pode ser apagada', async () => {
+    const relPath = await plantLongNamedNote(root, scanner);
+
+    const result = await deleteNote({ vaultRoot: root, scanner, path: relPath, now: NOW });
+
+    expect(result.committed).toBe(true);
+    expect(await exists(root, relPath)).toBe(false);
+  });
+
+  it('o DESTINO de um move continua com o teto de criação', async () => {
+    await expect(
+      moveNote({ vaultRoot: root, scanner, from: '02-wiki/docker/multi-stage.md', to: `02-wiki/docker/${LONG_NAME}`, now: NOW }),
+    ).rejects.toMatchObject({ code: 'path.nameTooLong' });
   });
 });
 

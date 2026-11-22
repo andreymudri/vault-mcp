@@ -166,6 +166,14 @@ export const MAX_NOTE_NAME_BYTES = MAX_SEGMENT_BYTES - 35;
 
 export interface PathGuardOptions {
   allowArchive?: boolean;
+  /**
+   * The path names a file that already exists and that this operation will not write: the source
+   * of a move, the target of a delete. Its name is then held to what the filesystem allows and not
+   * to `MAX_NOTE_NAME_BYTES`, which is the room an atomic write needs for its temporary file. A
+   * vault can already hold a note named past that — made in Obsidian, or by an earlier version —
+   * and refusing its name here left no way to rename or remove it through the server.
+   */
+  existing?: boolean;
   /** The vault's layout: which folders are the archive and the templates. Default layout when absent. */
   layout?: Layout;
 }
@@ -222,7 +230,8 @@ export function resolveWritePath(
   // In bytes, which is what the filesystem counts: an accented letter is two.
   const segments = rel.split(sep);
   segments.forEach((segment, i) => {
-    const max = i === segments.length - 1 ? MAX_NOTE_NAME_BYTES : MAX_SEGMENT_BYTES;
+    const created = i === segments.length - 1 && options.existing !== true;
+    const max = created ? MAX_NOTE_NAME_BYTES : MAX_SEGMENT_BYTES;
     const bytes = Buffer.byteLength(segment);
     if (bytes > max) {
       const name = segment.length > 40 ? `${segment.slice(0, 40)}…` : segment;

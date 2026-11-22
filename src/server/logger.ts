@@ -75,9 +75,11 @@ export function createLogger(options: LoggerOptions): Logger {
 
   const emit = (entryLevel: LogEntry['level'], event: string, fields: LogFields = {}): void => {
     if (LOG_LEVELS.indexOf(entryLevel) > threshold) return;
-    // Logging must never be the thing that fails: a field that cannot be serialised, a stream
-    // that was closed under the process, a sink whose client went away — each is swallowed here,
-    // because the alternative is a write tool that throws after its write succeeded.
+    // Logging must never be the thing that fails: a field that cannot be serialised, a write that
+    // throws, a sink whose client went away — each is swallowed here, because the alternative is
+    // a write tool that throws after its write succeeded. What this cannot catch is a stream
+    // that fails LATER: a pipe whose reader is gone reports EPIPE as an `error` event, after the
+    // write returned. That one is the stream owner's to listen for — `main` does, for stderr.
     try {
       const entry: LogEntry = {
         ts: now().toISOString(),

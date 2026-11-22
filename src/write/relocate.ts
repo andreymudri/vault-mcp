@@ -248,7 +248,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
   const layout = opts.layout ?? DEFAULT_LAYOUT;
   const KNOWLEDGE_INDEX = knowledgeIndexOf(layout);
   const notesHeading = heading(layout.sections.notes);
-  const fromAbs = await guardedPath(opts.vaultRoot, opts.from, { allowArchive: true, layout });
+  const fromAbs = await guardedPath(opts.vaultRoot, opts.from, { allowArchive: true, layout, existing: true });
   const toAbs = await guardedPath(opts.vaultRoot, opts.to, { allowArchive: true, layout });
 
   const fromRel = toVaultRelative(opts.vaultRoot, fromAbs);
@@ -485,7 +485,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
 export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult> {
   const layout = opts.layout ?? DEFAULT_LAYOUT;
   const KNOWLEDGE_INDEX = knowledgeIndexOf(layout);
-  const absPath = await guardedPath(opts.vaultRoot, opts.path, { layout });
+  const absPath = await guardedPath(opts.vaultRoot, opts.path, { layout, existing: true });
   const relPath = toVaultRelative(opts.vaultRoot, absPath);
 
   if ((await classifyNode(absPath)) !== 'file') {

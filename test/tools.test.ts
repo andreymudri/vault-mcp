@@ -3594,9 +3594,9 @@ describe('desligamento', () => {
    * Um servidor de verdade, com o stdin aberto, que o teste pode sinalizar no meio de uma escrita.
    * `runServer` não serve: ele fecha o stdin e espera o fim, e aqui o fim é o que se provoca.
    */
-  async function serverInFlight(vaultRoot: string) {
+  async function serverInFlight(vaultRoot: string, env: Record<string, string> = {}) {
     const child = spawn(process.execPath, [await buildServer()], {
-      env: { ...process.env, VAULT_PATH: vaultRoot, VAULT_LANG: undefined, VAULT_AUTO_PUSH: undefined },
+      env: { ...process.env, VAULT_PATH: vaultRoot, VAULT_LANG: undefined, VAULT_AUTO_PUSH: undefined, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -3653,6 +3653,32 @@ describe('desligamento', () => {
     },
     30_000,
   );
+
+  it('com o stderr fechado por quem o lia, o servidor continua respondendo', async () => {
+    // O log vai para um pipe que outro processo segura. Quando esse leitor some, a escrita falha
+    // com EPIPE — e a falha chega como evento `error` do stream, fora de qualquer try/catch. Sem
+    // quem o ouvisse virava exceção não tratada: a chamada seguinte ficava sem resposta e o
+    // processo saía com 1.
+    const vaultRoot = await makeVault(true);
+    const server = await serverInFlight(vaultRoot, { VAULT_LOG_LEVEL: 'info' });
+    const answered = (id: number): boolean => jsonLines(server.stdout()).some((message) => message['id'] === id);
+    const search = (id: number): void =>
+      server.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'vault_search', arguments: { query: 'jwt' } } });
+
+    server.send(INITIALIZE);
+    server.send(INITIALIZED);
+    await vi.waitFor(() => expect(answered(1)).toBe(true), { timeout: 10_000, interval: 20 });
+    server.child.stderr.destroy();
+
+    // Cada chamada escreve uma linha de log (`tool.call`, no nível `info`) no pipe fechado.
+    for (const id of [2, 3, 4]) {
+      search(id);
+      await vi.waitFor(() => expect(answered(id)).toBe(true), { timeout: 10_000, interval: 20 });
+    }
+
+    server.child.stdin.end();
+    expect(await server.exited).toEqual({ code: 0, signal: null });
+  }, 30_000);
 
   it('fechar o stdin sem nada em andamento encerra o processo, sem lock para trás', async () => {
     const vaultRoot = await makeVault(true);
