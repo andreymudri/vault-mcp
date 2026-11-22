@@ -1083,6 +1083,12 @@ describe('lockPathFor', () => {
 
       expect(await lockPathFor(relativeVault)).toBe(path.join(real, 'vault-mcp.lock'));
       expect(await lockPathFor(absoluteVault)).toBe(path.join(real, 'vault-mcp.lock'));
+
+      // Written by an editor on Windows: the line ends in CRLF, and the `\r` is not part of the path.
+      const crlfVault = path.join(base, 'crlf');
+      await fs.mkdir(crlfVault);
+      await fs.writeFile(path.join(crlfVault, '.git'), 'gitdir: ../elsewhere/gitdir\r\n', 'utf8');
+      expect(await lockPathFor(crlfVault)).toBe(path.join(real, 'vault-mcp.lock'));
     });
 
     it('walks up to the repository a vault is a subdirectory of', async () => {
