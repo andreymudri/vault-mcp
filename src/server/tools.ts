@@ -456,7 +456,9 @@ function describeIssues(error: z.ZodError, m: Messages): string {
             : m.validation.wrongType
                 .replace('{expected}', String(issue.expected))
                 .replace('{received}', String(issue.received))
-          : issue.message;
+          : issue.code === 'unrecognized_keys'
+            ? renderTemplate(m.validation.unknownArgument, { keys: issue.keys.join(', ') })
+            : issue.message;
       return where === '' ? message : `${where}: ${message}`;
     })
     .join('; ');
@@ -606,7 +608,12 @@ function defineStructured<Shape extends z.ZodRawShape>(
     input: z.infer<z.ZodObject<Shape>>,
   ) => Promise<{ text: string; structured?: Record<string, unknown> }>,
 ): ToolDefinition {
-  const inputSchema = z.object(shape);
+  // STRICT: an argument this tool does not declare is refused, not dropped. zod's default is to
+  // strip unknown keys, and for a filter that is the worst possible reading — `pasta` typed for
+  // `folder` gave a search over the whole vault, an answer that is wrong and does not look it. The
+  // published JSON Schema says the same thing (`additionalProperties: false`), so a client that
+  // validates before sending catches it too.
+  const inputSchema = z.object(shape).strict();
   return {
     name,
     description,

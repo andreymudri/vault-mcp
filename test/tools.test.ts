@@ -3241,3 +3241,45 @@ describe('tetos de resposta e de entrada', () => {
     expect(await vaultContains(vaultRoot, 'zzenorme')).toHaveLength(0);
   });
 });
+
+describe('argumento desconhecido', () => {
+  it('um filtro digitado errado é recusado, e não vira busca sem filtro', async () => {
+    // `pasta` em vez de `folder`. Antes disto o zod descartava a chave e a busca respondia com o
+    // vault inteiro: uma resposta errada que não parece erro.
+    const { call } = makeTools(await makeVault());
+    const result = await call('vault_search', { query: 'jwt', pasta: '02-wiki/docker' });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('argumento desconhecido');
+    expect(textOf(result)).toContain('pasta');
+  });
+
+  it.each(TOOL_NAMES)('%s nomeia o argumento que não conhece', async (name) => {
+    const { call } = makeTools(await makeVault());
+    const result = await call(name, { zzdesconhecido: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('zzdesconhecido');
+  });
+
+  it('o schema publicado diz que não aceita mais nada, e o protocolo recusa', async () => {
+    const server = createVaultServer(await makeVault());
+    const client = new Client({ name: 'teste', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const { tools } = await client.listTools();
+    for (const tool of tools) expect(tool.inputSchema['additionalProperties']).toBe(false);
+
+    const result = await client.callTool({
+      name: 'vault_search',
+      arguments: { query: 'jwt', pasta: '02-wiki/docker' },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('pasta');
+
+    await client.close();
+    await server.close();
+  });
+});
