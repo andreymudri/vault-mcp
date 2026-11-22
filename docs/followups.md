@@ -7,8 +7,9 @@ rodando `vault_move` contra uma cópia do vault real). Este documento deixou
 de ser uma lista de pendências e virou o registro do que era cada um, como foi corrigido e onde está
 o teste que impede a volta — mais a seção final, **Aceito deliberadamente**, que continua valendo.
 
-A suíte passa com 1.222 testes em 21 arquivos, o `tsc` está limpo sobre `src/` E sobre `test/`, e o binário responde
-o handshake MCP com as nove tools.
+A suíte está verde, o `tsc` está limpo sobre `src/` E sobre `test/`, o lint não tem aviso e o binário
+responde o handshake MCP com as onze tools. (A contagem de testes saiu desta frase de propósito: ela
+envelheceu três vezes em quatro lugares.) Os itens 20 em diante vieram da auditoria de 2026-11-22.
 
 Cada item foi corrigido pelo ciclo teste-primeiro: um teste que reproduz o defeito, visto falhando
 pelo motivo certo, e só então a correção. Onde o defeito era uma LACUNA DE COBERTURA e não um bug de
@@ -416,6 +417,116 @@ fazer o git travar de propósito tem.
 
 ---
 
+## 20. Escrita entre PROCESSOS perdia atualização — CORRIGIDO
+
+A `WriteQueue` serializa dentro de um processo, e um servidor MCP stdio é iniciado por cliente: duas
+sessões são dois processos, cada um com uma fila que o outro não vê. Medido na 0.5.0 com workers
+Node separados chamando os handlers reais: 8 processos editando trechos DIFERENTES da mesma nota,
+8 respostas de sucesso, e 7, 6 e 6 edições no arquivo em três rodadas. Em `vault_learn`, 6 processos
+no mesmo domínio deixaram 4 ou 5 das 6 entradas no MOC.
+
+**Correção:** `src/write/vault-lock.ts`, um arquivo de lock criado com `O_CREAT|O_EXCL` num caminho
+derivado SÓ do vault (`<gitdir>/vault-mcp.lock`), tomado dentro do slot da fila em volta de
+ler-modificar-escrever-commitar. Quem não consegue o lock em 30 s é recusado (`lock.timeout`); lock
+de pid morto ou com mais de 2 min é tomado, por `rename`. O push fica fora do lock.
+
+**Fixado por:** `test/cross-process.test.ts` (processos de verdade; visto falhando com
+`expected 6 to be 8`) e `test/vault-lock.test.ts`.
+
+## 21. Commit que falhava deixava a nota órfã — CORRIGIDO
+
+Com `.git/index.lock` tomado, a resposta dizia "Nota criada … Commit: não" e mais nada olhava para
+aquele arquivo: a escrita seguinte commita os caminhos DELA. Com `VAULT_AUTO_PUSH=1` a nota nunca
+saía da máquina.
+
+**Correção:** `add` e `commit` repetem por ~3 s quando o `index.lock` existe; o que falha mesmo
+assim vai para `<gitdir>/vault-mcp-pending.json` e é refeito, com a mensagem original, antes do
+commit da escrita seguinte (cinco tentativas). `vault_status` mostra o que pende. Vault sem
+repositório responde UMA frase (`git.notARepo`) em vez do stderr do git a cada escrita.
+
+**Fixado por:** `test/git.test.ts`, "contention and recovery" (oito casos).
+
+## 22. `vault_learn` anexava em nota de OUTRO domínio — CORRIGIDO
+
+A regra era "tag em comum OU mesmo domínio". Em 2026-11-08 um aprendizado de `trading` foi anexado
+a uma nota de `02-wiki/rustot/` por uma tag genérica. Agora só anexa no domínio em que foi
+arquivado; a nota parecida de outro domínio é nomeada no motivo. `test/learn.test.ts`.
+
+## 23. Seção vazia de template disputava o ranking — CORRIGIDO
+
+Medido no vault real (709 notas): 1.503 de 4.180 chunks (36%) eram `## Solução`/`## Exemplo`/
+`## Referências` vazios, e ocupavam 22,7% dos slots de resultado — as tags entram em todo chunk, e
+um chunk só de heading e tags é curto o bastante para o BM25 tratá-lo como denso. O chunker deixou
+de produzir chunk sem corpo. Depois: 0 chunks ocos, 2,39 → 3,04 notas distintas por consulta. O
+desempate passou de id como string (`#11` antes de `#4`) para linha numérica.
+`test/chunker.test.ts`, `test/retrieval.test.ts`.
+
+## 24. Respostas e entradas sem teto — CORRIGIDO
+
+`vault_list` sem filtro devolvia 135.051 caracteres no vault real e 2,3 MB com 20 mil notas; a
+resposta do `vault_learn` repassava o diff inteiro (um insight de 2 MB voltava em 2.001.083
+caracteres). Agora: `limit`/`offset` no `vault_list` (200 por padrão), diff repassado com teto de
+20.000, `content` até 1 MB e `insight` até 200 mil. `test/tools.test.ts`, "tetos de resposta e de
+entrada".
+
+## 25. O scanner lia qualquer `.md` — CORRIGIDO
+
+Um arquivo de 64 MB travou a primeira busca por 3,3 s e custou ~1 GB de RSS; um binário de 8 MB foi
+indexado sem aviso; symlink pulado sumia em silêncio. Agora: teto de 5 MB (`VAULT_MAX_NOTE_BYTES`)
+decidido pelo `stat`, arquivo com NUL recusado (e não relido enquanto não mudar), e diagnóstico
+para os três. `test/scanner.test.ts`, "tetos".
+
+## 26. Argumento desconhecido era descartado — CORRIGIDO
+
+`vault_search({query, pasta: …})` respondia com o vault inteiro. Os schemas são estritos, e a
+recusa nomeia o argumento. `test/tools.test.ts`, "argumento desconhecido".
+
+## 27. Operação: nada era observável — CORRIGIDO
+
+O servidor escrevia em stderr duas vezes na vida, as duas falhando ao subir. Agora há log JSON por
+linha (`VAULT_LOG_LEVEL`), aviso de configuração que não pôde honrar (`config.invalid`),
+`vault_status`, modo somente leitura (`VAULT_READ_ONLY`, que falha FECHADO), título e annotations
+em toda tool, código de erro em `structuredContent.error`, e SIGTERM que deixa a escrita em curso
+terminar e solta o lock. `test/logger.test.ts`, `test/config.test.ts`, `test/tools.test.ts`.
+
+## 28. Escala: varredura a cada chamada e índice gordo — CORRIGIDO
+
+Com 20 mil notas sintéticas a varredura custava 291 ms por chamada, quase todo o tempo de uma busca
+morna, e o índice segurava 492 MB vivos. A varredura passou a valer por dez vezes o que custou (até
+2 s; abaixo de 20 ms nunca é reaproveitada, e uma escrita do servidor invalida na hora), e os
+postings viraram arrays tipados: 186 MB, start frio de 4,2 s para 3,2 s. `scripts/bench.mjs` mede.
+`test/scanner.test.ts` (relógio injetado), `test/bm25.test.ts` (equivalência depois de churn).
+
+## 29. Produto: só servia ao vault do autor — CORRIGIDO
+
+Nomes de parâmetro em inglês no schema, com os antigos aceitos no handler e num decorador do
+transporte (o SDK valida antes do handler); pastas e seções configuráveis em `.vault-mcp.json`;
+avisos e motivos traduzidos por frase com chave (`src/i18n/phrases.ts`). `test/layout.test.ts`,
+`test/i18n.test.ts`, `test/tools.test.ts`.
+
+## 30. Menores — CORRIGIDOS
+
+Link NFC para arquivo de nome NFD resolvia como quebrado (`test/links.test.ts`); nome longo demais
+estourava `ENAMETOOLONG` cru de dentro da escrita (`path.nameTooLong`, `test/paths.test.ts`);
+`src/server/tools.ts` tinha 2.548 linhas e virou módulos em `src/server/tools/`, com o arquivo
+como barrel — conferido linha a linha, e a suíte passou sem tocar em teste.
+
+## 31. Cadeia de suprimentos e repositório — FEITO em 2026-11-22
+
+`npm audit`: de 14 avisos (1 crítico, 7 altos) para zero, com `zod` 4. CI com `permissions`
+mínimas, actions por SHA, lint, auditoria e piso de cobertura; workflow de release por tag com
+provenance; `SECURITY.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `dependabot.yml`.
+
+No GitHub, ligado por `gh api`: secret scanning e push protection, alertas e correções do
+Dependabot, relato privado de vulnerabilidade, apagar branch depois do merge, e um ruleset em
+`main` que proíbe force-push e apagar o branch (NÃO exige PR: o dono dá push direto de release). O
+branch `feat/research-preview`, já contido em `main`, foi apagado do remoto.
+
+**Fica com o dono:** cadastrar o trusted publisher no npmjs.com (repositório + `release.yml`),
+publicar a 0.6.0, publicar no MCP Registry e, se quiser, assinar commits.
+
+---
+
 ## Aceito deliberadamente
 
 **`src/server/tools.ts` — `vault_get_note` devolve o corpo da nota cru.** Um corpo com `ESC[F` +
@@ -460,6 +571,19 @@ uma nota cujas arestas o `vault_backlinks` também não tem, já que o scanner e
 corpo. Alargar a reescrita sem alargar o scanner criaria a discordância oposta, que é pior: um link
 corrigido que nenhuma tool de leitura enxerga. Se um dia o scanner passar a indexar links de
 frontmatter, os dois lados mudam juntos.
+
+**Resources e prompts do MCP não foram implementados.** As tools já leem tudo, e um resource
+devolveria o corpo de uma nota sem orçamento e sem o escape que o `vault_search` aplica.
+
+**O start frio continua síncrono** — uns 3 s com 20 mil notas. Fatiar a indexação só deixaria um
+`ping` passar antes; toda tool precisa do índice de qualquer jeito.
+
+**`vault_search`, `vault_get_note`, `vault_list` e `vault_backlinks` continuam respondendo só
+texto.** Saída estruturada dobraria, para o modelo, respostas que acabaram de ganhar teto; o
+inventário para programa já existe no `vault_graph`.
+
+**As chaves de frontmatter (`tipo`, `criado`, `atualizado`) e os títulos que o servidor escreve num
+MOC ou índice novo não são configuráveis.** O layout cobre pastas e seções.
 
 ---
 
