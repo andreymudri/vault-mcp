@@ -4,7 +4,14 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { commitFiles, headBlobState, headSha } from '../src/write/git.js';
+import {
+  commitFiles,
+  headBlobState,
+  headSha,
+  lockPathFor,
+  pendingCommits,
+  pushIfEnabled,
+} from '../src/write/git.js';
 import { NO_HOSTILE_FILENAMES, NO_SHELL_HOOKS } from './platform.js';
 
 const execFileAsync = promisify(execFile);
@@ -820,5 +827,173 @@ describe('commitFiles: nenhum git sem limite, nenhum git que pergunta', () => {
     // Um servidor iniciado por um cliente MCP não tem terminal para responder prompt nenhum:
     // perguntar é travar. `pushBranch` já fechava isso; o `commit` não.
     expect(await fs.readFile(marca, 'utf8')).toBe('0');
+  });
+});
+
+describe('commitFiles: contention and recovery', () => {
+  let repoRoot: string;
+
+  beforeEach(async () => {
+    repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-git-recovery-'));
+    await initScratchRepo(repoRoot);
+    await git(repoRoot, ['config', 'user.name', 'Vault MCP Test']);
+    await git(repoRoot, ['config', 'user.email', 'vault-mcp-test@example.com']);
+    await git(repoRoot, ['config', 'commit.gpgsign', 'false']);
+  });
+
+  afterEach(async () => {
+    await removeTree(repoRoot);
+  });
+
+  const indexLock = (): string => path.join(repoRoot, '.git', 'index.lock');
+  const note = async (name: string): Promise<string> => {
+    const absPath = path.join(repoRoot, name);
+    await fs.writeFile(absPath, `# ${name}\n`, 'utf8');
+    return absPath;
+  };
+  const subjects = async (): Promise<string[]> =>
+    (await git(repoRoot, ['log', '--format=%s', '--reverse'])).split('\n').filter(Boolean);
+
+  it('waits for an index.lock held by another git and commits once it is released', async () => {
+    const absPath = await note('nota.md');
+    // Captured now: by the time the timer fires `repoRoot` may belong to another test.
+    const held = indexLock();
+    await fs.writeFile(held, '');
+    setTimeout(() => void fs.rm(held, { force: true }), 120);
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: nota', {
+      indexLockWaitsMs: [50, 100, 200, 400],
+    });
+
+    expect(result.committed).toBe(true);
+    expect(result.pending).toBeUndefined();
+    expect(await subjects()).toEqual(['feat: nota']);
+  });
+
+  it('gives up on an index.lock that never goes away and records the commit as pending', async () => {
+    const absPath = await note('nota.md');
+    await fs.writeFile(indexLock(), '');
+
+    const result = await commitFiles(repoRoot, [absPath], 'feat: nota', { indexLockWaitsMs: [10, 10] });
+
+    expect(result.committed).toBe(false);
+    expect(result.pending).toBe(true);
+    expect(result.warning).toContain('falha ao adicionar arquivos ao git');
+    expect(await pendingCommits(repoRoot)).toEqual([
+      { paths: ['nota.md'], message: 'feat: nota', attempts: 1, at: expect.any(String) },
+    ]);
+  });
+
+  it('commits what an earlier call left pending, under its own message, before the new commit', async () => {
+    const first = await note('primeira.md');
+    await fs.writeFile(indexLock(), '');
+    await commitFiles(repoRoot, [first], 'feat: primeira', { indexLockWaitsMs: [10] });
+    await fs.rm(indexLock());
+
+    const second = await note('segunda.md');
+    const result = await commitFiles(repoRoot, [second], 'feat: segunda');
+
+    expect(result.committed).toBe(true);
+    expect(result.recovered).toBe(1);
+    expect(await subjects()).toEqual(['feat: primeira', 'feat: segunda']);
+    expect(await pendingCommits(repoRoot)).toEqual([]);
+    expect(await git(repoRoot, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('forgets a pending commit that somebody else already made', async () => {
+    const first = await note('primeira.md');
+    await fs.writeFile(indexLock(), '');
+    await commitFiles(repoRoot, [first], 'feat: primeira', { indexLockWaitsMs: [10] });
+    await fs.rm(indexLock());
+    await git(repoRoot, ['add', '-A']);
+    await git(repoRoot, ['commit', '-m', 'commit do usuário']);
+
+    const result = await commitFiles(repoRoot, [await note('segunda.md')], 'feat: segunda');
+
+    expect(result.recovered).toBeUndefined();
+    expect(result.dropped).toBeUndefined();
+    expect(await subjects()).toEqual(['commit do usuário', 'feat: segunda']);
+    expect(await pendingCommits(repoRoot)).toEqual([]);
+  });
+
+  it('drops a pending commit that can never succeed after five attempts, and says so', async () => {
+    const doomed = await note('some.md');
+    await fs.writeFile(indexLock(), '');
+    await commitFiles(repoRoot, [doomed], 'feat: some', { indexLockWaitsMs: [10] });
+    await fs.rm(indexLock());
+    // Untracked and now gone: no `git add` of it can ever match a file again.
+    await fs.rm(doomed);
+
+    const results = [];
+    for (let i = 0; i < 4; i += 1) {
+      results.push(await commitFiles(repoRoot, [await note(`outra-${i}.md`)], `feat: outra ${i}`));
+    }
+
+    expect(results.map((r) => r.committed)).toEqual([true, true, true, true]);
+    expect(results.map((r) => r.dropped)).toEqual([undefined, undefined, undefined, 1]);
+    expect(await pendingCommits(repoRoot)).toEqual([]);
+  });
+
+  it('answers a directory that is not a repository with one coded warning and no journal', async () => {
+    const notARepo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-not-a-repo-'));
+    try {
+      const absPath = path.join(notARepo, 'nota.md');
+      await fs.writeFile(absPath, '# Nota\n', 'utf8');
+
+      const result = await commitFiles(notARepo, [absPath], 'feat: nota');
+
+      expect(result.committed).toBe(false);
+      expect(result.warningCode).toBe('git.notARepo');
+      expect(result.pending).toBeUndefined();
+      expect(await pendingCommits(notARepo)).toEqual([]);
+      expect(await fs.readdir(notARepo)).toEqual(['nota.md']);
+    } finally {
+      await removeTree(notARepo);
+    }
+  });
+
+  it('push: false never pushes, even with VAULT_AUTO_PUSH=1', async () => {
+    const antes = process.env.VAULT_AUTO_PUSH;
+    process.env.VAULT_AUTO_PUSH = '1';
+    try {
+      const result = await commitFiles(repoRoot, [await note('nota.md')], 'feat: nota', { push: false });
+      expect(result.committed).toBe(true);
+      // No remote exists here, so an attempted push would have come back as `pushed: false`.
+      expect(result.pushed).toBeUndefined();
+      expect(result.warning).toBeUndefined();
+
+      expect((await pushIfEnabled(repoRoot)).pushed).toBe(false);
+    } finally {
+      if (antes === undefined) delete process.env.VAULT_AUTO_PUSH;
+      else process.env.VAULT_AUTO_PUSH = antes;
+    }
+  });
+
+  it('pushIfEnabled does nothing when auto-push is off', async () => {
+    const antes = process.env.VAULT_AUTO_PUSH;
+    delete process.env.VAULT_AUTO_PUSH;
+    try {
+      expect(await pushIfEnabled(repoRoot)).toEqual({});
+    } finally {
+      if (antes !== undefined) process.env.VAULT_AUTO_PUSH = antes;
+    }
+  });
+});
+
+describe('lockPathFor', () => {
+  it('puts the lock inside the git directory of a repository, and in the vault root otherwise', async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-lockpath-'));
+    const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-mcp-lockpath-'));
+    try {
+      await initScratchRepo(repo);
+      expect(await fs.realpath(path.dirname(await lockPathFor(repo)))).toBe(
+        await fs.realpath(path.join(repo, '.git')),
+      );
+      expect(path.basename(await lockPathFor(repo))).toBe('vault-mcp.lock');
+      expect(await lockPathFor(plain)).toBe(path.join(plain, '.vault-mcp.lock'));
+    } finally {
+      await removeTree(repo);
+      await removeTree(plain);
+    }
   });
 });

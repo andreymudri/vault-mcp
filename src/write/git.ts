@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { existsSync, promises as fs } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -12,6 +14,17 @@ export interface CommitResult {
    */
   pushed?: boolean;
   warning?: string;
+  /**
+   * Set where the warning is a condition the caller may want to tell apart rather than a git
+   * diagnostic to relay: `git.notARepo`, `git.gitMissing`.
+   */
+  warningCode?: string;
+  /** True when this commit failed and was written to the pending journal, to be retried. */
+  pending?: boolean;
+  /** How many earlier pending commits this call managed to make. Absent when none. */
+  recovered?: number;
+  /** How many pending commits were given up on after `MAX_PENDING_ATTEMPTS`. Absent when none. */
+  dropped?: number;
 }
 
 export interface CommitOptions {
@@ -32,6 +45,12 @@ export interface CommitOptions {
    * leitura do código.
    */
   timeoutMs?: number;
+  /**
+   * The waits between retries of a git that found `index.lock` taken. An option for the same reason
+   * `timeoutMs` is one: a test has to be able to watch the retry give up without spending the three
+   * seconds the real schedule takes.
+   */
+  indexLockWaitsMs?: readonly number[];
 }
 
 /**
@@ -76,38 +95,134 @@ function autoPushEnabled(): boolean {
 }
 
 /**
- * Stages and commits `absPaths` in `repoRoot` as a single commit with `message`.
+ * The waits between retries of an `add` or a `commit` that found `index.lock` taken: about three
+ * seconds in all, which outlasts any git a person or an editor plugin runs by hand.
  *
- * Uses `execFile`, never `exec` with an assembled string: the paths originate
- * from an MCP tool call made by a language model, and a shell would interpret
- * them. All paths are passed as separate argv entries after `--`.
- *
- * By the time this function runs, the files are already written to disk. It
- * never throws — a git failure (no repository, git absent from PATH, nothing
- * staged) is caught and reported as `{ committed: false, warning }` so the
- * caller never mistakes a commit failure for the note itself failing to be
- * written.
+ * The vault lock (`vault-lock.ts`) already keeps two of THESE servers from colliding here. What is
+ * left is every other git on the same repository — the user's own, or an auto-commit plugin inside
+ * Obsidian — and those hold the index for milliseconds.
  */
-export async function commitFiles(
+const INDEX_LOCK_WAITS_MS: readonly number[] = [100, 200, 400, 800, 1600];
+
+/** How many times a pending commit is attempted in all before it is given up on. */
+const MAX_PENDING_ATTEMPTS = 5;
+
+/** Pending commits retried per call, so a long journal cannot turn one write into a hundred gits. */
+const MAX_PENDING_PER_CALL = 20;
+
+const PENDING_FILE = 'vault-mcp-pending.json';
+const LOCK_FILE = 'vault-mcp.lock';
+const PENDING_NOTE = 'o commit ficou pendente e será refeito na próxima escrita';
+
+/** A commit that failed after its files were written, kept so a later write can make it. */
+export interface PendingCommit {
+  /** Repository-relative, POSIX separators. */
+  paths: string[];
+  message: string;
+  /** Attempts made so far, the failed original included. */
+  attempts: number;
+  at: string;
+}
+
+type GitDirAnswer =
+  | { dir: string }
+  | { dir: undefined; reason: 'notARepo' | 'gitMissing' | 'failed'; detail: string };
+
+/** A git directory does not move, so a positive answer is asked for once per root. */
+const gitDirs = new Map<string, string>();
+
+async function resolveGitDir(repoRoot: string): Promise<GitDirAnswer> {
+  const cached = gitDirs.get(repoRoot);
+  if (cached !== undefined) return { dir: cached };
+  try {
+    const { stdout } = await runGit(['-C', repoRoot, 'rev-parse', '--absolute-git-dir']);
+    const dir = stdout.trim();
+    if (dir === '') return { dir: undefined, reason: 'failed', detail: 'git devolveu um diretório vazio' };
+    gitDirs.set(repoRoot, dir);
+    return { dir };
+  } catch (err) {
+    // A string `code` is the spawn failing (`ENOENT`: no git on PATH); a numeric one is git itself
+    // answering, and 128 is how `rev-parse` says "this is not a repository". Anything else — a
+    // timeout kill — is not an answer about the repository at all.
+    const code = err instanceof Error ? (err as Error & { code?: number | string }).code : undefined;
+    const reason = code === 'ENOENT' ? 'gitMissing' : typeof code === 'number' ? 'notARepo' : 'failed';
+    return { dir: undefined, reason, detail: errorMessage(err) };
+  }
+}
+
+/** The repository's git directory, absolute, or `undefined` when `repoRoot` is not inside one. */
+export async function gitDir(repoRoot: string): Promise<string | undefined> {
+  return (await resolveGitDir(repoRoot)).dir;
+}
+
+/**
+ * Where the cross-process vault lock lives: inside the git directory when there is one, a dotfile
+ * in the vault root when there is not.
+ *
+ * Inside `.git` because nothing there is ever a note, ever staged, or ever shown by `git status`.
+ * Asked of git rather than assumed to be `<vault>/.git`: a vault can be a subdirectory of a
+ * repository, a linked worktree or a submodule, and in each of those `.git` is elsewhere or is a
+ * file. The dotfile fallback is invisible to the scanner, which skips every dot entry.
+ */
+export async function lockPathFor(vaultRoot: string): Promise<string> {
+  const dir = await gitDir(vaultRoot);
+  return dir === undefined ? join(vaultRoot, '.vault-mcp.lock') : join(dir, LOCK_FILE);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether a failed git was stopped by `index.lock`.
+ *
+ * Two signs, either one enough. The file still being there is the reliable one. The other is git
+ * naming it in what it printed, for the lock that was released between the failure and this
+ * check — and that IS reading git's prose, which this module otherwise refuses to do. The refusal
+ * is about granting a benign classification on text a hook or a filename can forge; here the only
+ * thing forged text can buy is a bounded number of retries of a command that had already failed.
+ */
+function indexLockInvolved(dir: string | undefined, err: unknown): boolean {
+  if (dir !== undefined && existsSync(join(dir, 'index.lock'))) return true;
+  return errorStreams(err).includes('index.lock');
+}
+
+async function retryOnIndexLock<T>(
+  dir: string | undefined,
+  waits: readonly number[],
+  run: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (err) {
+      const wait = waits[attempt];
+      if (wait === undefined || !indexLockInvolved(dir, err)) throw err;
+      await sleep(wait);
+    }
+  }
+}
+
+type CommitOutcome =
+  | { status: 'committed' }
+  | { status: 'nothing'; warning: string }
+  | { status: 'failed'; warning: string };
+
+/** One add, one staged-diff check, one commit — the unit both a new write and a retry go through. */
+async function commitOnce(
   repoRoot: string,
+  dir: string | undefined,
   absPaths: string[],
   message: string,
-  options: CommitOptions = {}
-): Promise<CommitResult> {
-  // With no paths, `git commit -m <msg> --` has no pathspec at all and commits
-  // the entire index — including unrelated work already staged by the user.
-  // Refuse to run git in that case rather than risk sweeping in a stranger's
-  // changes under this tool's commit message.
-  if (absPaths.length === 0) {
-    return { committed: false, warning: 'nada a commitar: nenhum arquivo informado' };
-  }
-
-  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
-
+  timeoutMs: number,
+  waits: readonly number[],
+): Promise<CommitOutcome> {
   try {
-    await runGit(['-C', repoRoot, '--literal-pathspecs', 'add', '--', ...absPaths], timeoutMs);
+    await retryOnIndexLock(dir, waits, () =>
+      runGit(['-C', repoRoot, '--literal-pathspecs', 'add', '--', ...absPaths], timeoutMs),
+    );
   } catch (err) {
-    return { committed: false, warning: `falha ao adicionar arquivos ao git: ${errorMessage(err)}` };
+    return { status: 'failed', warning: `falha ao adicionar arquivos ao git: ${errorMessage(err)}` };
   }
 
   // Ask git's own bookkeeping whether anything is actually staged for these
@@ -138,31 +253,218 @@ export async function commitFiles(
       timeoutMs,
     );
     // Exit 0: no staged difference for these paths. The benign no-op.
-    return { committed: false, warning: 'nada a commitar: arquivos sem alteração' };
+    return { status: 'nothing', warning: 'nada a commitar: arquivos sem alteração' };
   } catch (err) {
     // Exit 1 is `--quiet`'s "there are differences" signal: proceed to commit.
     // Anything else (128, a spawn failure) is a genuine error.
     if (exitCode(err) !== 1) {
-      return {
-        committed: false,
-        warning: `falha ao verificar alterações no git: ${errorMessage(err)}`,
-      };
+      return { status: 'failed', warning: `falha ao verificar alterações no git: ${errorMessage(err)}` };
     }
   }
 
   try {
-    await runGit(
-      ['-C', repoRoot, '--literal-pathspecs', 'commit', '-m', message, '--', ...absPaths],
-      timeoutMs,
+    await retryOnIndexLock(dir, waits, () =>
+      runGit(
+        ['-C', repoRoot, '--literal-pathspecs', 'commit', '-m', message, '--', ...absPaths],
+        timeoutMs,
+      ),
     );
   } catch (err) {
     // There *was* something staged, so a failure here is real: a rejecting
     // hook, an unset identity, a locked index. Surface the diagnostic.
-    return { committed: false, warning: `falha ao commitar: ${errorMessage(err)}` };
+    return { status: 'failed', warning: `falha ao commitar: ${errorMessage(err)}` };
+  }
+  return { status: 'committed' };
+}
+
+function isPendingCommit(value: unknown): value is PendingCommit {
+  if (value === null || typeof value !== 'object') return false;
+  const entry = value as Partial<PendingCommit>;
+  return (
+    Array.isArray(entry.paths) &&
+    entry.paths.every((p) => typeof p === 'string') &&
+    typeof entry.message === 'string' &&
+    typeof entry.attempts === 'number' &&
+    typeof entry.at === 'string'
+  );
+}
+
+/** The journal as it is on disk. A missing or unreadable file is an empty journal, never an error. */
+async function readPending(dir: string): Promise<PendingCommit[]> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(join(dir, PENDING_FILE), 'utf8')) as unknown;
+    return Array.isArray(parsed) ? parsed.filter(isPendingCommit) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Replaces the journal, through a sibling temporary file so a crash never leaves half of one. */
+async function writePending(dir: string, entries: PendingCommit[]): Promise<void> {
+  const target = join(dir, PENDING_FILE);
+  if (entries.length === 0) {
+    await fs.rm(target, { force: true });
+    return;
+  }
+  const tmp = `${target}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(entries, null, 2), 'utf8');
+  await fs.rename(tmp, target);
+}
+
+/**
+ * Commits that failed after their files were written and are waiting to be made.
+ *
+ * Without the journal such a write is an orphan: the note is on disk, the tool said "Commit: no",
+ * and nothing ever looks at it again — the next write commits ITS paths and no others, so with
+ * auto-push on the note silently never leaves the machine.
+ */
+export async function pendingCommits(repoRoot: string): Promise<PendingCommit[]> {
+  const dir = await gitDir(repoRoot);
+  return dir === undefined ? [] : readPending(dir);
+}
+
+/**
+ * Retries the journal, oldest first. Each entry becomes its own commit under its own message, so
+ * the history reads as it would have had nothing failed.
+ *
+ * "Nothing staged" also clears an entry: somebody already committed those paths — the user, or an
+ * auto-commit plugin sweeping the tree — and that is the outcome the entry was waiting for.
+ */
+async function drainPending(
+  repoRoot: string,
+  dir: string,
+  timeoutMs: number,
+  waits: readonly number[],
+): Promise<{ recovered: number; dropped: number }> {
+  const entries = await readPending(dir);
+  if (entries.length === 0) return { recovered: 0, dropped: 0 };
+
+  const keep: PendingCommit[] = entries.slice(MAX_PENDING_PER_CALL);
+  let recovered = 0;
+  let dropped = 0;
+  for (const entry of entries.slice(0, MAX_PENDING_PER_CALL)) {
+    const absPaths = entry.paths.map((p) => join(repoRoot, ...p.split('/')));
+    const outcome = await commitOnce(repoRoot, dir, absPaths, entry.message, timeoutMs, waits);
+    if (outcome.status === 'committed') recovered += 1;
+    else if (outcome.status === 'nothing') continue;
+    else if (entry.attempts + 1 >= MAX_PENDING_ATTEMPTS) dropped += 1;
+    else keep.push({ ...entry, attempts: entry.attempts + 1 });
+  }
+  await writePending(dir, keep);
+  return { recovered, dropped };
+}
+
+/**
+ * Stages and commits `absPaths` in `repoRoot` as a single commit with `message`.
+ *
+ * Uses `execFile`, never `exec` with an assembled string: the paths originate
+ * from an MCP tool call made by a language model, and a shell would interpret
+ * them. All paths are passed as separate argv entries after `--`.
+ *
+ * By the time this function runs, the files are already written to disk. It
+ * never throws — a git failure (no repository, git absent from PATH, nothing
+ * staged) is caught and reported as `{ committed: false, warning }` so the
+ * caller never mistakes a commit failure for the note itself failing to be
+ * written.
+ *
+ * Two things happen around that one commit. BEFORE it, the pending journal is retried, so a write
+ * that failed to commit earlier is made now. AFTER it, a failure of this commit is written to the
+ * same journal. Both assume the caller holds the vault lock, which every write tool does.
+ */
+export async function commitFiles(
+  repoRoot: string,
+  absPaths: string[],
+  message: string,
+  options: CommitOptions = {}
+): Promise<CommitResult> {
+  // With no paths, `git commit -m <msg> --` has no pathspec at all and commits
+  // the entire index — including unrelated work already staged by the user.
+  // Refuse to run git in that case rather than risk sweeping in a stranger's
+  // changes under this tool's commit message.
+  if (absPaths.length === 0) {
+    return { committed: false, warning: 'nada a commitar: nenhum arquivo informado' };
   }
 
-  if (!(options.push ?? autoPushEnabled())) return { committed: true };
-  return { committed: true, ...(await pushBranch(repoRoot, timeoutMs)) };
+  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+  const waits = options.indexLockWaitsMs ?? INDEX_LOCK_WAITS_MS;
+
+  // Asked first, because a vault that is not a repository gets ONE sentence about it instead of
+  // git's stderr on every write, and because nothing below — the retry, the journal — has
+  // anywhere to live without a git directory.
+  const where = await resolveGitDir(repoRoot);
+  if (where.dir === undefined && where.reason === 'notARepo') {
+    return {
+      committed: false,
+      warningCode: 'git.notARepo',
+      warning: 'o vault não é um repositório git: a nota foi salva, mas não versionada',
+    };
+  }
+  if (where.dir === undefined && where.reason === 'gitMissing') {
+    return {
+      committed: false,
+      warningCode: 'git.gitMissing',
+      warning: 'o git não foi encontrado no PATH: a nota foi salva, mas não versionada',
+    };
+  }
+  const dir = where.dir;
+
+  const drained =
+    dir === undefined ? { recovered: 0, dropped: 0 } : await drainPending(repoRoot, dir, timeoutMs, waits);
+  const recovery = {
+    ...(drained.recovered > 0 ? { recovered: drained.recovered } : {}),
+    ...(drained.dropped > 0 ? { dropped: drained.dropped } : {}),
+  };
+
+  const outcome = await commitOnce(repoRoot, dir, absPaths, message, timeoutMs, waits);
+
+  let result: CommitResult;
+  if (outcome.status === 'committed') {
+    result = { committed: true, ...recovery };
+  } else if (outcome.status === 'nothing' || dir === undefined) {
+    result = { committed: false, warning: outcome.warning, ...recovery };
+  } else {
+    const entry: PendingCommit = {
+      paths: absPaths.map((p) => relative(repoRoot, p).split(sep).join('/')),
+      message,
+      attempts: 1,
+      at: new Date().toISOString(),
+    };
+    await writePending(dir, [...(await readPending(dir)), entry]);
+    result = {
+      committed: false,
+      pending: true,
+      warning: `${outcome.warning}; ${PENDING_NOTE}`,
+      ...recovery,
+    };
+  }
+
+  // A recovered commit is as unpushed as a new one, so either is a reason to push.
+  const somethingToPush = result.committed || drained.recovered > 0;
+  if (!somethingToPush || !(options.push ?? autoPushEnabled())) return result;
+
+  const push = await pushBranch(repoRoot, timeoutMs);
+  return {
+    ...result,
+    pushed: push.pushed,
+    ...(push.warning === undefined
+      ? {}
+      : { warning: result.warning === undefined ? push.warning : `${result.warning}; ${push.warning}` }),
+  };
+}
+
+/**
+ * The push of `VAULT_AUTO_PUSH`, for a caller that committed with `push: false`.
+ *
+ * The write tools commit while holding the vault lock and push after letting it go: `git push`
+ * sends the whole branch, so nothing about it needs exclusion, and a push stuck on the network must
+ * not keep every other writer waiting for as long as it takes to time out.
+ */
+export async function pushIfEnabled(
+  repoRoot: string,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): Promise<{ pushed?: boolean; warning?: string }> {
+  if (!autoPushEnabled()) return {};
+  return pushBranch(repoRoot, timeoutMs);
 }
 
 /**
