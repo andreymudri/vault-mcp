@@ -44,10 +44,30 @@ client session.
 
 ## Releasing
 
-1. Move the entries under `## [Unreleased]` in `CHANGELOG.md` to a new version heading.
-2. Set that version in `package.json` and in `server.json` (twice there).
-3. Commit, tag `vX.Y.Z`, push the tag.
+A release is a commit on `main` that changes the version. Nobody runs a command after that.
 
-The `Release` workflow checks that the tag matches `package.json`, runs the lint, the audit, the
-suite and the smoke test, publishes to npm with provenance through trusted publishing, and creates
-the GitHub Release from the changelog section.
+1. Move the entries under `## [Unreleased]` in `CHANGELOG.md` to a new version heading.
+2. Set that version in `package.json`, in `package-lock.json` (twice) and in `server.json` (twice).
+   `node scripts/release-check.mjs` says whether they agree, and the suite runs it too.
+3. Open a PR, and merge it.
+
+On every push to `main` the `Release` workflow asks whether the version in `package.json` has a
+tag. When it does not, it runs the lint, the audit, the suite and the smoke test on that commit,
+packs it, and then, in a separate job that installs nothing and holds the only publishing identity:
+
+- publishes the tarball to npm through trusted publishing (OIDC, no token), with provenance;
+- creates the tag `vX.Y.Z` on the verified commit and the GitHub Release, from the changelog section;
+- publishes `server.json` to the MCP Registry.
+
+Every step checks whether it was already done, so a release that stopped halfway is finished with
+**Re-run failed jobs** on the same run. (Running the workflow by hand from the Actions tab does the
+same from the current `main`.)
+
+Two things it depends on that live outside the repository:
+
+- The package's **trusted publisher** on npm, registered once by the package owner:
+  `npm trust github @andreymudri/vault-mcp --file release.yml --repo andreymudri/vault-mcp --allow-publish`.
+  It names this workflow file, so renaming `release.yml` breaks publishing until it is registered
+  again, and npm drops a registration that publishes nothing within two days.
+- The pinned `MCP_PUBLISHER_VERSION` in the workflow, which Dependabot does not track. Raise it by
+  hand when the registry asks for a newer client.

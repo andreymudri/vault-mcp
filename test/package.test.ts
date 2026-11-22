@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -151,5 +153,227 @@ describe('server.json — o contrato do MCP Registry', () => {
     expect(byName.get('VAULT_PATH')?.format).toBe('filepath');
     expect(byName.get('VAULT_LANG')?.isRequired).toBe(false);
     expect(byName.get('VAULT_AUTO_PUSH')?.isRequired).toBe(false);
+  });
+});
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+/**
+ * O que decide se uma versão pode ser publicada, antes de qualquer coisa sair da máquina.
+ *
+ * O release é automático: dar merge em `main` de uma versão que ainda não tem tag publica no npm,
+ * cria a tag e o Release e publica no MCP Registry. Nada disso se desfaz — uma versão no npm é
+ * para sempre — então o que tem de estar certo é conferido por um script com saída de erro, e não
+ * por alguém lembrando de olhar.
+ */
+describe('scripts/release-check.mjs', () => {
+  const SCRIPT = join(ROOT, 'scripts', 'release-check.mjs');
+  const FILES = ['package.json', 'package-lock.json', 'server.json', 'CHANGELOG.md'] as const;
+
+  /** Uma cópia dos quatro arquivos que o script lê, com `change` aplicada a um deles. */
+  function check(
+    change?: { file: (typeof FILES)[number]; edit: (text: string) => string },
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'vault-mcp-release-check-'));
+    try {
+      for (const file of FILES) cpSync(join(ROOT, file), join(dir, file));
+      if (change !== undefined) {
+        const target = join(dir, change.file);
+        writeFileSync(target, change.edit(readFileSync(target, 'utf8')), 'utf8');
+      }
+      const { GITHUB_REPOSITORY: _unset, ...clean } = process.env;
+      const run = spawnSync(process.execPath, [SCRIPT, '--root', dir], { encoding: 'utf8', env: { ...clean, ...env } });
+      return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  /** What these tests change in `server.json` and `package-lock.json`: nothing else is read. */
+  interface Versioned {
+    version: string;
+    name: string;
+    /** An array in `server.json`, a map keyed by path in the lockfile. */
+    packages: Record<string | number, { version: string }>;
+  }
+  const json = (edit: (data: Versioned) => void) => (text: string): string => {
+    const data = JSON.parse(text) as Versioned;
+    edit(data);
+    return JSON.stringify(data, null, 2);
+  };
+
+  it('no repositório como está, responde a versão e mais nada', () => {
+    const run = check();
+    expect(run.stderr).toBe('');
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(`${String(pkg.version)}\n`);
+  });
+
+  it('recusa quando a versão do server.json ficou para trás, e diz qual das duas', () => {
+    const topo = check({
+      file: 'server.json',
+      edit: json((data) => {
+        data.version = '0.0.1';
+      }),
+    });
+    expect(topo.status).toBe(1);
+    expect(topo.stdout).toBe('');
+    expect(topo.stderr).toContain('server.json');
+    expect(topo.stderr).toContain('0.0.1');
+
+    const pacote = check({
+      file: 'server.json',
+      edit: json((data) => {
+        data.packages[0]!.version = '0.0.2';
+      }),
+    });
+    expect(pacote.status).toBe(1);
+    expect(pacote.stderr).toContain('packages[0].version');
+  });
+
+  it('recusa quando o package-lock.json ficou para trás', () => {
+    const run = check({
+      file: 'package-lock.json',
+      edit: json((data) => {
+        data.packages['']!.version = '0.0.1';
+      }),
+    });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('package-lock.json');
+  });
+
+  it('recusa uma versão que não tem seção no CHANGELOG, ou cuja seção está vazia', () => {
+    const version = String(pkg.version);
+    const semSecao = check({ file: 'CHANGELOG.md', edit: (text) => text.replace(`## [${version}]`, '## [0.0.0]') });
+    expect(semSecao.status).toBe(1);
+    expect(semSecao.stderr).toContain('CHANGELOG.md');
+
+    const vazia = check({
+      file: 'CHANGELOG.md',
+      edit: (text) => {
+        const start = text.indexOf(`## [${version}]`);
+        const next = text.indexOf('\n## [', start + 1);
+        return `${text.slice(0, start)}## [${version}] - 2026-01-01\n${text.slice(next)}`;
+      },
+    });
+    expect(vazia.status).toBe(1);
+    expect(vazia.stderr).toContain('CHANGELOG.md');
+  });
+
+  it('recusa quando o nome no MCP Registry não é o mcpName que vai dentro do pacote', () => {
+    // O registry lê o `mcpName` de DENTRO do tarball do npm para provar a posse do nome: com os
+    // dois diferentes o npm publica, e o registry recusa depois — com a versão já gasta.
+    const run = check({
+      file: 'server.json',
+      edit: json((data) => {
+        data.name = 'io.github.outro/vault-mcp';
+      }),
+    });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('mcpName');
+  });
+
+  it('recusa quando o repositório do package.json não é o que está publicando', () => {
+    // A publicação por OIDC confere o `repository.url` do pacote contra o repositório do workflow.
+    expect(check(undefined, { GITHUB_REPOSITORY: 'andreymudri/vault-mcp' }).status).toBe(0);
+    const outro = check(undefined, { GITHUB_REPOSITORY: 'outra-conta/vault-mcp' });
+    expect(outro.status).toBe(1);
+    expect(outro.stderr).toContain('repository');
+  });
+
+  it('diz tudo o que está errado de uma vez, e não só o primeiro', () => {
+    const run = check({
+      file: 'server.json',
+      edit: json((data) => {
+        data.version = '0.0.1';
+        data.name = 'io.github.outro/vault-mcp';
+      }),
+    });
+    expect(run.stderr).toContain('0.0.1');
+    expect(run.stderr).toContain('mcpName');
+  });
+});
+
+/**
+ * O que os workflows prometem sobre a cadeia de suprimentos, lido do próprio arquivo.
+ *
+ * Um workflow de release não tem como rodar num teste. O que dá para fixar é a FORMA que o torna
+ * seguro: quem tem a identidade de publicação, em que ordem as coisas saem, e que nada é baixado
+ * sem versão.
+ */
+describe('os workflows do GitHub', () => {
+  const read = (name: string): string => readFileSync(join(ROOT, '.github', 'workflows', name), 'utf8');
+  const release = read('release.yml');
+  /** O texto de cada job de um workflow, pelo nome. */
+  const jobsOf = (workflow: string): Map<string, string> => {
+    const body = workflow.slice(workflow.search(/^jobs:\s*$/m));
+    const starts = [...body.matchAll(/^ {2}([a-z][a-z0-9_-]*):\s*$/gm)];
+    return new Map(
+      starts.map((match, i) => [match[1] ?? '', body.slice(match.index, starts[i + 1]?.index ?? body.length)]),
+    );
+  };
+  /** Só o que executa: sem as linhas de comentário, que falam do que o job NÃO faz. */
+  const code = (text: string): string =>
+    text
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+
+  it('toda action é fixada pelo SHA de um commit', () => {
+    for (const name of ['ci.yml', 'release.yml']) {
+      const uses = read(name).split('\n').filter((line) => /^\s*(- )?uses:/.test(line));
+      expect(uses.length, name).toBeGreaterThan(0);
+      for (const line of uses) expect(line, name).toMatch(/uses: [\w./-]+@[0-9a-f]{40} # v\d/);
+    }
+  });
+
+  it('o release dispara no merge em main e à mão, e o token padrão só lê', () => {
+    expect(release).toMatch(/^on:\n {2}push:\n {4}branches: \[main\]\n(?: {2}#.*\n)* {2}workflow_dispatch:/m);
+    expect(release).toMatch(/^permissions:\n {2}contents: read$/m);
+  });
+
+  it('só o job que publica tem a identidade de publicação, e ele não instala dependência nem roda teste', () => {
+    const jobs = jobsOf(release);
+    expect([...jobs.keys()]).toEqual(['plan', 'verify', 'publish']);
+    for (const [name, text] of jobs) {
+      const privileged = /id-token: write/.test(code(text)) || /contents: write/.test(code(text));
+      expect(privileged, name).toBe(name === 'publish');
+    }
+    const publish = code(jobs.get('publish') ?? '');
+    // Quem roda com `id-token: write` pode pedir um token e publicar. O código de terceiros —
+    // dependências, o que os testes executam — roda todo no job `verify`, que não tem nenhum.
+    expect(publish).not.toMatch(/npm (ci|install|test|run|exec)\b/);
+    expect(publish).not.toMatch(/actions\/checkout/);
+    expect(publish).toContain('needs: [plan, verify]');
+    const verify = code(jobs.get('verify') ?? '');
+    for (const step of ['npm ci', 'npm run lint', 'npm audit --omit=dev --audit-level=high', 'npm test', 'npm run build', 'npm pack']) {
+      expect(verify, step).toContain(step);
+    }
+  });
+
+  it('publica no npm primeiro, cria a tag e o Release depois, e o MCP Registry por último', () => {
+    const publish = code(jobsOf(release).get('publish') ?? '');
+    const at = (needle: string): number => {
+      const index = publish.indexOf(needle);
+      expect(index, needle).toBeGreaterThan(-1);
+      return index;
+    };
+    expect(at('npm publish')).toBeLessThan(at('gh release create'));
+    expect(at('gh release create')).toBeLessThan(at('mcp-publisher publish'));
+    // A tag nasce no commit que foi verificado, pelo SHA inteiro.
+    expect(publish).toContain('--target "$GITHUB_SHA"');
+  });
+
+  it('cada passo de publicação confere antes se já foi feito', () => {
+    const publish = code(jobsOf(release).get('publish') ?? '');
+    expect(publish).toContain('npm view');
+    expect(publish).toContain('gh release view');
+    expect(publish).toMatch(/registry\.modelcontextprotocol\.io\/v0\.1\/servers\/.+\/versions\//);
+  });
+
+  it('o mcp-publisher vem numa versão fixa e é verificado antes de rodar', () => {
+    expect(release).toMatch(/MCP_PUBLISHER_VERSION: v\d+\.\d+\.\d+/);
+    expect(code(release)).toContain('cosign verify-blob');
+    expect(code(release)).not.toContain('releases/latest');
   });
 });
