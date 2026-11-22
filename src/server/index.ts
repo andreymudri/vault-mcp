@@ -193,6 +193,7 @@ export function createVaultApp(
   const scanner = new VaultScanner({
     vaultRoot,
     ...(config.maxNoteBytes === undefined ? {} : { maxNoteBytes: config.maxNoteBytes }),
+    ...(config.scanTtlMs === undefined ? {} : { scanTtlMs: config.scanTtlMs }),
   });
   const retriever = new Retriever({ scanner });
   const messages = messagesFor(lang);

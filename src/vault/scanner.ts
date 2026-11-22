@@ -92,6 +92,37 @@ export interface VaultScannerOptions {
   fs?: FsOps;
   /** Files larger than this are left out of the index, loudly. Default `DEFAULT_MAX_NOTE_BYTES`. */
   maxNoteBytes?: number;
+  /**
+   * How long a finished scan is good for, in milliseconds. Absent means ADAPTIVE (see
+   * `scanValidity`); `0` means every `refresh` walks the vault, as it did before this existed.
+   */
+  scanTtlMs?: number;
+  /** A monotonic clock in milliseconds, injectable so the validity can be tested without waiting. */
+  now?: () => number;
+}
+
+/** A scan cheaper than this is never reused: there is nothing to save, and freshness is free. */
+const CHEAP_SCAN_MS = 20;
+/** However expensive a scan was, it is not trusted for longer than this. */
+const MAX_SCAN_VALIDITY_MS = 2_000;
+
+/**
+ * How long a scan that cost `costMs` stays good for when nobody fixed the value.
+ *
+ * Every tool call used to walk the whole vault and `stat` every note. Measured on 2026-11-22 on a
+ * synthetic vault: 68 ms at five thousand notes and 291 ms at twenty thousand — nearly all the time
+ * of a search whose index was already warm, paid again on the next call a moment later.
+ *
+ * The validity grows with the cost so that it changes nothing where there was no problem. A scan
+ * under twenty milliseconds — any vault of a thousand notes or so, and every vault in the test
+ * suite — is never reused, so an edit made in Obsidian is seen by the very next call, as before.
+ * Past that, a scan is good for ten times what it cost: the walk is then at most a tenth of the
+ * time spent answering, whatever the size. The ceiling bounds the other side of the trade, which
+ * is how stale an answer can be about a file changed by somebody ELSE — this server's own writes
+ * invalidate the scan immediately (`invalidate`).
+ */
+function scanValidity(costMs: number): number {
+  return costMs < CHEAP_SCAN_MS ? 0 : Math.min(costMs * 10, MAX_SCAN_VALIDITY_MS);
 }
 
 /**
@@ -107,6 +138,10 @@ export class VaultScanner {
 
   private readonly fs: FsOps;
   private readonly maxNoteBytes: number;
+  private readonly scanTtlMs: number | undefined;
+  private readonly now: () => number;
+  /** When the last scan finished, and what it cost. `undefined` forces the next one. */
+  private lastScan: { at: number; costMs: number } | undefined;
   /**
    * Files that were READ and then refused for what they contain, by the mtime they had. Without
    * it a binary `.md` is never in `notes`, so every refresh — which is every search — would open
@@ -124,6 +159,19 @@ export class VaultScanner {
     this.root = options.vaultRoot;
     this.fs = options.fs ?? REAL_FS;
     this.maxNoteBytes = options.maxNoteBytes ?? DEFAULT_MAX_NOTE_BYTES;
+    this.scanTtlMs = options.scanTtlMs;
+    this.now = options.now ?? (() => performance.now());
+  }
+
+  /**
+   * Makes the next `refresh` walk the vault whatever the validity of the last scan.
+   *
+   * Called around every write this server makes: before it, because a write decides from what is
+   * on disk NOW (a move rewrites the links the scanner reports), and after it, because the caller's
+   * next read must see what was just written.
+   */
+  invalidate(): void {
+    this.lastScan = undefined;
   }
 
   getNote(path: string): Note | undefined {
@@ -142,6 +190,14 @@ export class VaultScanner {
    * what to re-chunk, so a note must appear in `changed` whenever its body may differ.
    */
   refresh(): { changed: string[]; removed: string[] } {
+    const started = this.now();
+    if (this.lastScan !== undefined) {
+      const validity = this.scanTtlMs ?? scanValidity(this.lastScan.costMs);
+      // Still good: nothing is walked, and the delta is empty because nothing was looked at. What
+      // the last scan found — the notes, the diagnostics — stands as it is.
+      if (started - this.lastScan.at < validity) return { changed: [], removed: [] };
+    }
+
     const walkDiagnostics: Diagnostic[] = [];
     const found: string[] = [];
     this.walk('', found, walkDiagnostics);
@@ -282,6 +338,8 @@ export class VaultScanner {
       ...walkDiagnostics,
     ];
 
+    const finished = this.now();
+    this.lastScan = { at: finished, costMs: finished - started };
     return { changed, removed };
   }
 

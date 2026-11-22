@@ -27,6 +27,8 @@ export interface ServerConfig {
   maxNoteBytes?: number;
   /** `VAULT_LOCK_TIMEOUT_MS`: how long a write waits for another process's write. */
   lockTimeoutMs?: number;
+  /** `VAULT_SCAN_TTL_MS`: how long a scan of the vault is reused. `0` scans on every call. */
+  scanTtlMs?: number;
   /** `VAULT_LOG_LEVEL`: how much the server writes to stderr. Default `warn`. */
   logLevel?: LogLevel;
   /** `VAULT_READ_ONLY`: publish no tool that writes. */
@@ -36,18 +38,23 @@ export interface ServerConfig {
   warnings: ConfigWarning[];
 }
 
-/** A variable holding a whole number greater than zero, or nothing when it is unset or blank. */
-function positiveInt(
+/**
+ * A variable holding a whole number — greater than zero, or zero too when `allowZero` — or nothing
+ * when it is unset or blank.
+ */
+function wholeNumber(
   env: NodeJS.ProcessEnv,
   variable: string,
   warnings: ConfigWarning[],
+  allowZero = false,
 ): number | undefined {
   const raw = env[variable]?.trim();
   if (raw === undefined || raw === '') return undefined;
   // Digits only: `Number` would also take `1e3`, `0x10` and `1.5`, and a limit written one of
   // those ways is more likely a mistake than an intention.
-  if (/^\d+$/.test(raw) && Number(raw) > 0 && Number.isSafeInteger(Number(raw))) return Number(raw);
-  warnings.push({ variable, value: raw, expected: 'a positive integer' });
+  const value = Number(raw);
+  if (/^\d+$/.test(raw) && Number.isSafeInteger(value) && (value > 0 || allowZero)) return value;
+  warnings.push({ variable, value: raw, expected: allowZero ? 'zero or a positive integer' : 'a positive integer' });
   return undefined;
 }
 
@@ -111,13 +118,15 @@ export function resolveConfig(env: NodeJS.ProcessEnv): ServerConfig {
 
   const disabled = (env['VAULT_DISABLED_TOOLS'] ?? '').split(/[\s,]+/).filter((name) => name !== '');
 
-  const maxNoteBytes = positiveInt(env, 'VAULT_MAX_NOTE_BYTES', warnings);
-  const lockTimeoutMs = positiveInt(env, 'VAULT_LOCK_TIMEOUT_MS', warnings);
+  const maxNoteBytes = wholeNumber(env, 'VAULT_MAX_NOTE_BYTES', warnings);
+  const lockTimeoutMs = wholeNumber(env, 'VAULT_LOCK_TIMEOUT_MS', warnings);
+  const scanTtlMs = wholeNumber(env, 'VAULT_SCAN_TTL_MS', warnings, true);
 
   return {
     lang,
     ...(maxNoteBytes === undefined ? {} : { maxNoteBytes }),
     ...(lockTimeoutMs === undefined ? {} : { lockTimeoutMs }),
+    ...(scanTtlMs === undefined ? {} : { scanTtlMs }),
     ...(logLevel === undefined ? {} : { logLevel }),
     ...(readOnly === undefined ? {} : { readOnly }),
     ...(disabled.length === 0 ? {} : { disabledTools: disabled }),

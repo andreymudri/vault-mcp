@@ -1706,7 +1706,16 @@ export function createToolset(deps: ToolDeps): Toolset {
     run: (git: DeferredPush) => Promise<T>,
   ): Promise<{ value: T; warning?: string }> => {
     const { value: held, warning: queueWarning } = await writes.runExclusive(async () =>
-      (await vaultLock()).with(() => run({ push: false })),
+      (await vaultLock()).with(async () => {
+        // A write decides from what is on disk NOW, and what it leaves must be seen by the next
+        // read: the scan is invalidated on the way in and on the way out, whatever its validity.
+        deps.scanner.invalidate();
+        try {
+          return await run({ push: false });
+        } finally {
+          deps.scanner.invalidate();
+        }
+      }),
     );
 
     let value = held.value;
@@ -2299,7 +2308,11 @@ export function createToolset(deps: ToolDeps): Toolset {
         });
       const { value: result, warning: queueWarning } =
         input.preview === true
-          ? await writes.runExclusive(() => run({}))
+          ? await writes.runExclusive(() => {
+              // A preview is approved by revision, so it has to be computed from the vault as it is.
+              deps.scanner.invalidate();
+              return run({});
+            })
           : await lockedWrite('vault_learn', run);
 
       const lines = [

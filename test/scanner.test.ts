@@ -667,3 +667,106 @@ describe('VaultScanner: tetos', () => {
     }
   });
 });
+
+/**
+ * Toda chamada de tool andava o vault inteiro e fazia `stat` de cada nota. Medido em 2026-11-22
+ * num vault sintético: 68 ms com 5 mil notas e 291 ms com 20 mil — quase todo o tempo de uma busca
+ * já indexada. A validade é ADAPTATIVA para não mudar nada onde não havia problema: um scan barato
+ * nunca é reaproveitado, então um vault pequeno (e esta suíte) continua vendo cada mudança na hora.
+ */
+describe('VaultScanner: validade do scan', () => {
+  /** Um relógio de mão, e um `FsOps` que o adianta a cada `stat` — o custo do scan vira um número. */
+  function timed(msPerStat: number) {
+    const t = tracker();
+    const clock = { now: 0 };
+    const fs: FsOps = {
+      readdir: (dir) => t.fs.readdir(dir),
+      readFile: (path) => t.fs.readFile(path),
+      stat: (path) => {
+        clock.now += msPerStat;
+        return t.fs.stat(path);
+      },
+    };
+    return { t, clock, fs };
+  }
+  const fsCalls = (t: Tracker): number => t.statCalls.length + t.readdirCalls.length + t.readFileCalls.length;
+
+  it('um scan barato nunca é reaproveitado', () => {
+    const { t, clock, fs } = timed(0.1);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    t.reset();
+
+    scanner.refresh();
+    expect(t.statCalls.length).toBeGreaterThan(0);
+  });
+
+  it('um scan caro vale por dez vezes o que custou', () => {
+    const { t, clock, fs } = timed(5);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    const custo = clock.now;
+    expect(custo).toBeGreaterThanOrEqual(20);
+    const antes = paths(scanner);
+    t.reset();
+
+    clock.now += custo * 10 - 1;
+    expect(scanner.refresh()).toEqual({ changed: [], removed: [] });
+    expect(fsCalls(t)).toBe(0);
+    // Reaproveitar o scan não é esquecer o que ele achou.
+    expect(paths(scanner)).toEqual(antes);
+    expect(scanner.diagnostics.length).toBeGreaterThan(0);
+
+    clock.now += 2;
+    scanner.refresh();
+    expect(t.statCalls.length).toBeGreaterThan(0);
+  });
+
+  it('a validade tem teto de 2 s, por mais caro que o scan tenha sido', () => {
+    const { t, clock, fs } = timed(200);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    expect(clock.now).toBeGreaterThan(2_000);
+    t.reset();
+
+    clock.now += 1_999;
+    scanner.refresh();
+    expect(fsCalls(t)).toBe(0);
+
+    clock.now += 2;
+    scanner.refresh();
+    expect(t.statCalls.length).toBeGreaterThan(0);
+  });
+
+  it('invalidate() força o scan seguinte, que enxerga o que mudou', () => {
+    const { t, clock, fs } = timed(5);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    writeFileSync(join(root, '02-wiki', 'nova.md'), '# Nova\n');
+    t.reset();
+
+    expect(scanner.refresh().changed).toEqual([]);
+    scanner.invalidate();
+    expect(scanner.refresh().changed).toEqual(['02-wiki/nova.md']);
+  });
+
+  it('scanTtlMs fixa a validade: 0 desliga o reaproveitamento, um número vale como está', () => {
+    const caro = timed(200);
+    const semValidade = new VaultScanner({ vaultRoot: root, fs: caro.fs, now: () => caro.clock.now, scanTtlMs: 0 });
+    semValidade.refresh();
+    caro.t.reset();
+    semValidade.refresh();
+    expect(caro.t.statCalls.length).toBeGreaterThan(0);
+
+    const barato = timed(0.1);
+    const fixa = new VaultScanner({ vaultRoot: root, fs: barato.fs, now: () => barato.clock.now, scanTtlMs: 500 });
+    fixa.refresh();
+    barato.t.reset();
+    barato.clock.now += 499;
+    fixa.refresh();
+    expect(fsCalls(barato.t)).toBe(0);
+    barato.clock.now += 2;
+    fixa.refresh();
+    expect(barato.t.statCalls.length).toBeGreaterThan(0);
+  });
+});

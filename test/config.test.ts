@@ -83,6 +83,16 @@ describe('resolveConfig', () => {
     expect(resolveConfig({ VAULT_DISABLED_TOOLS: ' , ' }).disabledTools).toBeUndefined();
   });
 
+  it('reads VAULT_SCAN_TTL_MS, where zero is a value and not an absence', () => {
+    expect(resolveConfig({ VAULT_SCAN_TTL_MS: '0' }).scanTtlMs).toBe(0);
+    expect(resolveConfig({ VAULT_SCAN_TTL_MS: '1500' }).scanTtlMs).toBe(1_500);
+    const bad = resolveConfig({ VAULT_SCAN_TTL_MS: '-5' });
+    expect(bad.scanTtlMs).toBeUndefined();
+    expect(bad.warnings).toEqual([
+      { variable: 'VAULT_SCAN_TTL_MS', value: '-5', expected: 'zero or a positive integer' },
+    ]);
+  });
+
   it('treats a blank variable as unset', () => {
     expect(resolveConfig({ VAULT_MAX_NOTE_BYTES: '  ' })).toEqual({ lang: 'en', warnings: [] });
   });

@@ -3692,3 +3692,32 @@ describe('código de erro estruturado', () => {
     await server.close();
   });
 });
+
+describe('validade do scan e escrita', () => {
+  it('o que este servidor escreve aparece na leitura seguinte, por mais longa que seja a validade', async () => {
+    const vaultRoot = await makeVault(true);
+    // Uma validade que nunca vence durante o teste: se a escrita não invalidasse o scan, a busca
+    // abaixo responderia do índice de antes dela.
+    const scanner = new VaultScanner({ vaultRoot, scanTtlMs: 3_600_000 });
+    const tools = createTools({
+      retriever: new Retriever({ scanner }),
+      scanner,
+      vaultRoot,
+      messages: messagesFor('pt'),
+    });
+    const call = (name: string, args: unknown): Promise<ToolResult> =>
+      tools.find((candidate) => candidate.name === name)!.handler(args);
+
+    expect(textOf(await call('vault_search', { query: 'zzrecemescrita' }))).toContain('Nenhum resultado');
+    await call('vault_write_note', { path: '02-wiki/docker/recem.md', content: '# Recém\n\nzzrecemescrita aqui\n' });
+
+    expect(textOf(await call('vault_search', { query: 'zzrecemescrita' }))).toContain('02-wiki/docker/recem.md');
+    expect((await call('vault_get_note', { path: '02-wiki/docker/recem.md' })).isError).not.toBe(true);
+
+    // E uma escrita enxerga o que mudou por fora: mover depende do grafo, que vem do scanner.
+    await fs.writeFile(path.join(vaultRoot, '02-wiki/docker/por-fora.md'), '# Por fora\n\nver [[recem]]\n', 'utf8');
+    const moved = textOf(await call('vault_move', { from: '02-wiki/docker/recem.md', to: '02-wiki/docker/renomeada.md' }));
+    expect(moved).toContain('02-wiki/docker/por-fora.md');
+    expect(await read(vaultRoot, '02-wiki/docker/por-fora.md')).toContain('[[renomeada]]');
+  });
+});

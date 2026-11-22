@@ -72,6 +72,13 @@
           "isRequired": false,
           "isSecret": false,
           "format": "number"
+        },
+        {
+          "name": "VAULT_SCAN_TTL_MS",
+          "description": "How long a scan of the vault is reused before the files are looked at again, in milliseconds. Unset is adaptive: never for a small vault, up to 2000 for a large one. 0 scans on every call.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "number"
         }
       ]
     }
