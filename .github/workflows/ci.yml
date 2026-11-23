@@ -1,4 +1,4 @@
-# A suíte é a evidência deste projeto — 21 arquivos, 1.222 testes, e nada rodava fora da máquina do autor.
+# A suíte é a evidência deste projeto, e nada rodava fora da máquina do autor.
 #
 # `npm test` é o comando inteiro de propósito: o `pretest` do npm roda o typecheck sobre `src/` E
 # `test/` antes de qualquer teste, e `scripts/test.mjs` limita a suíte por relógio e mata o grupo de
@@ -14,6 +14,12 @@ on:
   # pedir um. (Eram os runs atrasando, não o CI parado; os dois apareceram e passaram.) Sem esta
   # linha, a única forma de testar "o CI ainda dispara?" é empurrar um commit vazio.
   workflow_dispatch:
+
+# O token do workflow só lê o repositório. Nenhum job aqui escreve nada de volta, e o padrão de um
+# repositório pode ser bem mais largo que isso: declarar o mínimo é o que impede que um passo
+# comprometido — uma dependência, uma action — tenha com o que escrever.
+permissions:
+  contents: read
 
 # Um push logo em cima do outro cancela o job anterior: o interessante é sempre o topo do branch.
 concurrency:
@@ -38,12 +44,14 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions fixadas pelo SHA do commit, com a tag ao lado: uma tag pode ser movida para outro
+      # commit por quem controla o repositório da action, um SHA não. O Dependabot atualiza os dois.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Node 26 e não a `engines` (>= 20): `test/frontmatter.test.ts` roda o `parseFile` real num
+      # Node 26 e não a `engines` (>= 22): `test/frontmatter.test.ts` roda o `parseFile` real num
       # processo filho fixado num TZ, e esse filho é `node <arquivo>.ts` — depende do type stripping
       # do próprio Node. Um runner mais antigo falha ali por causa da versão, não do código.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26'
           cache: npm
@@ -58,18 +66,38 @@ jobs:
           git config --global user.email 'ci@example.com'
           git config --global init.defaultBranch main
 
-      - run: npm test
+      # Só no Linux, porque não dependem do sistema: o lint lê os fontes, e o audit lê o lockfile.
+      # `--omit=dev` porque o que este pacote entrega a quem instala são as três dependências de
+      # runtime; um aviso em ferramenta de teste não é um aviso sobre o servidor.
+      - name: Lint
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run lint
+
+      - name: Auditoria das dependências de runtime
+        if: matrix.os == 'ubuntu-latest'
+        run: npm audit --omit=dev --audit-level=high
+
+      # A cobertura também só no Linux, e NO MESMO comando da suíte, para ela não rodar duas vezes:
+      # o piso foi medido aqui, e no Windows os testes pulados (FIFO, modos POSIX, nome de arquivo
+      # hostil) baixariam o número por um motivo que não é falta de teste.
+      - name: Suíte, com piso de cobertura
+        if: matrix.os == 'ubuntu-latest'
+        run: npm test -- --coverage
+
+      - name: Suíte
+        if: matrix.os != 'ubuntu-latest'
+        run: npm test
 
       # Depois dos testes: o `dist/` é o que o servidor MCP registrado realmente executa, então um
       # build quebrado é um servidor quebrado mesmo com a suíte verde.
       - run: npm run build
 
       # E um build que compila ainda pode não SERVIR: o entrypoint que se acha biblioteca sai 0 sem
-      # imprimir nada. O smoke sobe o `dist/` de verdade contra um vault descartável e exige as nove
-      # tools no `tools/list`.
+      # imprimir nada. O smoke sobe o `dist/` de verdade contra um vault descartável e exige no
+      # `tools/list` exatamente as tools que o pacote promete.
       - run: npm run smoke
 
-  # O job que torna `engines.node >= 20` uma afirmação verificada em vez de uma promessa.
+  # O job que torna `engines.node >= 22` uma afirmação verificada em vez de uma promessa.
   #
   # A suíte não pode rodar aqui — `test/frontmatter.test.ts` depende do type stripping do runtime —
   # mas o que a gente PUBLICA é `dist/`, JavaScript compilado, e isso roda. Se o piso subir um dia,
@@ -79,11 +107,13 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions fixadas pelo SHA do commit, com a tag ao lado: uma tag pode ser movida para outro
+      # commit por quem controla o repositório da action, um SHA não. O Dependabot atualiza os dois.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - run: npm ci

@@ -2,7 +2,7 @@
 /**
  * The compiled server, started as a PROGRAM and asked for its tools over stdio.
  *
- * This exists because `package.json` promises `engines.node >= 20` and nothing verified it. The
+ * This exists because `package.json` promises `engines.node >= 22` and nothing verified it. The
  * suite cannot: `test/frontmatter.test.ts` spawns `node <arquivo>.ts` and depends on the type
  * stripping of the runtime it runs on, so CI pins Node 26 and an older runner fails there for a
  * TOOLCHAIN reason, telling us nothing about whether the shipped code runs. What ships is `dist/`,
@@ -23,13 +23,14 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The ten tools, by name: the contract `tools/list` has to answer with. */
+/** The eleven tools, by name: the contract `tools/list` has to answer with. */
 const EXPECTED = [
   'vault_search',
   'vault_get_note',
   'vault_list',
   'vault_backlinks',
   'vault_graph',
+  'vault_status',
   'vault_write_note',
   'vault_edit_note',
   'vault_learn',
@@ -90,8 +91,7 @@ const pending = new Map();
 let buffer = '';
 child.stdout.on('data', (chunk) => {
   buffer += chunk.toString();
-  let newline;
-  while ((newline = buffer.indexOf('\n')) !== -1) {
+  for (let newline = buffer.indexOf('\n'); newline !== -1; newline = buffer.indexOf('\n')) {
     const line = buffer.slice(0, newline).trim();
     buffer = buffer.slice(newline + 1);
     if (line === '') continue;
@@ -135,10 +135,17 @@ const missing = EXPECTED.filter((name) => !names.includes(name));
 const extra = names.filter((name) => !EXPECTED.includes(name));
 if (missing.length > 0 || extra.length > 0) {
   fail(
-    `tools/list não bate com as dez tools.${missing.length > 0 ? ` Faltando: ${missing.join(', ')}.` : ''}` +
+    `tools/list não bate com as onze tools.${missing.length > 0 ? ` Faltando: ${missing.join(', ')}.` : ''}` +
       `${extra.length > 0 ? ` Sobrando: ${extra.join(', ')}.` : ''}`,
   );
 }
+
+// Every tool says what it does to the vault. A client decides whether to ask the user first from
+// these, so a tool that ships without them is a tool every client has to treat as the worst case.
+const bare = (listed.result?.tools ?? [])
+  .filter((tool) => typeof tool.annotations?.readOnlyHint !== 'boolean' || typeof tool.title !== 'string')
+  .map((tool) => tool.name);
+if (bare.length > 0) fail(`tools sem annotations ou sem título: ${bare.join(', ')}`);
 
 clearTimeout(timer);
 child.removeAllListeners('exit');

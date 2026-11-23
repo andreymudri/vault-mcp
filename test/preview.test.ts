@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { VaultScanner } from '../src/vault/scanner.js';
 import { Retriever } from '../src/retrieval/retrieval.js';
 import { learn } from '../src/write/learn.js';
-import { createTools } from '../src/server/tools.js';
+import { ERROR_META_KEY, createTools } from '../src/server/tools.js';
 import { messagesFor } from '../src/i18n/messages.js';
 
 const at = new Date('2026-10-05T12:00:00.000Z');
@@ -84,7 +84,8 @@ it('MCP learn exposes structured previews and accepts their timestamp and revisi
     expect(tool.outputSchema?.safeParse(preview.structuredContent).success).toBe(true);
     const refused = await tool.handler({ ...args, expected_revision: 'b'.repeat(64) });
     expect(refused.isError).toBe(true);
-    expect(refused.structuredContent?.error).toEqual({ code: 'preview_stale' });
+    expect(refused.structuredContent).toBeUndefined();
+    expect(refused._meta?.[ERROR_META_KEY]).toEqual({ code: 'preview_stale' });
     expect(await snapshot(f.root)).toEqual(before);
     const saved = await tool.handler({ ...args, expected_revision: preview.structuredContent!.revision });
     expect(saved.structuredContent?.committed).toBe(true);

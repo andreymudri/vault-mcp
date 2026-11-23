@@ -12,7 +12,9 @@ import {
   type NodeKind,
 } from './paths.js';
 import { applyTemplate, ensureFrontmatter, formatLocal } from './template.js';
-import { commitFiles } from './git.js';
+import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
+import { PHRASES } from '../i18n/phrases.js';
+import { commitFiles, commitRecovery } from './git.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
 import type { PlannedChange } from './preview.js';
@@ -53,6 +55,12 @@ export interface WriteResult {
    * answers, and only the caller can render them differently.
    */
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warning?: string;
   diff: string;
   change?: PlannedChange;
@@ -90,6 +98,13 @@ export interface WriteNoteOptions {
   preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
 }
 
 export interface EditNoteOptions {
@@ -100,6 +115,13 @@ export interface EditNoteOptions {
   preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 /** The `tipo` values that have a skeleton in `_templates/`. */
@@ -316,7 +338,7 @@ function safeDiff(
         `${countLines(after)} linhas depois`,
       '',
     ].join('\n');
-    return { diff, warning: `diff não pôde ser gerado (${reason})` };
+    return { diff, warning: `${PHRASES.diffUnavailable}${reason})` };
   }
 }
 
@@ -347,6 +369,7 @@ async function writeAndCommit(
     preview?: boolean;
   now?: Date;
   deferCommit?: boolean;
+    push?: boolean;
     message: string;
   },
   extraWarning?: string
@@ -384,9 +407,19 @@ async function writeAndCommit(
       : { ...base, committed: false, warning };
   }
 
-  const commit = await commitFiles(opts.vaultRoot, [opts.absPath], opts.message);
+  const commit = await commitFiles(
+    opts.vaultRoot,
+    [opts.absPath],
+    opts.message,
+    opts.push === undefined ? {} : { push: opts.push },
+  );
   const warning = joinWarnings([extraWarning, diffWarning, commit.warning]);
-  const committed = { ...base, committed: commit.committed, ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }) };
+  const committed = {
+    ...base,
+    committed: commit.committed,
+    ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
+  };
   return warning === undefined ? committed : { ...committed, warning };
 }
 
@@ -418,7 +451,8 @@ async function refuseForeign(absPath: string, relPath: string): Promise<NodeKind
  * caller can assemble that list and hand it to `commitFiles` itself.
  */
 export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
-  const absPath = await guardedPath(opts.vaultRoot, opts.path);
+  const layout = opts.layout ?? DEFAULT_LAYOUT;
+  const absPath = await guardedPath(opts.vaultRoot, opts.path, { layout });
   // A FIFO here is `.md`, is inside the vault and is in no denied directory, so every check
   // above passes it — and the read below never returns. `created` still comes from the read,
   // which is the only thing that can distinguish "was not there" from "was there and is gone
@@ -441,16 +475,16 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
   if (created && opts.tipo !== undefined && TEMPLATED_TIPOS.has(opts.tipo)) {
     // `opts.tipo` is compared against a closed set before it reaches the path, so no
     // caller-controlled segment ever enters this join.
-    const templatePath = join(opts.vaultRoot, '_templates', `${opts.tipo}.md`);
+    const templatePath = join(opts.vaultRoot, layout.folders.templates, `${opts.tipo}.md`);
     let templateText: string | undefined;
     const state = await classifyNode(templatePath);
     if (state === 'foreign') {
-      templateWarning = `template ignorado: _templates/${opts.tipo}.md não é um arquivo comum`;
+      templateWarning = `${PHRASES.templateIgnored}${layout.folders.templates}/${opts.tipo}.md${PHRASES.templateIgnoredTail}`;
     } else {
       try {
         templateText = await fs.readFile(templatePath, 'utf8');
       } catch {
-        templateWarning = `template não encontrado: _templates/${opts.tipo}.md`;
+        templateWarning = `${PHRASES.templateNotFound}${layout.folders.templates}/${opts.tipo}.md`;
       }
     }
     if (templateText !== undefined) {
@@ -482,7 +516,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
   const frontmatterWarning =
     missing.length === 0
       ? undefined
-      : `frontmatter não preenchido (bloco YAML não editável com segurança): ${missing.join(', ')}`;
+      : `${PHRASES.frontmatterUnfilled}${missing.join(', ')}`;
 
   return writeAndCommit(
     {
@@ -494,6 +528,7 @@ export async function writeNote(opts: WriteNoteOptions): Promise<WriteResult> {
       created,
       ...(opts.preview === undefined ? {} : { preview: opts.preview }),
       ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
+      ...(opts.push === undefined ? {} : { push: opts.push }),
       message: `docs(vault): ${titleFromPath(opts.path)}`,
     },
     joinWarnings([templateWarning, frontmatterWarning])
@@ -609,7 +644,9 @@ function matchFoldingLineEndings(
  * untouched — which matters because Obsidian and T6's scanner both watch mtime.
  */
 export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
-  const absPath = await guardedPath(opts.vaultRoot, opts.path);
+  const absPath = await guardedPath(opts.vaultRoot, opts.path, {
+    layout: opts.layout ?? DEFAULT_LAYOUT,
+  });
 
   if (opts.oldText === '') {
     // The empty string occurs between every pair of characters, so "exactly one
@@ -653,6 +690,7 @@ export async function editNote(opts: EditNoteOptions): Promise<WriteResult> {
     created: false,
     ...(opts.preview === undefined ? {} : { preview: opts.preview }),
       ...(opts.deferCommit === undefined ? {} : { deferCommit: opts.deferCommit }),
+      ...(opts.push === undefined ? {} : { push: opts.push }),
     message: `docs(vault): atualizar ${titleFromPath(opts.path)}`,
   });
 }

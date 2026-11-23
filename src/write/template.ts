@@ -333,7 +333,7 @@ const NUMERIC_LOOKING_KEY_RE = /^\p{N}/u;
 function keyRoundTripsAsString(key: string): boolean {
   try {
     const data = matter(`---\n${key}: x\n---\n`, {}).data as Record<string, unknown>;
-    return Object.prototype.hasOwnProperty.call(data, key);
+    return Object.hasOwn(data, key);
   } catch {
     return false;
   }
@@ -810,7 +810,7 @@ function provablyEqual(a: unknown, b: unknown): boolean {
     const keys = Object.keys(xr);
     if (keys.length !== Object.keys(yr).length) return false;
     return keys.every(
-      (k) => Object.prototype.hasOwnProperty.call(yr, k) && walk(xr[k], yr[k], depth + 1),
+      (k) => Object.hasOwn(yr, k) && walk(xr[k], yr[k], depth + 1),
     );
   };
 
@@ -919,7 +919,7 @@ function fillKey(
 
   // No line declares it: appending adds an entry rather than a duplicate. Still
   // verified — a block can end inside a construct an appended line would join.
-  if (!Object.prototype.hasOwnProperty.call(data, key)) {
+  if (!Object.hasOwn(data, key)) {
     return verifiedEdit(block, data, key, line, -1);
   }
   return undefined;

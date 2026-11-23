@@ -1,0 +1,19 @@
+# Atualizações semanais, em PR, das duas coisas que este repositório consome de fora: os pacotes
+# do npm e as actions do CI. As de desenvolvimento vêm agrupadas num PR só, porque andam juntas
+# (vitest e a cobertura dele têm de ter a mesma versão); as três de runtime vêm uma por PR, porque
+# cada uma é uma mudança no que o pacote entrega.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

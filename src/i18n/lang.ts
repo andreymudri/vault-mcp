@@ -18,14 +18,16 @@
  *   repetida a cada captura. O assunto de commit tem o mesmo problema com outro nome: ele entra
  *   no histórico de git do usuário, que é do vault e não de quem está lendo.
  *
- * - **AVISOS e DIAGNÓSTICOS, que continuam em português por ora** e são a exceção declarada:
- *   falhas de push e de commit (`git.ts`), avisos de mover/reescrever links (`relocate.ts`,
- *   `rewrite-links.ts`), e o `Motivo:` com que `vault_learn` explica ter anexado em vez de criado.
- *   Não é esquecimento: `writer.ts` funde até três avisos de origens diferentes numa string só
- *   (`joinWarnings`), então um código por aviso não sobrevive à fusão — traduzi-los exige
- *   reestruturar os arrays de aviso de quatro módulos, e parte deles é ANÁLISE (o `Motivo:` é
- *   prosa sobre o conteúdo do vault) e não rótulo de interface. Está aqui escrito para o próximo
- *   leitor saber que a fronteira é esta, e não descobrir por acidente.
+ * - **AVISOS e MOTIVOS**, que eram a exceção declarada e deixaram de ser: falhas de push e de
+ *   commit (`git.ts`), avisos de mover/reescrever links (`relocate.ts`, `rewrite-links.ts`), e o
+ *   `Motivo:` com que `vault_learn` explica onde arquivou o aprendizado. Um código por aviso não
+ *   sobrevive à fusão — `writer.ts` junta até três avisos de origens diferentes numa string só —,
+ *   então o que tem chave é a FRASE: cada trecho fixo mora em `phrases.ts`, a camada de escrita
+ *   monta as sentenças só com essas constantes, e a fronteira da tool troca cada trecho pelo do
+ *   catálogo. A camada de escrita continua sem saber de idioma.
+ *
+ *   O que segue em português dentro de um aviso é o que não é frase deste servidor: a saída do
+ *   próprio git, e a mensagem de um erro aninhado que não tem código.
  *
  * Resumo: o idioma da INTERFACE é do leitor; o idioma do CONTEÚDO é do vault.
  */

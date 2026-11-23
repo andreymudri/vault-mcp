@@ -225,10 +225,6 @@ function scored(
 }
 
 /** `noteTags` lookup built from a plain table, as `learn` builds one from the result set. */
-function tagsFrom(table: Record<string, string[]>): (p: string) => string[] {
-  return (p) => table[p] ?? [];
-}
-
 describe('slug', () => {
   it('matches the vault filename convention', () => {
     expect(slug('Auth Service Singleton')).toBe('auth-service-singleton');
@@ -309,7 +305,7 @@ describe('decideDuplicate', () => {
   const TAGS = { [BULLMQ]: ['nestjs', 'bullmq', 'filas'] };
 
   it('is not a duplicate when nothing matched', () => {
-    const decision = decideDuplicate([], ['bullmq'], 'nestjs', tagsFrom(TAGS));
+    const decision = decideDuplicate([], 'nestjs');
     expect(decision.isDuplicate).toBe(false);
     expect(decision.reason).toContain('nenhum match');
     expect(decision.targetPath).toBeUndefined();
@@ -323,55 +319,55 @@ describe('decideDuplicate', () => {
       scored(BULLMQ, 9.5, TAGS[BULLMQ]),
       scored(CACHE_WRAPPER, 1),
     ];
-    const decision = decideDuplicate(results, ['bullmq'], 'nestjs', tagsFrom(TAGS));
+    const decision = decideDuplicate(results, 'nestjs');
     expect(decision.isDuplicate).toBe(true);
     expect(decision.targetPath).toBe(BULLMQ);
   });
 
   it('treats a top hit with no runner-up at all as standing out', () => {
-    const decision = decideDuplicate([scored(BULLMQ, 3)], ['bullmq'], 'nestjs', tagsFrom(TAGS));
+    const decision = decideDuplicate([scored(BULLMQ, 3)], 'nestjs');
     expect(decision.isDuplicate).toBe(true);
   });
 
   it('pins the ratio threshold from below: exactly 1.8x is enough', () => {
     expect(DUPLICATE_SCORE_RATIO).toBe(1.8);
     const results = [scored(BULLMQ, DUPLICATE_SCORE_RATIO), scored(CACHE_WRAPPER, 1)];
-    expect(decideDuplicate(results, ['bullmq'], 'nestjs', tagsFrom(TAGS)).isDuplicate).toBe(true);
+    expect(decideDuplicate(results, 'nestjs').isDuplicate).toBe(true);
   });
 
   it('pins the ratio threshold from above: the double just below 1.8 is not', () => {
     const justBelow = 1.7999999999999998;
     expect(justBelow).toBeLessThan(DUPLICATE_SCORE_RATIO);
     const results = [scored(BULLMQ, justBelow), scored(CACHE_WRAPPER, 1)];
-    const decision = decideDuplicate(results, ['bullmq'], 'nestjs', tagsFrom(TAGS));
+    const decision = decideDuplicate(results, 'nestjs');
     expect(decision.isDuplicate).toBe(false);
     expect(decision.reason).toContain('razão');
   });
 
-  it('needs the overlap too: a dominant hit with neither tag nor domain in common is new', () => {
-    const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], ['docker'], 'docker', tagsFrom(TAGS));
+  it('needs the domain too: a dominant hit filed elsewhere is new', () => {
+    const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], 'docker');
     expect(decision.isDuplicate).toBe(false);
-    expect(decision.reason).toContain('overlap');
+    expect(decision.reason).toContain('outro domínio');
   });
 
-  it('accepts a shared tag alone', () => {
-    const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], ['bullmq'], 'docker', tagsFrom(TAGS));
-    expect(decision.isDuplicate).toBe(true);
+  it('a hit in ANOTHER domain is never the append target, and the reason names it', () => {
+    // The rule takes no tags at all, which is the point — see the `learn` test "uma tag em comum
+    // com a nota de outro domínio" below for the call that used to append on a shared tag.
+    const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], 'docker');
+    expect(decision.isDuplicate).toBe(false);
+    expect(decision.targetPath).toBeUndefined();
+    // The caller is told which note looked alike, so it can link the two.
+    expect(decision.reason).toContain(BULLMQ);
   });
 
-  it('accepts the same domain alone', () => {
-    const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], ['nada'], 'nestjs', tagsFrom(TAGS));
+  it('accepts the same domain, whatever the tags are', () => {
+    const decision = decideDuplicate([scored(BULLMQ, 10), scored(CACHE_WRAPPER, 1)], 'nestjs');
     expect(decision.isDuplicate).toBe(true);
   });
 
   it('matches the domain on a whole path segment, not a string prefix', () => {
     const sibling = '02-wiki/patternsX/nota.md';
-    const decision = decideDuplicate(
-      [scored(sibling, 10), scored(CACHE_WRAPPER, 1)],
-      ['nada'],
-      'patterns',
-      tagsFrom({}),
-    );
+    const decision = decideDuplicate([scored(sibling, 10), scored(CACHE_WRAPPER, 1)], 'patterns');
     expect(decision.isDuplicate).toBe(false);
   });
 
@@ -388,9 +384,7 @@ describe('decideDuplicate', () => {
     ]) {
       const decision = decideDuplicate(
         [scored(forapath, 10, ['bullmq']), scored(CACHE_WRAPPER, 1)],
-        ['bullmq'],
         'nestjs',
-        tagsFrom({ [forapath]: ['bullmq'] }),
       );
       expect(decision.isDuplicate).toBe(false);
       expect(decision.reason).toContain('02-wiki/');
@@ -404,7 +398,7 @@ describe('decideDuplicate', () => {
     // is an assertion for the day `GRAPH_DAMPING` reaches 1, and this test is the only way to
     // reach it - it pins what the guard must do, not something a user can hit today.
     const results = [scored(BULLMQ, 10, TAGS[BULLMQ], true), scored(CACHE_WRAPPER, 1)];
-    const decision = decideDuplicate(results, ['bullmq'], 'nestjs', tagsFrom(TAGS));
+    const decision = decideDuplicate(results, 'nestjs');
     expect(decision.isDuplicate).toBe(false);
     expect(decision.reason).toContain('grafo');
   });
@@ -472,7 +466,7 @@ describe('learn — roteamento', () => {
     expect(note).toContain('Subindo o healthcheck do cluster');
   });
 
-  it('cria nota nova quando há bom match mas nem tag nem domínio se sobrepõem', async () => {
+  it('cria nota nova quando o bom match está em outro domínio, e diz qual nota era', async () => {
     const before = await read(vaultRoot, BULLMQ);
     const result = await learn({
       vaultRoot,
@@ -487,8 +481,37 @@ describe('learn — roteamento', () => {
 
     expect(result.action).toBe('created');
     expect(result.path).toBe('02-wiki/docker/retry-de-worker-bullmq-no-build.md');
-    expect(result.reason).toContain('overlap');
+    expect(result.reason).toContain('outro domínio');
+    expect(result.reason).toContain(BULLMQ);
     // The strongly matching note was NOT touched.
+    expect(await read(vaultRoot, BULLMQ)).toBe(before);
+  });
+
+  it('uma tag em comum com a nota de outro domínio não faz dela o alvo do anexo', async () => {
+    // Recorded in the vault on 2026-11-08: a learning filed under `trading` was appended to a note
+    // in `02-wiki/rustot/` because both carried one generic tag. A tag is shared by notes that
+    // have nothing else in common; the domain is where the caller said this learning belongs.
+    //
+    // `bullmq` IS a tag of the nestjs note, and that is what makes this the test of the rule: with
+    // "a shared tag OR the same domain" this exact call answered "APPENDED to
+    // 02-wiki/nestjs/bullmq-worker.md". The test above it passes a tag the note does not have, so
+    // it stays green under either rule.
+    expect(matter(await read(vaultRoot, BULLMQ), {}).data.tags).toContain('bullmq');
+    const before = await read(vaultRoot, BULLMQ);
+    const result = await learn({
+      vaultRoot,
+      retriever: makeRetriever(vaultRoot),
+      titulo: 'Retry de worker BullMQ no build',
+      insight: 'O worker BullMQ aplica retry com backoff exponencial na fila de notificacoes',
+      contexto: 'Lendo o Dockerfile do worker',
+      dominio: 'docker',
+      tags: ['bullmq'],
+      now: NOW,
+    });
+
+    expect(result.action).toBe('created');
+    expect(result.path).toBe('02-wiki/docker/retry-de-worker-bullmq-no-build.md');
+    expect(result.reason).toContain(BULLMQ);
     expect(await read(vaultRoot, BULLMQ)).toBe(before);
   });
 
@@ -1307,8 +1330,10 @@ describe('learn - o insight nunca se perde', () => {
     // A target that classifies as an ordinary note and is then refused by `writeNote`'s own guards
     // — `DENIED_SEGMENTS` here — is still "this target cannot take the text", not a fault to throw.
     // The insight goes to the note's own name instead of being lost with the exception.
-    const alvo = '02-wiki/node_modules/nota.md';
-    await fs.mkdir(path.join(vaultRoot, '02-wiki/node_modules'));
+    // Inside the learning's OWN domain, or the duplicate rule would never pick it: a look-alike in
+    // another domain is reported and left alone before any write is attempted.
+    const alvo = '02-wiki/nestjs/node_modules/nota.md';
+    await fs.mkdir(path.join(vaultRoot, '02-wiki/nestjs/node_modules'));
     await fs.writeFile(path.join(vaultRoot, alvo), '# Nota\n\nconteudo real\n', 'utf8');
     const retriever = {
       search: () => ({ results: [scored(alvo, 10, ['bullmq'])] }),

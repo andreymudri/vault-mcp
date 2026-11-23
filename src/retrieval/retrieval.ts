@@ -1,3 +1,4 @@
+import { DEFAULT_LAYOUT, type Layout } from '../config/layout.js';
 import { LinkGraph } from '../graph/graph.js';
 import { search as bm25Search, suggestTerms } from '../index/bm25.js';
 import { chunkNote } from '../index/chunker.js';
@@ -16,6 +17,8 @@ import {
 
 export interface RetrieverOptions {
   scanner: VaultScanner;
+  /** The vault's layout: which folder is raw capture, and which is the archive. */
+  layout?: Layout;
 }
 
 export interface SearchOptions {
@@ -32,15 +35,6 @@ export interface SearchOptions {
   /** `01-raw/` is capture, not knowledge: excluded unless explicitly asked for. */
   includeRaw?: boolean;
 }
-
-/**
- * Notes under this prefix are unprocessed capture (clippings, inbox scraps). They are indexed —
- * a user who knows what they are looking for must be able to find them — but they stay out of
- * ordinary results, where they would compete with curated notes on raw term frequency alone.
- *
- * Exported for `vault_graph` in `src/server/tools.ts`, which leaves `01-raw/` out by the same rule.
- */
-export const RAW_PREFIX = '01-raw/';
 
 /**
  * Ceiling on how many query terms reach the index, applied here because `search` in
@@ -198,6 +192,14 @@ export function inFolder(path: string, folder: string): boolean {
  */
 export class Retriever {
   private readonly scanner: VaultScanner;
+  /**
+   * `<raw>/`, the layout's folder of unprocessed capture (clippings, inbox scraps). Its notes are
+   * indexed — a user who knows what they are looking for must be able to find them — but they
+   * stay out of ordinary results, where they would compete with curated notes on raw term
+   * frequency alone. `vault_graph` leaves the same folder out by the same rule.
+   */
+  private readonly rawPrefix: string;
+  private readonly archiveFolder: string;
   private readonly index = new InvertedIndex();
   private readonly graph = new LinkGraph();
   /**
@@ -209,6 +211,9 @@ export class Retriever {
 
   constructor(options: RetrieverOptions) {
     this.scanner = options.scanner;
+    const { raw, archive } = (options.layout ?? DEFAULT_LAYOUT).folders;
+    this.rawPrefix = `${raw}/`;
+    this.archiveFolder = archive;
   }
 
   /**
@@ -264,6 +269,12 @@ export class Retriever {
     if (changed.length > 0 || removed.length > 0) this.graph.build(this.scanner.allNotes());
   }
 
+  /** How much is indexed right now, for `vault_status`. Brings the index up to date first. */
+  stats(): { notes: number; chunks: number } {
+    this.sync();
+    return { notes: this.scanner.allNotes().length, chunks: this.index.size() };
+  }
+
   search(options: SearchOptions): SearchResult {
     this.sync();
 
@@ -272,7 +283,7 @@ export class Retriever {
 
     // `keep` goes INTO the BM25 call: filtering after the top-K cut would return nothing whenever
     // the eight best candidates all failed the filter, even with valid candidates further down.
-    const direct = bm25Search(this.index, query, BM25_TOP_K, keep);
+    const direct = bm25Search(this.index, query, BM25_TOP_K, keep, this.archiveFolder);
 
     // `bm25Search` accumulates into a `Map` keyed by chunk id, so `direct` is already unique.
     const merged = new Map<string, ScoredChunk>();
@@ -306,9 +317,15 @@ export class Retriever {
     // Explicit tie-break, not cosmetics: expansion gives every chunk of every neighbour the same
     // inherited score, so ties are the common case. Without it the budget cut would return
     // different sets depending on `Map` insertion order — i.e. on the order notes were indexed.
+    //
+    // By path, then by line AS A NUMBER. The id (`path#line`) used to be compared as a string, and
+    // `#11` sorts before `#4` that way: of a neighbour's tied chunks the one from further down the
+    // note came first, so the budget kept the end of a note and cut its beginning.
     scored.sort(
       (a, b) =>
-        b.score - a.score || (a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0),
+        b.score - a.score ||
+        (a.chunk.path < b.chunk.path ? -1 : a.chunk.path > b.chunk.path ? 1 : 0) ||
+        a.chunk.lineStart - b.chunk.lineStart,
     );
 
     const results = markTruncated(
@@ -388,7 +405,7 @@ export class Retriever {
   private predicate(options: SearchOptions): (chunk: Chunk) => boolean {
     const { tipo, folder, tags, status, includeRaw } = options;
     return (chunk) => {
-      if (includeRaw !== true && chunk.path.startsWith(RAW_PREFIX)) return false;
+      if (includeRaw !== true && chunk.path.startsWith(this.rawPrefix)) return false;
       if (tipo !== undefined && chunk.tipo !== tipo) return false;
       if (folder !== undefined && !inFolder(chunk.path, folder)) return false;
       if (tags !== undefined && !hasAllTags(chunk.tags, tags)) return false;

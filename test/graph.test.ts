@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LinkGraph } from '../src/graph/graph.js';
 import type { Note } from '../src/types.js';
 import { VaultScanner } from '../src/vault/scanner.js';
+import { ALWAYS_SCAN } from './platform.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -22,7 +23,7 @@ let scanner: VaultScanner;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'vault-graph-'));
   cpSync(FIXTURE, root, { recursive: true });
-  scanner = new VaultScanner({ vaultRoot: root });
+  scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
   scanner.refresh();
 });
 

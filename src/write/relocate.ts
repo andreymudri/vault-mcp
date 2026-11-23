@@ -1,13 +1,14 @@
 import { promises as fs } from 'node:fs';
 import { dirname, posix, relative, resolve, sep } from 'node:path';
 
+import { DEFAULT_LAYOUT, heading, type Layout } from '../config/layout.js';
 import { LinkGraph } from '../graph/graph.js';
 import { parseFile } from '../vault/frontmatter.js';
 import { extractLinkTargets, resolveLinkTarget } from '../vault/links.js';
 import type { VaultScanner } from '../vault/scanner.js';
 import { atomicWrite } from './atomic.js';
 import { unifiedDiff } from './diff.js';
-import { commitFiles, headBlobState, headSha } from './git.js';
+import { commitFiles, commitRecovery, headBlobState, headSha } from './git.js';
 import { classifyNode, forMessage, guardedPath } from './paths.js';
 import {
   bumpAtualizado,
@@ -18,6 +19,7 @@ import {
 import { buildVaultIndex, rewriteLinks, type VaultIndex } from './rewrite-links.js';
 import { formatLocal } from './template.js';
 import { coded } from '../i18n/errors.js';
+import { PHRASES } from '../i18n/phrases.js';
 
 /**
  * Moving, renaming, promoting, archiving and deleting a note — the four operations that
@@ -71,6 +73,13 @@ export interface MoveNoteOptions {
   to: string;
   confirmNovoDominio?: boolean;
   now: Date;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 export interface DeleteNoteOptions {
@@ -79,6 +88,13 @@ export interface DeleteNoteOptions {
   path: string;
   confirm?: boolean;
   now: Date;
+  /** The vault's layout. The default one when absent. */
+  layout?: Layout;
+  /**
+   * Forwarded to `commitFiles`. The write tools pass `false`: they commit holding the vault lock
+   * and push after releasing it. Absent means "whatever `VAULT_AUTO_PUSH` says".
+   */
+  push?: boolean;
 }
 
 export interface MoveResult {
@@ -92,6 +108,12 @@ export interface MoveResult {
   propagated: string[];
   committed: boolean;
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warnings: string[];
 }
 
@@ -101,6 +123,12 @@ export interface DeleteResult {
   propagated: string[];
   committed: boolean;
   pushed?: boolean;
+  /** True when the commit failed and was queued in the pending journal (`git.ts`). */
+  pending?: boolean;
+  /** Earlier pending commits this write managed to make. */
+  recovered?: number;
+  /** Pending commits given up on during this write. */
+  dropped?: number;
   warnings: string[];
   /** The exact command that brings the note back, run from INSIDE the vault. */
   undo?: string;
@@ -114,21 +142,23 @@ interface PlannedWrite {
   after: string;
 }
 
-/** Paths that are STRUCTURE rather than knowledge, and are never deleted through this server. */
-const KNOWLEDGE_INDEX = '00-index/index-knowledge.md';
+/** The knowledge index: STRUCTURE rather than knowledge, and never deleted through this server. */
+function knowledgeIndexOf(layout: Layout): string {
+  return `${layout.folders.index}/index-knowledge.md`;
+}
 
 function toVaultRelative(vaultRoot: string, absPath: string): string {
   return relative(resolve(vaultRoot), absPath).split(sep).join('/');
 }
 
 /** `02-wiki/<dominio>/...` → `<dominio>`, and `undefined` for a note outside the wiki. */
-function domainOf(relPath: string): string | undefined {
+function domainOf(relPath: string, layout: Layout): string | undefined {
   const parts = relPath.split('/');
-  return parts.length >= 3 && parts[0] === '02-wiki' ? parts[1] : undefined;
+  return parts.length >= 3 && parts[0] === layout.folders.wiki ? parts[1] : undefined;
 }
 
-function mocPathOf(dominio: string): string {
-  return `02-wiki/${dominio}/${dominio}-moc.md`;
+function mocPathOf(dominio: string, layout: Layout): string {
+  return `${layout.folders.wiki}/${dominio}/${dominio}-moc.md`;
 }
 
 /** The basename a raw link target names, which is the only part that can change resolution. */
@@ -215,8 +245,11 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
   // `allowArchive` on BOTH sides: archiving and unarchiving are this one operation run in
   // opposite directions. It exempts `99-archive/` and nothing else — `_templates/`, `.git/`,
   // `.obsidian/` and `node_modules/` stay refused, with no flag that opens them.
-  const fromAbs = await guardedPath(opts.vaultRoot, opts.from, { allowArchive: true });
-  const toAbs = await guardedPath(opts.vaultRoot, opts.to, { allowArchive: true });
+  const layout = opts.layout ?? DEFAULT_LAYOUT;
+  const KNOWLEDGE_INDEX = knowledgeIndexOf(layout);
+  const notesHeading = heading(layout.sections.notes);
+  const fromAbs = await guardedPath(opts.vaultRoot, opts.from, { allowArchive: true, layout, existing: true });
+  const toAbs = await guardedPath(opts.vaultRoot, opts.to, { allowArchive: true, layout });
 
   const fromRel = toVaultRelative(opts.vaultRoot, fromAbs);
   const toRel = toVaultRelative(opts.vaultRoot, toAbs);
@@ -256,19 +289,19 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
   const seeded = new Map<string, string>();
   const propagated: string[] = [];
 
-  const fromDomain = domainOf(fromRel);
-  const toDomain = domainOf(toRel);
+  const fromDomain = domainOf(fromRel, layout);
+  const toDomain = domainOf(toRel, layout);
   const domainChanged = fromDomain !== toDomain;
 
   let resumo: string | undefined;
-  const sourceMoc = fromDomain === undefined ? undefined : mocPathOf(fromDomain);
+  const sourceMoc = fromDomain === undefined ? undefined : mocPathOf(fromDomain, layout);
   if (domainChanged && sourceMoc !== undefined && sourceMoc !== fromRel) {
     const abs = resolve(opts.vaultRoot, sourceMoc);
     const text = await readIfPresent(abs, sourceMoc);
     if (text !== '') {
       const { content, removed } = removeFromSection(
         text,
-        '## Notas',
+        notesHeading,
         entryFor(sourceMoc, fromRel, before),
       );
       resumo = resumoOf(removed);
@@ -326,7 +359,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
   // After the rewrite, so the entry this composes is never re-resolved against an index it was
   // written for. It mirrors `vault_learn` exactly: the bare slug under `## Notas`, the domain
   // line in the knowledge index when the domain is new.
-  const destMoc = toDomain === undefined ? undefined : mocPathOf(toDomain);
+  const destMoc = toDomain === undefined ? undefined : mocPathOf(toDomain, layout);
   if (domainChanged && destMoc !== undefined && destMoc !== toRel) {
     const absMoc = resolve(opts.vaultRoot, destMoc);
     const existing = plans.get(destMoc)?.after ?? (await readIfPresent(absMoc, destMoc));
@@ -334,13 +367,13 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     const domainIsNew = existing === '';
     if (domainIsNew && opts.confirmNovoDominio !== true) {
       throw coded(new RelocateError(`${forMessage(toDomain ?? '')} ainda não tem MOC em 02-wiki/; ` +
-          'passe confirm_novo_dominio para criá-lo'), 'relocate.newDomainNeedsConfirm', { toDomain: forMessage(toDomain ?? '') });
+          'passe confirm_new_domain para criá-lo'), 'relocate.newDomainNeedsConfirm', { toDomain: forMessage(toDomain ?? '') });
     }
 
     const slug = posix.basename(toRel, '.md');
     const entry = resumo === undefined ? `- [[${slug}]]` : `- [[${slug}]] — ${resumo}`;
-    const base = domainIsNew ? buildMoc(toDomain ?? '', date) : existing;
-    const updated = bumpAtualizado(insertUnderSection(base, '## Notas', entry), date);
+    const base = domainIsNew ? buildMoc(toDomain ?? '', date, layout) : existing;
+    const updated = bumpAtualizado(insertUnderSection(base, notesHeading, entry), date);
     if (updated !== onDisk) {
       plans.set(destMoc, { relPath: destMoc, absPath: absMoc, before: onDisk, after: updated });
       if (!propagated.includes(destMoc)) propagated.push(destMoc);
@@ -353,13 +386,13 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
       const absIndex = resolve(opts.vaultRoot, KNOWLEDGE_INDEX);
       const indexBefore = await readIfPresent(absIndex, KNOWLEDGE_INDEX);
       if (indexBefore === '') {
-        warnings.push(`${KNOWLEDGE_INDEX} não existe; o domínio novo não foi indexado`);
+        warnings.push(`${KNOWLEDGE_INDEX}${PHRASES.indexMissing}`);
       } else {
         const line =
-          `- [[../02-wiki/${toDomain}/${toDomain}-moc|${toDomain}]]` +
+          `- [[../${layout.folders.wiki}/${toDomain}/${toDomain}-moc|${toDomain}]]` +
           (resumo === undefined ? '' : ` — ${resumo}`);
         const indexAfter = bumpAtualizado(
-          insertUnderSection(indexBefore, '## Domínios', line),
+          insertUnderSection(indexBefore, heading(layout.sections.domains), line),
           date,
         );
         if (indexAfter !== indexBefore) {
@@ -409,7 +442,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
       written.push(plan.absPath);
     } catch (err) {
       warnings.push(
-        `falha ao reescrever ${forMessage(plan.relPath)}: ` +
+        `${PHRASES.rewriteFailed}${forMessage(plan.relPath)}: ` +
           forMessage(err instanceof Error ? err.message : String(err)),
       );
     }
@@ -421,6 +454,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     opts.vaultRoot,
     [...new Set(written)],
     `docs(vault): mover ${fromRel} para ${toRel}`,
+    opts.push === undefined ? {} : { push: opts.push },
   );
   if (commit.warning !== undefined) warnings.push(commit.warning);
 
@@ -432,6 +466,7 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
     propagated,
     committed: commit.committed,
     ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
     warnings,
   };
 }
@@ -448,7 +483,9 @@ export async function moveNote(opts: MoveNoteOptions): Promise<MoveResult> {
  * nothing in it is destroyed. Deleting an archived note stays `rm`'s job, outside this server.
  */
 export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult> {
-  const absPath = await guardedPath(opts.vaultRoot, opts.path);
+  const layout = opts.layout ?? DEFAULT_LAYOUT;
+  const KNOWLEDGE_INDEX = knowledgeIndexOf(layout);
+  const absPath = await guardedPath(opts.vaultRoot, opts.path, { layout, existing: true });
   const relPath = toVaultRelative(opts.vaultRoot, absPath);
 
   if ((await classifyNode(absPath)) !== 'file') {
@@ -482,8 +519,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   }
   if (head.modified) {
     warnings.push(
-      `${forMessage(relPath)} tem edições não commitadas; ` +
-        'restaurar traz de volta a versão commitada, não o que está em disco agora',
+      `${forMessage(relPath)}${PHRASES.uncommittedEdits}`,
     );
   }
 
@@ -501,8 +537,8 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
   // And it is not a link that BREAKS: this operation removes it. So the MOC is excluded only
   // when the removal actually happened AND the resulting text no longer resolves to the note at
   // all. A MOC that also names it under `## Relacionados` keeps its backlink and its refusal.
-  const dominio = domainOf(relPath);
-  const mocPath = dominio === undefined ? undefined : mocPathOf(dominio);
+  const dominio = domainOf(relPath, layout);
+  const mocPath = dominio === undefined ? undefined : mocPathOf(dominio, layout);
   let mocSettled: string | undefined;
   if (mocPath !== undefined && mocPath !== relPath) {
     const absMoc = resolve(opts.vaultRoot, mocPath);
@@ -510,7 +546,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
     if (mocBefore !== '') {
       const { content: mocAfter, removed } = removeFromSection(
         mocBefore,
-        '## Notas',
+        heading(layout.sections.notes),
         entryFor(mocPath, relPath, index),
       );
       if (removed !== undefined) {
@@ -551,14 +587,19 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
       written.push(plan.absPath);
     } catch (err) {
       warnings.push(
-        `falha ao atualizar ${forMessage(plan.relPath)}: ` +
+        `${PHRASES.updateFailed}${forMessage(plan.relPath)}: ` +
           forMessage(err instanceof Error ? err.message : String(err)),
       );
     }
   }
 
   const titulo = posix.basename(relPath, '.md');
-  const commit = await commitFiles(opts.vaultRoot, written, `docs(vault): remover ${titulo}`);
+  const commit = await commitFiles(
+    opts.vaultRoot,
+    written,
+    `docs(vault): remover ${titulo}`,
+    opts.push === undefined ? {} : { push: opts.push },
+  );
   if (commit.warning !== undefined) warnings.push(commit.warning);
 
   // The sha of the commit JUST made, never `HEAD^`: the user may commit again before they read
@@ -577,6 +618,7 @@ export async function deleteNote(opts: DeleteNoteOptions): Promise<DeleteResult>
     propagated,
     committed: commit.committed,
     ...(commit.pushed === undefined ? {} : { pushed: commit.pushed }),
+    ...commitRecovery(commit),
     warnings,
     ...(sha === undefined
       ? {}

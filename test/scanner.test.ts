@@ -1,11 +1,12 @@
-import { cpSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { Note } from '../src/types.js';
-import { VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
+import { DEFAULT_MAX_NOTE_BYTES, VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
+import { ALWAYS_SCAN, IS_WINDOWS } from './platform.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -90,7 +91,7 @@ function tracker(): Tracker {
 }
 
 function scannerWith(t: Tracker): VaultScanner {
-  return new VaultScanner({ vaultRoot: root, fs: t.fs });
+  return new VaultScanner({ vaultRoot: root, fs: t.fs, ...ALWAYS_SCAN });
 }
 
 const ALL_PATHS = [
@@ -138,7 +139,7 @@ function touch(relativePath: string, secondsAhead: number): void {
 
 describe('VaultScanner.refresh', () => {
   it('encontra todo `.md` do vault, inclusive na raiz e em 99-archive/', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     const { changed, removed } = scanner.refresh();
 
     expect(paths(scanner)).toEqual(ALL_PATHS);
@@ -149,7 +150,7 @@ describe('VaultScanner.refresh', () => {
   });
 
   it('devolve caminhos vault-relativos com separador `/`', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     for (const path of paths(scanner)) {
@@ -162,7 +163,7 @@ describe('VaultScanner.refresh', () => {
   });
 
   it('ignora `_templates/`, verificado pela saída', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     // Os dois arquivos existem na cópia — a asserção só vale porque há alvo.
@@ -205,7 +206,7 @@ describe('VaultScanner.refresh', () => {
 
 describe('VaultScanner: notas', () => {
   it('quebrada.md entra com frontmatter vazio e gera diagnostic, sem lançar', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     expect(() => scanner.refresh()).not.toThrow();
 
     const note = scanner.getNote('quebrada.md');
@@ -221,7 +222,7 @@ describe('VaultScanner: notas', () => {
   });
 
   it('title vem do primeiro `# `, com fallback para o basename sem extensão', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/nestjs/auth-guard.md')?.title).toBe('Auth Guard');
@@ -236,14 +237,14 @@ describe('VaultScanner: notas', () => {
       join(root, 'cercada.md'),
       ['```md', '# Titulo Falso', '```', '', '# Titulo Real', '', 'corpo', ''].join('\n'),
     );
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('cercada.md')?.title).toBe('Titulo Real');
   });
 
   it('resolve wiki-links numa segunda passada, com o conjunto completo de caminhos', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const authGuard = scanner.getNote('02-wiki/nestjs/auth-guard.md');
@@ -266,7 +267,7 @@ describe('VaultScanner: notas', () => {
   });
 
   it('expõe mtimeMs, getNote e allNotes coerentes', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const note = scanner.getNote('99-archive/antigo.md');
@@ -333,7 +334,7 @@ describe('VaultScanner: revalidação por mtime', () => {
   });
 
   it('remover um arquivo o retira do mapa e reabre os links que dependiam dele', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(scanner.getNote('02-wiki/nestjs/bullmq-worker.md')).toBeDefined();
 
@@ -352,7 +353,7 @@ describe('VaultScanner: revalidação por mtime', () => {
   });
 
   it('um arquivo novo entra em `changed` e passa a resolver links', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     writeFileSync(
@@ -386,7 +387,7 @@ describe('VaultScanner: diagnostics', () => {
   });
 
   it('um arquivo corrigido deixa de ser reportado', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
     expect(scanner.diagnostics.map((d) => d.path)).toContain('quebrada.md');
 
@@ -436,7 +437,7 @@ function closingDelimiterLine(relative: string): number {
 
 describe('VaultScanner: bodyStartLine', () => {
   it('nota sem bloco de frontmatter começa na linha 1', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     for (const relative of ['01-raw/inbox/rascunho.md', 'CLAUDE.md']) {
@@ -448,7 +449,7 @@ describe('VaultScanner: bodyStartLine', () => {
   });
 
   it('nota com frontmatter começa na linha seguinte ao fechamento `---`', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const relative = '02-wiki/nestjs/auth-guard.md';
@@ -468,7 +469,7 @@ describe('VaultScanner: bodyStartLine', () => {
       join(root, 'branco.md'),
       ['---', 'tipo: wiki', '---', '', '# Título', '', 'corpo', ''].join('\n'),
     );
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const note = scanner.getNote('branco.md')!;
@@ -481,7 +482,7 @@ describe('VaultScanner: bodyStartLine', () => {
     const lines = ['---', 'tipo: wiki', 'tags: [docker]', '---', '', '# Título', '', 'corpo', ''];
     writeFileSync(join(root, 'crlf.md'), lines.join('\r\n'));
     writeFileSync(join(root, 'lf.md'), lines.join('\n'));
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     const crlf = scanner.getNote('crlf.md')!;
@@ -493,7 +494,7 @@ describe('VaultScanner: bodyStartLine', () => {
   });
 
   it('vale para toda nota da fixture, inclusive a de frontmatter inválido', () => {
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     let comFrontmatter = 0;
@@ -533,7 +534,7 @@ describe('VaultScanner: hard link', () => {
     writeFileSync(secret, '-----BEGIN PRIVATE KEY-----\nnão pertence ao vault\n');
     linkSync(secret, join(root, '02-wiki', 'vazamento.md'));
 
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/vazamento.md')).toBeUndefined();
@@ -552,12 +553,220 @@ describe('VaultScanner: hard link', () => {
   it('recusa também um hard link cujos dois nomes estão dentro do vault', () => {
     linkSync(join(root, '02-wiki', 'nestjs', 'auth-guard.md'), join(root, '02-wiki', 'copia.md'));
 
-    const scanner = new VaultScanner({ vaultRoot: root });
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
     scanner.refresh();
 
     expect(scanner.getNote('02-wiki/copia.md')).toBeUndefined();
     // O original compartilha o mesmo inode, então cai pela mesma regra.
     expect(scanner.getNote('02-wiki/nestjs/auth-guard.md')).toBeUndefined();
     expect(scanner.diagnostics.map((d) => d.path)).toContain('02-wiki/copia.md');
+  });
+});
+
+/**
+ * O scanner lia qualquer `.md`, de qualquer tamanho e com qualquer conteúdo. Medido em 2026-11-22:
+ * um único arquivo de 64 MB travou a primeira busca por 3,3 s e custou cerca de 1 GB de RSS, e um
+ * binário de 8 MB com extensão `.md` foi indexado sem uma palavra.
+ */
+describe('VaultScanner: tetos', () => {
+  const LIMITE = 100_000;
+  const diag = (scanner: VaultScanner, path: string) => scanner.diagnostics.find((d) => d.path === path);
+
+  it('o teto padrão é de 5 MB', () => {
+    expect(DEFAULT_MAX_NOTE_BYTES).toBe(5 * 1024 * 1024);
+  });
+
+  it('não LÊ um arquivo acima do teto de bytes, e diz por quê', () => {
+    writeFileSync(join(root, '02-wiki', 'enorme.md'), `# Enorme\n\n${'x'.repeat(LIMITE * 2)}\n`);
+    const t = tracker();
+    const scanner = new VaultScanner({ vaultRoot: root, fs: t.fs, maxNoteBytes: LIMITE, ...ALWAYS_SCAN });
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/enorme.md')).toBeUndefined();
+    // O teto é decidido pelo `stat`: o arquivo nunca chega a ser aberto.
+    expect(t.readFileCalls).not.toContain('02-wiki/enorme.md');
+    expect(diag(scanner, '02-wiki/enorme.md')?.code).toBe('diag.tooLarge');
+    expect(diag(scanner, '02-wiki/enorme.md')?.params).toMatchObject({ max: LIMITE });
+    expect(paths(scanner)).toEqual(ALL_PATHS);
+  });
+
+  it('um arquivo exatamente no teto ainda é nota', () => {
+    const corpo = '# No teto\n\n';
+    writeFileSync(join(root, '02-wiki', 'no-teto.md'), corpo + 'x'.repeat(LIMITE - corpo.length));
+    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE, ...ALWAYS_SCAN });
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/no-teto.md')?.title).toBe('No teto');
+  });
+
+  it('uma nota que cresce além do teto sai do índice', () => {
+    writeFileSync(join(root, '02-wiki', 'cresce.md'), '# Cresce\n');
+    const scanner = new VaultScanner({ vaultRoot: root, maxNoteBytes: LIMITE, ...ALWAYS_SCAN });
+    scanner.refresh();
+    expect(scanner.getNote('02-wiki/cresce.md')).toBeDefined();
+
+    writeFileSync(join(root, '02-wiki', 'cresce.md'), `# Cresce\n\n${'x'.repeat(LIMITE * 2)}\n`);
+    touch('02-wiki/cresce.md', 5);
+    const { removed } = scanner.refresh();
+
+    expect(removed).toContain('02-wiki/cresce.md');
+    expect(scanner.getNote('02-wiki/cresce.md')).toBeUndefined();
+    expect(diag(scanner, '02-wiki/cresce.md')?.code).toBe('diag.tooLarge');
+  });
+
+  it('não indexa arquivo com byte NUL, e não o relê enquanto ele não mudar', () => {
+    writeFileSync(join(root, '02-wiki', 'binario.md'), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01, 0x02]));
+    const t = tracker();
+    const scanner = scannerWith(t);
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/binario.md')).toBeUndefined();
+    expect(diag(scanner, '02-wiki/binario.md')?.code).toBe('diag.binary');
+    expect(paths(scanner)).toEqual(ALL_PATHS);
+
+    // Recusado uma vez, não é aberto de novo a cada busca: o mtime igual responde por ele.
+    t.reset();
+    scanner.refresh();
+    expect(t.readFileCalls).toEqual([]);
+    expect(diag(scanner, '02-wiki/binario.md')?.code).toBe('diag.binary');
+  });
+
+  it('volta a indexar o arquivo quando ele deixa de ser binário', () => {
+    writeFileSync(join(root, '02-wiki', 'binario.md'), Buffer.from([0x00, 0x01]));
+    const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
+    scanner.refresh();
+    expect(scanner.getNote('02-wiki/binario.md')).toBeUndefined();
+
+    writeFileSync(join(root, '02-wiki', 'binario.md'), '# Agora é texto\n');
+    touch('02-wiki/binario.md', 5);
+    scanner.refresh();
+
+    expect(scanner.getNote('02-wiki/binario.md')?.title).toBe('Agora é texto');
+    expect(diag(scanner, '02-wiki/binario.md')).toBeUndefined();
+  });
+
+  it.skipIf(IS_WINDOWS)('reporta o symlink que pulou, em vez de sumir com a nota em silêncio', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'vault-scanner-fora-'));
+    try {
+      writeFileSync(join(outside, 'segredo.md'), '# Segredo\n\nnão pertence ao vault\n');
+      symlinkSync(join(outside, 'segredo.md'), join(root, '02-wiki', 'atalho.md'));
+      symlinkSync(outside, join(root, '02-wiki', 'pasta-ligada'));
+      // Um symlink para um arquivo comum que não é nota não esconde nada, e não gera ruído.
+      writeFileSync(join(outside, 'imagem.png'), 'png');
+      symlinkSync(join(outside, 'imagem.png'), join(root, '02-wiki', 'imagem.png'));
+
+      const scanner = new VaultScanner({ vaultRoot: root, ...ALWAYS_SCAN });
+      scanner.refresh();
+
+      expect(paths(scanner)).toEqual(ALL_PATHS);
+      expect(diag(scanner, '02-wiki/atalho.md')?.code).toBe('diag.symlink');
+      expect(diag(scanner, '02-wiki/pasta-ligada')?.code).toBe('diag.symlink');
+      expect(diag(scanner, '02-wiki/imagem.png')).toBeUndefined();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Toda chamada de tool andava o vault inteiro e fazia `stat` de cada nota. Medido em 2026-11-22
+ * num vault sintético: 68 ms com 5 mil notas e 291 ms com 20 mil — quase todo o tempo de uma busca
+ * já indexada. A validade é ADAPTATIVA para não mudar nada onde não havia problema: um scan barato
+ * nunca é reaproveitado, então um vault pequeno (e esta suíte) continua vendo cada mudança na hora.
+ */
+describe('VaultScanner: validade do scan', () => {
+  /** Um relógio de mão, e um `FsOps` que o adianta a cada `stat` — o custo do scan vira um número. */
+  function timed(msPerStat: number) {
+    const t = tracker();
+    const clock = { now: 0 };
+    const fs: FsOps = {
+      readdir: (dir) => t.fs.readdir(dir),
+      readFile: (path) => t.fs.readFile(path),
+      stat: (path) => {
+        clock.now += msPerStat;
+        return t.fs.stat(path);
+      },
+    };
+    return { t, clock, fs };
+  }
+  const fsCalls = (t: Tracker): number => t.statCalls.length + t.readdirCalls.length + t.readFileCalls.length;
+
+  it('um scan barato nunca é reaproveitado', () => {
+    const { t, clock, fs } = timed(0.1);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    t.reset();
+
+    scanner.refresh();
+    expect(t.statCalls.length).toBeGreaterThan(0);
+  });
+
+  it('um scan caro vale por dez vezes o que custou', () => {
+    const { t, clock, fs } = timed(5);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    const custo = clock.now;
+    expect(custo).toBeGreaterThanOrEqual(20);
+    const antes = paths(scanner);
+    t.reset();
+
+    clock.now += custo * 10 - 1;
+    expect(scanner.refresh()).toEqual({ changed: [], removed: [] });
+    expect(fsCalls(t)).toBe(0);
+    // Reaproveitar o scan não é esquecer o que ele achou.
+    expect(paths(scanner)).toEqual(antes);
+    expect(scanner.diagnostics.length).toBeGreaterThan(0);
+
+    clock.now += 2;
+    scanner.refresh();
+    expect(t.statCalls.length).toBeGreaterThan(0);
+  });
+
+  it('a validade tem teto de 2 s, por mais caro que o scan tenha sido', () => {
+    const { t, clock, fs } = timed(200);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    expect(clock.now).toBeGreaterThan(2_000);
+    t.reset();
+
+    clock.now += 1_999;
+    scanner.refresh();
+    expect(fsCalls(t)).toBe(0);
+
+    clock.now += 2;
+    scanner.refresh();
+    expect(t.statCalls.length).toBeGreaterThan(0);
+  });
+
+  it('invalidate() força o scan seguinte, que enxerga o que mudou', () => {
+    const { t, clock, fs } = timed(5);
+    const scanner = new VaultScanner({ vaultRoot: root, fs, now: () => clock.now });
+    scanner.refresh();
+    writeFileSync(join(root, '02-wiki', 'nova.md'), '# Nova\n');
+    t.reset();
+
+    expect(scanner.refresh().changed).toEqual([]);
+    scanner.invalidate();
+    expect(scanner.refresh().changed).toEqual(['02-wiki/nova.md']);
+  });
+
+  it('scanTtlMs fixa a validade: 0 desliga o reaproveitamento, um número vale como está', () => {
+    const caro = timed(200);
+    const semValidade = new VaultScanner({ vaultRoot: root, fs: caro.fs, now: () => caro.clock.now, scanTtlMs: 0 });
+    semValidade.refresh();
+    caro.t.reset();
+    semValidade.refresh();
+    expect(caro.t.statCalls.length).toBeGreaterThan(0);
+
+    const barato = timed(0.1);
+    const fixa = new VaultScanner({ vaultRoot: root, fs: barato.fs, now: () => barato.clock.now, scanTtlMs: 500 });
+    fixa.refresh();
+    barato.t.reset();
+    barato.clock.now += 499;
+    fixa.refresh();
+    expect(fsCalls(barato.t)).toBe(0);
+    barato.clock.now += 2;
+    fixa.refresh();
+    expect(barato.t.statCalls.length).toBeGreaterThan(0);
   });
 });

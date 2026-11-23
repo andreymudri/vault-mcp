@@ -22,6 +22,8 @@ export function search(
   query: string,
   limit: number,
   keep?: (chunk: Chunk) => boolean,
+  /** The vault's archive folder, whose notes are demoted. The default layout's when absent. */
+  archiveFolder?: string,
 ): ScoredChunk[] {
   const terms = tokenize(query);
   const N = index.size();
@@ -29,14 +31,13 @@ export function search(
   const scores = new Map<string, number>();
 
   for (const term of terms) {
-    const postings = index.postings.get(term);
-    if (!postings) continue;
-    const termIdf = idf(N, postings.size);
-    for (const [chunkId, freq] of postings) {
-      const dl = index.chunkLengths.get(chunkId) ?? 0;
+    const df = index.documentFrequency(term);
+    if (df === 0) continue;
+    const termIdf = idf(N, df);
+    index.eachPosting(term, (chunkId, freq, dl) => {
       const denom = freq + K1 * (1 - B + (B * dl) / avgdl);
       scores.set(chunkId, (scores.get(chunkId) ?? 0) + (termIdf * freq * (K1 + 1)) / denom);
-    }
+    });
   }
 
   // Peso por tipo de nota aplicado UMA VEZ, sobre o score acumulado do chunk — não sobre as
@@ -45,7 +46,7 @@ export function search(
     const chunk = index.chunks.get(chunkId);
     // Two independent demotions, multiplied: WHAT the note is (a MOC restates its domain) and
     // WHERE it lives (the archive is retired). A MOC inside the archive is both.
-    scores.set(chunkId, score * noteTypeWeight(chunk?.tipo) * pathWeight(chunk?.path));
+    scores.set(chunkId, score * noteTypeWeight(chunk?.tipo) * pathWeight(chunk?.path, archiveFolder));
   }
 
   // Filtra antes de fatiar: um `keep` restritivo aplicado depois do corte devolveria nada sempre

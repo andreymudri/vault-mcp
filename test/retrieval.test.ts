@@ -14,6 +14,7 @@ import {
 import { Retriever, type SearchOptions } from '../src/retrieval/retrieval.js';
 import type { Chunk, ScoredChunk } from '../src/types.js';
 import { VaultScanner, type DirEntry, type FsOps } from '../src/vault/scanner.js';
+import { ALWAYS_SCAN } from './platform.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/vault/', import.meta.url));
 
@@ -55,14 +56,18 @@ function loadFixture(): Map<string, MemFile> {
 }
 
 function memEntry(name: string, directory: boolean): DirEntry {
-  return { name, isDirectory: () => directory, isFile: () => !directory };
+  return { name, isDirectory: () => directory, isFile: () => !directory, isSymbolicLink: () => false };
 }
 
 const MEM_ROOT = '/vault';
 
 /** In-memory `FsOps` over a copy of the fixture, with mtime control for reindex tests. */
 class MemoryFs implements FsOps {
-  constructor(readonly files: Map<string, MemFile>) {}
+  readonly files: Map<string, MemFile>;
+
+  constructor(files: Map<string, MemFile>) {
+    this.files = files;
+  }
 
   readdir(dir: string): DirEntry[] {
     const relative = this.relative(dir);
@@ -83,7 +88,8 @@ class MemoryFs implements FsOps {
   stat(path: string) {
     // `nlink: 1` and a real `isFile`: the scanner runs the write guard's `classifyStat` over
     // this same object, so a fake that omits them is a fake of a node the scanner refuses.
-    return { mtimeMs: this.file(path).mtimeMs, nlink: 1, isFile: () => true };
+    const file = this.file(path);
+    return { mtimeMs: file.mtimeMs, nlink: 1, isFile: () => true, size: Buffer.byteLength(file.text) };
   }
 
   readFile(path: string): string {
@@ -136,7 +142,7 @@ class MemoryFs implements FsOps {
 
 function memoryRetriever(): { retriever: Retriever; fs: MemoryFs; scanner: VaultScanner } {
   const fs = new MemoryFs(loadFixture());
-  const scanner = new VaultScanner({ vaultRoot: MEM_ROOT, fs });
+  const scanner = new VaultScanner({ vaultRoot: MEM_ROOT, fs, ...ALWAYS_SCAN });
   return { retriever: new Retriever({ scanner }), fs, scanner };
 }
 
@@ -144,7 +150,7 @@ function memoryRetriever(): { retriever: Retriever; fs: MemoryFs; scanner: Vault
 const WARMUP = 'aquecimento-do-indice';
 
 function diskRetriever(): Retriever {
-  return new Retriever({ scanner: new VaultScanner({ vaultRoot: FIXTURE }) });
+  return new Retriever({ scanner: new VaultScanner({ vaultRoot: FIXTURE, ...ALWAYS_SCAN }) });
 }
 
 function paths(results: ScoredChunk[]): string[] {
@@ -305,7 +311,7 @@ describe('Retriever.search — desempate determinístico', () => {
     expect(resultB).toEqual(resultA);
   });
 
-  it('empate de score sai em ordem crescente de chunk.id', () => {
+  it('empate de score sai em ordem de caminho e, na mesma nota, de linha', () => {
     const retriever = diskRetriever();
     const { results } = retriever.search({ query: 'jwt', limit: 12 });
 
@@ -314,12 +320,43 @@ describe('Retriever.search — desempate determinístico', () => {
       const current = results[i]!;
       expect(previous.score).toBeGreaterThanOrEqual(current.score);
       if (previous.score === current.score) {
-        expect(previous.chunk.id < current.chunk.id).toBe(true);
+        const inOrder =
+          previous.chunk.path < current.chunk.path ||
+          (previous.chunk.path === current.chunk.path &&
+            previous.chunk.lineStart < current.chunk.lineStart);
+        expect(inOrder).toBe(true);
       }
     }
     // O desempate só significa algo se houver empates de fato nesta saída.
     const tied = results.filter((r, i) => i > 0 && results[i - 1]!.score === r.score);
     expect(tied.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Retriever.search — desempate por linha', () => {
+  it('a linha desempata como NÚMERO: o chunk da linha 4 vem antes do da linha 11', () => {
+    // O desempate era pelo `chunk.id` como string, e `#11` vem antes de `#4` nessa ordem. Num
+    // vizinho de grafo todos os chunks herdam o mesmo score, então era a ordem de string que
+    // decidia qual trecho da nota aparecia primeiro — e ela punha o fim da nota antes do começo.
+    const { retriever, fs } = memoryRetriever();
+    fs.write(
+      '02-wiki/nestjs/a-nota.md',
+      '---\ntipo: wiki\n---\n\n# A\n\nzzdesempate mora aqui, e aponta para [[b-nota]]\n',
+    );
+    fs.write(
+      '02-wiki/nestjs/b-nota.md',
+      '---\ntipo: wiki\n---\n\n# B\n\nprimeiro bloco\n\n\n\n## Segunda\n\nsegundo bloco\n',
+    );
+
+    const { results } = retriever.search({ query: 'zzdesempate', limit: 12 });
+    const daVizinha = results.filter((r) => r.chunk.path === '02-wiki/nestjs/b-nota.md');
+
+    expect(daVizinha.map((r) => r.viaGraph)).toEqual([true, true]);
+    expect(daVizinha[0]?.score).toBe(daVizinha[1]?.score);
+    const linhas = daVizinha.map((r) => r.chunk.lineStart);
+    expect(linhas).toEqual([...linhas].sort((x, y) => x - y));
+    // Pré-condição: as duas linhas discordam entre ordem numérica e ordem de string.
+    expect(String(linhas[1]) < String(linhas[0])).toBe(true);
   });
 });
 

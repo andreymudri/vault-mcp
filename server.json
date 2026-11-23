@@ -6,12 +6,12 @@
     "url": "https://github.com/andreymudri/vault-mcp",
     "source": "github"
   },
-  "version": "0.5.0",
+  "version": "0.6.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@andreymudri/vault-mcp",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -37,6 +37,48 @@
           "isRequired": false,
           "isSecret": false,
           "format": "string"
+        },
+        {
+          "name": "VAULT_READ_ONLY",
+          "description": "Set to 1 to publish only the read tools: nothing in the vault can be written, moved or deleted through this server. A value that is neither a yes nor a no is treated as 1.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "VAULT_DISABLED_TOOLS",
+          "description": "Tool names not to publish, separated by commas or spaces, e.g. vault_delete,vault_move.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "VAULT_LOG_LEVEL",
+          "description": "How much the server writes to stderr, one JSON object per line: silent, error, warn (default), info or debug. The same events reach the client through the MCP logging capability.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "VAULT_MAX_NOTE_BYTES",
+          "description": "Files larger than this many bytes are left out of the index and reported as a diagnostic. Default 5242880 (5 MB).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "number"
+        },
+        {
+          "name": "VAULT_LOCK_TIMEOUT_MS",
+          "description": "How long a write waits for another process writing the same vault before it is refused. Default 30000.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "number"
+        },
+        {
+          "name": "VAULT_SCAN_TTL_MS",
+          "description": "How long a scan of the vault is reused before the files are looked at again, in milliseconds. Unset is adaptive: never for a small vault, up to 2000 for a large one. 0 scans on every call.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "number"
         }
       ]
     }

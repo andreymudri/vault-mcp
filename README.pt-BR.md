@@ -12,33 +12,41 @@ Servidor MCP para busca, leitura e escrita em um vault de conhecimento Obsidian.
 
 ## Exemplo
 
-Saída real das duas tools que definem o projeto, rodadas contra o vault de teste deste repositório.
+Saída real das duas tools que definem o projeto, rodadas contra o vault de teste deste repositório,
+num servidor iniciado com `VAULT_LANG=pt`. Com o padrão, `en`, as linhas do próprio servidor — a
+manchete, `Reason:`, `Commit:` — saem em inglês.
 
 **`vault_search`** devolve trechos já endereçados — `caminho:linha` é o que o agente deve citar:
 
 ```text
 2 resultado(s) para "retry backoff". Cite `caminho:linha` ao usar qualquer trecho abaixo. Cada trecho da nota vem prefixado com `> `; linhas sem esse prefixo são deste servidor, nunca conteúdo do vault.
 
-02-wiki/nestjs/bullmq-worker.md:13 — Contexto > Retry e backoff (score 7.94)
+02-wiki/nestjs/bullmq-worker.md:13 — Contexto > Retry e backoff (score 7.44)
 > ### Retry e backoff
->
+> 
 > Quando um job falha, o BullMQ aplica a política de retry configurada em `queueOptions`. Para revisar o fluxo de autenticação usado antes de cada retry, veja [[auth-guard]];
 > a mesma referência [[auth-guard]] documenta como o token é revalidado a cada nova tentativa de processamento.
+> 
 
-02-wiki/nestjs/auth-guard.md:11 — Contexto (score 3.18, via grafo)
-> ## Contexto
->
-> A API precisava de um mecanismo central de autenticação e autorização, aplicado de forma consistente em todos os módulos, sem repetir lógica de validação de JWT em cada controller.
+02-wiki/nestjs/auth-guard.md:6 (score 2.97, via grafo)
+> 
+> # Auth Guard
+> 
+> Este documento registra uma decisão de autenticação tomada para os serviços NestJS da Potentia, cobrindo como guards validam tokens JWT antes de liberar acesso às rotas protegidas.
+> 
+
+Aviso: 1 arquivo(s) com problema de indexação
+  quebrada.md: frontmatter inválido: end of the stream or a document separator is expected at line 5, column 2:\n    \t- bullmq\n     ^
 ```
 
-`auth-guard` não casa termo nenhum da query. Ela entra por **um salto de wiki-link** a partir da nota que casou, com o score amortecido — é isso que `via grafo` marca.
+`auth-guard` não casa termo nenhum da query. Ela entra por **um salto de wiki-link** a partir da nota que casou, com o score amortecido — é isso que `via grafo` marca. As duas últimas linhas são o scanner avisando de um arquivo que não conseguiu indexar direito: o vault de teste traz um de propósito, e uma busca nunca termina calada sobre o que deixou de fora.
 
 **`vault_learn`** decide sozinho se cria nota ou anexa, escreve os até quatro arquivos e commita **uma vez**:
 
 ```text
 Aprendizado registrado em nota NOVA: 02-wiki/concorrencia/timeout-de-fila-libera-a-fila-nao-o-chamador.md
-Motivo: sem overlap de tag nem de domínio
-Propagado para: 02-wiki/concorrencia/concorrencia-moc.md, 00-index/index-knowledge.md, 04-daily/2026-08-26.md
+Motivo: nota parecida em outro domínio: 02-wiki/nestjs/bullmq-worker.md
+Propagado para: 02-wiki/concorrencia/concorrencia-moc.md, 00-index/index-knowledge.md, 04-daily/2026-11-22.md
 Commit: sim
 
 Diff (mostre ao usuário):
@@ -48,7 +56,7 @@ Diff (mostre ao usuário):
 +---
 +tipo: wiki
 +tags: [fila]
-+criado: 2026-08-26
++criado: 2026-11-22
 +---
 +
 +# Timeout de fila libera a fila, não o chamador
@@ -66,8 +74,8 @@ Diff (mostre ao usuário):
 +---
 +tipo: moc
 +tags: [concorrencia]
-+criado: 2026-08-26
-+atualizado: 2026-08-26
++criado: 2026-11-22
++atualizado: 2026-11-22
 +---
 +
 +# Concorrencia — Mapa de Conteúdo
@@ -85,7 +93,7 @@ Diff (mostre ao usuário):
  ---
  tipo: moc
 -atualizado: 2026-02-01
-+atualizado: 2026-08-26
++atualizado: 2026-11-22
  ---
  
  # Índice de Conhecimento
@@ -98,21 +106,23 @@ Diff (mostre ao usuário):
  ## Convenções
  
 --- /dev/null
-+++ b/04-daily/2026-08-26.md
++++ b/04-daily/2026-11-22.md
 @@ -0,0 +1,10 @@
 +---
 +tipo: daily
-+criado: 2026-08-26
++criado: 2026-11-22
 +---
 +
-+# 2026-08-26
++# 2026-11-22
 +
 +## Capturas
 +
-+- 11:12 [[timeout-de-fila-libera-a-fila-nao-o-chamador]] (aprendizado)
++- 15:36 [[timeout-de-fila-libera-a-fila-nao-o-chamador]] (aprendizado)
 ```
 
-Quatro arquivos, um commit `docs(vault): {titulo}` — desfazer o aprendizado inteiro é `git revert` desse commit. O domínio `concorrencia` não existia: por isso a nota entrou com `confirm_novo_dominio: true`, o MOC foi criado do zero e o índice de conhecimento ganhou a linha dele.
+O `Motivo` diz por que isto virou nota nova: a nota mais parecida se destacou, mas fica em outro domínio, e um aprendizado só é anexado dentro do domínio em que foi arquivado.
+
+Quatro arquivos, um commit `docs(vault): <título>` — desfazer o aprendizado inteiro é `git revert` desse commit. O domínio `concorrencia` não existia: por isso a nota entrou com `confirm_new_domain: true`, o MOC foi criado do zero e o índice de conhecimento ganhou a linha dele.
 
 ## Instalação
 
@@ -135,13 +145,13 @@ npm run build
 npm test
 ```
 
-- **Node >= 20** para RODAR o servidor (`dist/` é JavaScript comum), verificado a cada push pelo job
-  `compat` do CI, que compila e sobe o servidor no 20
+- **Node >= 22** para RODAR o servidor (`dist/` é JavaScript comum), verificado a cada push pelo job
+  `compat` do CI, que compila e sobe o servidor no 22
 - **Para rodar a suíte é preciso mais:** `test/frontmatter.test.ts` executa o `parseFile` real num
   processo filho fixado num fuso, e esse filho é `node <arquivo>.ts` — depende do type stripping do
   próprio Node. O CI fixa a 26, que é a versão em que isto é desenvolvido
-- A suíte tem 21 arquivos com 1.222 testes e leva ~10 segundos. `npm test` roda o typecheck
-  (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai com 124, nunca sem exit code
+- `npm test` roda o typecheck (`pretest`) antes e limita a suíte por relógio: uma suíte travada sai
+  com 124, nunca sem exit code. Leva uns quinze segundos
 
 ## Configuração
 
@@ -159,6 +169,23 @@ VAULT_PATH="/caminho/absoluto/do/vault" node /caminho/absoluto/do/vault-mcp/dist
 
 Substitua `/caminho/absoluto/do/vault` pela raiz do seu vault. `VAULT_PATH` é **obrigatório**. Se não
 for definido ou não for um diretório, o servidor sai com código 1 e escreve o motivo em stderr.
+
+Todo o resto é opcional, e se define do mesmo jeito:
+
+| Variável | Padrão | O que faz |
+|---|---|---|
+| `VAULT_LANG` | `en` | Idioma do texto do próprio servidor: `en` ou `pt`. Ver abaixo. |
+| `VAULT_AUTO_PUSH` | desligado | `1` dá push depois de cada commit. Ver abaixo. |
+| `VAULT_READ_ONLY` | desligado | `1` publica só as seis tools de leitura: nada pode ser escrito, movido ou apagado por este servidor. |
+| `VAULT_DISABLED_TOOLS` | nenhuma | Nomes de tools que não são publicadas, separados por vírgula ou espaço, ex.: `vault_delete,vault_move`. |
+| `VAULT_LOG_LEVEL` | `warn` | Quanto vai para stderr, um objeto JSON por linha: `silent`, `error`, `warn`, `info`, `debug`. |
+| `VAULT_MAX_NOTE_BYTES` | `5242880` | Arquivo maior que isso fica fora do índice e aparece como diagnóstico. |
+| `VAULT_LOCK_TIMEOUT_MS` | `30000` | Quanto uma escrita espera por outro processo escrevendo no mesmo vault antes de ser recusada. |
+| `VAULT_SCAN_TTL_MS` | adaptativo | Por quanto tempo uma varredura do vault é reaproveitada. `0` varre a cada chamada. |
+
+Um valor que o servidor não consegue usar nunca é trocado em silêncio pelo padrão: sai em stderr no
+start (`config.invalid`). O `VAULT_READ_ONLY` vai além e falha fechado — qualquer coisa que não
+seja um "não" reconhecível liga o modo somente leitura.
 
 ## Registro no Claude Code
 
@@ -200,11 +227,10 @@ Duas coisas que ele deliberadamente **não** cobre, para você saber onde fica a
   traduzir `## Notas` para `## Notes` num vault cujo MOC diz `## Notas` não acharia a seção,
   anexaria uma segunda, e quebraria em silêncio a idempotência que impede o MOC de ganhar uma
   linha repetida a cada captura.
-- **Avisos e diagnósticos**, que por ora seguem em português: falhas de push e de commit, avisos de
-  mover e de reescrever links, e a linha `Motivo:` que explica por que o `vault_learn` anexou em
-  vez de criar. O `writer.ts` funde até três avisos de origens diferentes numa string só, então um
-  código por aviso não sobrevive à fusão; traduzi-los exige reestruturar os arrays de aviso de
-  quatro módulos, e parte disso é análise *sobre o conteúdo do vault*, não rótulo de interface.
+- **Texto que o servidor só repassa.** Os avisos dele e a linha `Motivo:` do `vault_learn` são
+  traduzidos — cada frase fixa tem uma chave, e a fronteira da tool faz a troca. O que ainda pode
+  aparecer em outro idioma dentro de um aviso é a saída do próprio git, e a mensagem de um erro
+  aninhado que não carrega código.
 
 O padrão é inglês mesmo tendo o servidor nascido servindo um vault em português. A descrição da
 tool é o que o *modelo* lê para decidir se chama a tool, então um servidor descrito num idioma em
@@ -252,27 +278,40 @@ ligado:
   prompt de credencial, então um prompt seria um travamento. As credenciais precisam vir de um
   helper (por exemplo `gh auth git-credential`) ou de uma chave SSH
 
-## As Dez Tools
+## As Onze Tools
 
 | Tool | Entrada | Quando Chamar |
 |------|---------|---------------|
-| `vault_search` | `query` (obrigatório); `limit`, `tipo`, `folder`, `tags`, `status`, `include_raw` (opcionais) | Antes de responder sobre decisões, padrões, gotchas ou histórico do usuário. Resultado padrão: 6 trechos. Notas em `01-raw/` excluídas por padrão. `tags` é conjuntivo e ignora caixa, e `status` lê o frontmatter — os mesmos filtros do `vault_list`, pela mesma regra. |
+| `vault_search` | `query` (obrigatório); `limit`, `type`, `folder`, `tags`, `status`, `include_raw` (opcionais) | Antes de responder sobre decisões, padrões, gotchas ou histórico do usuário. Resultado padrão: 6 trechos. Notas em `01-raw/` excluídas por padrão. `tags` é conjuntivo e ignora caixa, e `status` lê o frontmatter — os mesmos filtros do `vault_list`, pela mesma regra. |
 | `vault_get_note` | `path` (caminho relativo, ex.: `02-wiki/nestjs/auth-guard.md`); `offset` (opcional) | Após `vault_search` quando o trecho não bastar, ou antes de editar uma nota. Retorna a nota com frontmatter, links resolvidos e links quebrados. O corpo é limitado a 20.000 caracteres POR RESPOSTA; nota maior é marcada com `[…nota cortada em 20000 de <total> caracteres; continue com offset: <next>]`, e esse `offset` devolve o resto — página a página, sem nunca partir um par surrogate. A página de continuação repete o caminho, não o frontmatter. |
-| `vault_list` | `tipo`, `tags`, `status`, `folder` (todos opcionais) | Inventário de notas por metadado (ex.: "quais projetos ativos?", "quais notas têm a tag jwt?"). Não busca por conteúdo — use `vault_search` para isso. |
+| `vault_list` | `type`, `tags`, `status`, `folder`, `limit`, `offset` (todos opcionais) | Inventário de notas por metadado (ex.: "quais projetos ativos?", "quais notas têm a tag jwt?"). Não busca por conteúdo — use `vault_search` para isso. Responde no máximo `limit` notas (padrão 200, até 1.000); um inventário maior diz quantas há e com que `offset` continuar. |
 | `vault_backlinks` | `path` (caminho relativo) | Medir conectividade de um assunto, achar o MOC que indexa uma nota, avaliar impacto de mudança. Deduplica links: uma nota que linka o alvo duas vezes conta como um backlink. |
-| `vault_graph` | `folder`, `tipo`, `tags`, `status`, `include_raw`, `include_broken`, `max_nodes` (todos opcionais) | Visão geral de como as notas se conectam — órfãs, aglomerados, o que um filtro abrange — para um cliente que desenha o grafo, não para responder pergunta (para assunto use `vault_search`; para quem aponta para uma nota, `vault_backlinks`). Os filtros escolhem os nós pela mesma regra do `vault_list`; `01-raw/` fica de fora salvo `include_raw`, e `99-archive/` entra. Uma aresta só vem quando as duas pontas vêm, e os graus contam dentro desse subgrafo. Além do texto (`<n> nota(s), <m> link(s), <k> órfã(s).` e uma linha `- origem -> destino` por aresta), responde `structuredContent` sob um `outputSchema` publicado: `nodes` (caminho, título, tipo, status, tags, área, domínio, graus de entrada e saída, mtime), `edges`, `broken` (só com `include_broken`), `counts` e a marca `truncated`, ligada quando `max_nodes` (padrão 2000, até 5000, em ordem de caminho) cortou a lista. |
+| `vault_graph` | `folder`, `type`, `tags`, `status`, `include_raw`, `include_broken`, `max_nodes` (todos opcionais) | Visão geral de como as notas se conectam — órfãs, aglomerados, o que um filtro abrange — para um cliente que desenha o grafo, não para responder pergunta (para assunto use `vault_search`; para quem aponta para uma nota, `vault_backlinks`). Os filtros escolhem os nós pela mesma regra do `vault_list`; `01-raw/` fica de fora salvo `include_raw`, e `99-archive/` entra. Uma aresta só vem quando as duas pontas vêm, e os graus contam dentro desse subgrafo. Além do texto (`<n> nota(s), <m> link(s), <k> órfã(s).` e uma linha `- origem -> destino` por aresta), responde `structuredContent` sob um `outputSchema` publicado: `nodes` (caminho, título, tipo, status, tags, área, domínio, graus de entrada e saída, mtime), `edges`, `broken` (só com `include_broken`), `counts` e a marca `truncated`, ligada quando `max_nodes` (padrão 2000, até 5000, em ordem de caminho) cortou a lista. |
+| `vault_status` | nenhuma | Antes de uma sessão de escrita, ou depois de uma escrita responder "Commit: não". Diz a versão do servidor, quantas notas e chunks estão indexados, se o vault é um repositório git, o branch (ou HEAD solto), os commits ainda não enviados, os commits que falharam e esperam nova tentativa, quem segura o lock de escrita e se o servidor está em modo somente leitura. Também como `structuredContent`. Não muda nada. |
 | `vault_write_note` | `path`, `content` (obrigatórios); `frontmatter` (opcional) | Criar ou substituir uma nota inteira. Frontmatter é garantido. Commita automaticamente. Para mudar um trecho, use `vault_edit_note`; para registrar aprendizado, use `vault_learn`. |
 | `vault_edit_note` | `path`, `old_text`, `new_text` (obrigatórios) | Substituir um trecho exato de uma nota. Falha se o trecho não existir ou aparecer mais de uma vez — nesse caso, inclua mais contexto em `old_text`. |
-| `vault_learn` | `titulo`, `insight`, `contexto`, `dominio` (obrigatórios); `projeto`, `tags`, `links`, `confirm_novo_dominio` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. **Se o domínio não existe em `02-wiki/`, a chamada falha; use `confirm_novo_dominio: true` para criar.** |
-| `vault_move` | `from`, `to` (obrigatórios); `confirm_novo_dominio` (opcional) | Mover, renomear, promover de `01-raw/` ou arquivar em `99-archive/` — as quatro são a mesma chamada, porque `to` é o caminho completo. Corrige sozinha todo link que passaria a apontar para outra nota, migra a entrada entre os MOCs de domínio preservando o `— resumo`, e commita tudo junto. `99-archive/` vale como origem **e** destino, o que dá arquivar e desarquivar. **MOC de destino inexistente exige `confirm_novo_dominio: true`.** A nota diária nunca é tocada. |
+| `vault_learn` | `title`, `insight`, `context`, `domain` (obrigatórios); `project`, `tags`, `links`, `confirm_new_domain`, `preview`, `force_new`, `preview_time`, `expected_revision` (opcionais) | Registrar aprendizado durante a sessão (decisão de arquitetura, pattern, gotcha, armadilha). Não pergunte onde salvar — o servidor decide. Mostra o diff ao usuário. **Se o domínio não existe em `02-wiki/`, a chamada falha; use `confirm_new_domain: true` para criar.** |
+| `vault_move` | `from`, `to` (obrigatórios); `confirm_new_domain` (opcional) | Mover, renomear, promover de `01-raw/` ou arquivar em `99-archive/` — as quatro são a mesma chamada, porque `to` é o caminho completo. Corrige sozinha todo link que passaria a apontar para outra nota, migra a entrada entre os MOCs de domínio preservando o `— resumo`, e commita tudo junto. `99-archive/` vale como origem **e** destino, o que dá arquivar e desarquivar. **MOC de destino inexistente exige `confirm_new_domain: true`.** A nota diária nunca é tocada. |
 | `vault_delete` | `path` (obrigatório); `confirm` (opcional) | Apagar uma nota e tirar a linha dela do MOC. **Recusa, sem apagar, se a nota não tiver versão commitada no `HEAD`** — aí não haveria como desfazer —, se for estrutural (MOC, nota diária, índice) ou se estiver em `99-archive/`. Notas apontadas por outras exigem `confirm: true`, e a recusa lista quem aponta. A resposta traz o comando exato que desfaz. |
+
+Os argumentos são conferidos de forma estrita: o que a tool não declara é recusado pelo nome, então
+um filtro digitado errado é um erro, e não uma resposta sem filtro. Os nomes acima são os que o
+schema publica. Os nomes em português das versões anteriores — `titulo`, `contexto`, `dominio`,
+`projeto`, `confirm_novo_dominio`, `tipo` — continuam aceitos e são trocados na entrada.
+
+Toda tool publica título e annotations do MCP: as seis de leitura são `readOnlyHint`, e das cinco
+de escrita só o `vault_learn` é não destrutivo (ele só acrescenta). Toda recusa carrega o código
+ao lado do texto, no `_meta["io.github.andreymudri/vault-mcp.error"]` do resultado, como `{ code, params? }` —
+`path.outsideVault`, `lock.timeout`, `preview_stale`, `input.invalid`, o errno de um erro de sistema
+de arquivos. Fica no `_meta` e não no `structuredContent` porque uma tool que publica schema de saída deve esse
+schema em toda resposta, e os clientes cobram isso até num erro.
 
 ## Como o `vault_learn` Decide
 
 `vault_learn` busca o assunto combinando título e insight. Apenas notas **já em `02-wiki/` e atingidas por BM25 direto** (não pela expansão de grafo) são candidatas a receber o aprendizado. Se encontrar tal candidata:
 
 1. **Razão de 1,8×**: o topo deve se destacar sobre o segundo colocado por fator de pelo menos 1,8. Sem isso, há dúvida e cria nota nova.
-2. **Overlap conjuntivo**: o topo deve compartilhar uma tag COM A ENTRADA, OU estar no mesmo domínio (`02-wiki/<dominio>/`). Sem overlap, cria nota nova mesmo que o score seja alto.
+2. **Mesmo domínio**: o topo tem de estar no domínio em que o aprendizado foi arquivado (`02-wiki/<domain>/`). Uma nota parecida em outro domínio é nomeada no `Motivo` — para dar para ligar as duas — e nunca recebe o anexo, por mais alto que pontue. Uma tag em comum bastava aqui, e foi isso que arquivou um aprendizado de um projeto numa nota de outro.
 
 Quando ambas as condições são atendidas, **anexa** à nota existente numa seção `## YYYY-MM-DD — Título`. Caso contrário, **cria** nota nova em `02-wiki/<dominio>/`.
 
@@ -292,7 +331,7 @@ Em todos os casos, nenhum insight é perdido — a resposta diz exatamente onde 
 
 ## O Que `vault_learn` Escreve
 
-Uma chamada a `vault_learn` pode tocar até 4 arquivos, todos em **um único commit** com mensagem `docs(vault): {titulo}`:
+Uma chamada a `vault_learn` pode tocar até 4 arquivos, todos em **um único commit** com mensagem `docs(vault): <título>`:
 
 1. **A nota** (`02-wiki/<dominio>/<slug>.md`): criada ou com aprendizado anexado. Sempre escrita.
 2. **O MOC do domínio** (`02-wiki/<dominio>/<dominio>-moc.md`): criado se não existir. Atualizado com `atualizado:` em toda chamada; com uma linha `- [[<slug>]] — <resumo>` apenas se a nota for nova. Escrito **apenas se o conteúdo mudar**.
@@ -329,7 +368,25 @@ Escritas são recusadas para:
 - Symlinks (resolvidos antes de escrever)
 - Hard links
 
-**Dentro de uma única instância do servidor**, dois `vault_learn` ou `vault_write_note` concorrentes não interleave inicialmente: cada escrita espera a anterior terminar. Se uma escrita ficar pendurada (ex.: git bloqueado), o timeout de 60 segundos **libera a fila para a próxima escrita**, não o chamador — a chamada anterior continua aguardando seu resultado real. Quando a próxima escrita inicia, ambas podem estar rodando — a chamada ganha um aviso dizendo que a exclusividade não foi garantida. Isto NÃO protege contra escritas simultâneas do Obsidian, de uma segunda instância do servidor, ou de um `git checkout` no vault.
+**Duas escritas nunca se intercalam**, sejam duas chamadas num servidor ou dois servidores sobre o
+mesmo vault — que é o caso normal, porque um servidor MCP stdio é iniciado por cliente. Dentro de
+um processo, cada escrita espera a anterior. Entre processos, toda escrita toma um arquivo de lock
+derivado do vault (dentro de `.git/` quando o vault é um repositório), só lê o que está em disco
+depois de ter o lock, e o solta depois do commit. Quem não consegue o lock dentro de
+`VAULT_LOCK_TIMEOUT_MS` é recusado com `lock.timeout` e não escreve nada. Lock deixado por um
+processo que morreu é tomado; lock segurado por mais de dois minutos também, e a escrita que o
+perdeu diz isso.
+
+O que isto não alcança é quem não toma o lock: o próprio Obsidian, um cliente de sincronização, um
+`git checkout` no vault. O push fica fora do lock de propósito — ele leva o branch inteiro, e um
+push preso na rede não pode segurar todos os outros escritores.
+
+Um commit que falha depois de a nota ser escrita (outro git segurando o `index.lock`, um hook que
+recusa) é repetido por uns três segundos quando a causa é o lock, e fora isso vai para um diário
+dentro de `.git/`; a escrita seguinte o refaz, com a mensagem original. O `vault_status` mostra o
+que está pendente.
+
+Veja [SECURITY.md](SECURITY.md) para o que o servidor defende, e o que não defende.
 
 ## Busca e Recuperação
 
@@ -350,9 +407,83 @@ Convenção de diretórios:
 - `_templates/`: templates do Obsidian (ignoradas na indexação)
 - `99-archive/`: notas arquivadas (legíveis, não graváveis)
 
+Esses nomes são o padrão. Um vault organizado de outro jeito diz isso num `.vault-mcp.json` na raiz
+dele — no vault, e não na configuração do cliente, porque todo cliente que abre o vault tem de
+concordar sobre onde fica a wiki:
+
+```json
+{
+  "folders": { "wiki": "knowledge", "daily": "journal", "archive": "old" },
+  "sections": { "notes": "Notes", "captures": "Captures", "context": "Context" }
+}
+```
+
+`folders` aceita `index`, `raw`, `wiki`, `projects`, `daily`, `archive` e `templates`; `sections`
+aceita `notes`, `domains`, `captures`, `links`, `related` e `context` — os textos de heading que o
+servidor procura e escreve. O que ficar de fora mantém o padrão, e as descrições das tools e as
+mensagens de erro passam a nomear as pastas que o vault tem de fato. Um arquivo errado impede o
+servidor de subir e diz qual chave: cair no padrão seria começar a arquivar notas num `02-wiki/`
+que ninguém pediu.
+
+Não configurável: as chaves de frontmatter (`tipo`, `criado`, `atualizado`), os nomes de arquivo
+dentro de cada papel (`<domínio>-moc.md`, `index-knowledge.md`, `YYYY-MM-DD.md`), e os títulos em
+português de um MOC ou de um índice que o servidor cria do zero.
+
+## Prévia de um Aprendizado
+
+`vault_learn` com `preview: true` calcula tudo o que um aprendizado mudaria — a nota, o MOC do
+domínio, o índice de conhecimento, a nota diária — sem escrever, sem criar diretório, sem commitar
+e sem dar push. O resultado estruturado traz, de cada arquivo, o caminho relativo, o texto antes e
+depois, o diff, um hash `revision` e o `previewTime`.
+
+Para fazer a escrita aprovada, repita exatamente os mesmos argumentos sem `preview`, passando o
+`previewTime` devolvido como `preview_time` e a revisão como `expected_revision`. Se o vault mudou
+no meio, a chamada é recusada com o código `preview_stale` antes de qualquer escrita.
+`force_new: true` cria uma nota irmã ligada mesmo quando existe uma que casa. Domínio novo exige
+`confirm_new_domain: true` também na prévia, e uma prévia cuja propagação falharia é recusada, em
+vez de oferecida como plano parcial.
+
+## Limites
+
+Nada do que uma tool devolve, aceita ou indexa é ilimitado:
+
+| O quê | Limite |
+|---|---|
+| Resultados do `vault_search` | 6 trechos por padrão, 50 no máximo, 8.000 caracteres no total |
+| Corpo no `vault_get_note` | 20.000 caracteres por resposta; o `offset` continua |
+| `vault_list` | 200 notas por resposta por padrão, 1.000 no máximo; o `offset` continua |
+| `vault_graph` | 2.000 nós por padrão, 5.000 no máximo |
+| Diff repassado por uma tool de escrita, e cada `diff`, `before` e `after` do resultado estruturado do `vault_learn` | 20.000 caracteres, com uma marca dizendo que foi cortado; a nota em si é escrita inteira |
+| `content`, `old_text`, `new_text` | 1.000.000 de caracteres |
+| `insight` / `context` | 200.000 / 20.000 caracteres |
+| Nota que o scanner indexa | `VAULT_MAX_NOTE_BYTES`, 5 MB por padrão; arquivo com byte NUL não é indexado |
+| Nome de arquivo de uma nota | 220 bytes |
+
+Um arquivo que fica fora do índice nunca some em silêncio: `vault_search` e `vault_list` terminam
+com uma linha dizendo o que foi pulado e por quê — grande demais, binário, symlink, hard link,
+ilegível.
+
+## Operação
+
+- **`vault_status`** responde o que um "Commit: não" deixa em aberto: há commit pendente, o branch
+  chegou a sair da máquina, quem segura o lock.
+- **Logs** vão para stderr, um objeto JSON por linha (`ts`, `level`, `event`, depois os campos),
+  com o caminho absoluto do vault redigido. O nível padrão, `warn`, mantém um servidor sadio em
+  silêncio; `info` acrescenta uma linha por chamada de tool, com a duração e, numa recusa, o
+  código. Os mesmos eventos chegam ao cliente pela capability `logging` do MCP, no nível que ele
+  pedir.
+- **Somente leitura** (`VAULT_READ_ONLY=1`) publica as seis tools de leitura e mais nada. O que não
+  é publicado não pode ser chamado.
+- **Parada**: em SIGTERM ou SIGINT o servidor deixa a escrita em curso terminar (até cinco
+  segundos), responde a quem chamou, solta o lock do vault e sai com 0.
+- **Escala**: `node --expose-gc scripts/bench.mjs 20000` monta um vault sintético e imprime start
+  frio, busca morna, custo da varredura e memória. Na máquina em que isto foi desenvolvido, vinte
+  mil notas indexam em uns 3 s e ocupam uns 190 MB vivos; uma varredura que custa mais de 20 ms é
+  reaproveitada por dez vezes o custo dela, até dois segundos.
+
 ## Limitações Conhecidas
 
-Três coisas que este servidor não faz, todas escolhidas e não esquecidas:
+Cinco coisas que este servidor não faz, todas escolhidas e não esquecidas:
 
 - **Arquivar em `99-archive/` perde o `— resumo`** da entrada da nota no MOC de origem. O
   `vault_move` tira a linha do MOC de origem e não tem MOC de destino em que reinseri-la, e o
@@ -369,10 +500,19 @@ Três coisas que este servidor não faz, todas escolhidas e não esquecidas:
   `vault_edit_note` casa `old_text` como substring exata do arquivo. As superfícies que fazem
   afirmação por linha — o trecho do `vault_search` e o diff — são sanitizadas.
 
-Os dezesseis follow-ups levantados até aqui foram corrigidos — inclusive o frontmatter com alias que
-travava o event loop por ~5 s, o hard link indexado no caminho de leitura e a corrida de escrita
-entre processos. `docs/followups.md` guarda o histórico: cada item com a medição que o caracterizava,
-a correção aplicada e o teste que a fixa, mais o raciocínio inteiro por trás de cada aceitação acima.
+- **Um vault grande pode estar até dois segundos atrás de uma mudança feita por fora do servidor.**
+  Andar o vault e fazer `stat` de cada nota a cada chamada era quase todo o custo de uma busca morna
+  acima de alguns milhares de notas, então uma varredura cara é reaproveitada por dez vezes o que
+  custou, dois segundos no máximo. Um vault cuja varredura leva menos de 20 ms nunca é afetado, as
+  escritas do próprio servidor são sempre vistas na hora, e `VAULT_SCAN_TTL_MS=0` desliga o
+  reaproveitamento.
+- **A primeira chamada depois do start indexa o vault inteiro numa passada síncrona** — uns 3 s com
+  vinte mil notas. Fatiar isso só deixaria um `ping` passar antes; toda tool precisa do índice de
+  qualquer jeito.
+
+`docs/followups.md` guarda o histórico de cada defeito achado até aqui: a medição que o
+caracterizava, a correção aplicada e o teste que a fixa, mais o raciocínio inteiro por trás de cada
+aceitação acima.
 
 ## Desenvolvimento
 
@@ -382,7 +522,9 @@ Depois de uma mudança no código:
 npm run build     # Compila TypeScript (só src/, emite dist/)
 npm run typecheck # tsc sobre src/ E test/, sem emitir
 npm test          # Roda o typecheck (pretest) e depois os testes vitest
-npm run smoke     # Sobe o dist/ compilado e exige as dez tools por stdio
+npm run lint      # Biome; um aviso já reprova
+npm run coverage  # A suíte de novo, com o piso de cobertura
+npm run smoke     # Sobe o dist/ compilado e exige as onze tools por stdio
 npm run dev       # Watch mode (se necessário)
 ```
 
@@ -390,7 +532,9 @@ O `tsconfig.json` de build cobre só `src/` — quem emite não compila teste. `
 cobre os dois com `noEmit`, e o `pretest` do npm o roda antes da suíte: um fake de teste que deixa de
 satisfazer a interface que declara `implements` falha no typecheck, e não em execução.
 
-A suíte completa leva ~10 segundos. Alguns testes usam FIFO para simular operações de longa
+A suíte completa leva uns quinze segundos. Dois arquivos sobem processos de verdade — um segundo
+servidor sobre o mesmo vault, e um servidor que recebe SIGTERM no meio de uma escrita — porque é o
+único jeito de ver o que dois clientes MCP fazem um ao outro. Alguns testes usam FIFO para simular operações de longa
 duração; todos eles abrem a ponta de escrita por conta própria (`withFifoWatch`), então falham em
 segundos em vez de dependerem do timeout do runner. `npm test` roda por `scripts/test.mjs`, que
 limita a suíte por relógio (15 min, `VAULT_MCP_TEST_TIMEOUT_MS`) e mata o grupo de processos: uma
@@ -398,10 +542,15 @@ suíte travada vira exit 124, e não uma parada indefinida sem exit code nenhum.
 
 O `npm run smoke` é a checagem que a suíte não consegue ser: sobe o `dist/server/index.js` compilado
 como PROGRAMA contra um vault descartável, completa o handshake do MCP e exige que o `tools/list`
-responda exatamente as dez tools. Cobre o entrypoint que se acha biblioteca e não inicia nada — um
-exit 0 limpo para o shell, uma espera eterna para o cliente — e é o que torna `engines.node >= 20`
-uma afirmação verificada: o CI o roda no Node 20 além do 26 fixado, já que a suíte não roda no 20
-(`test/frontmatter.test.ts` depende do type stripping do runtime) e JavaScript compilado roda.
+responda exatamente as onze tools, cada uma com suas annotations. Cobre o entrypoint que se acha
+biblioteca e não inicia nada — um exit 0 limpo para o shell, uma espera eterna para o cliente — e é
+o que torna `engines.node >= 22` uma afirmação verificada: o CI o roda no Node 22 além do 26 fixado,
+que é onde a suíte roda.
+
+Mensagens de commit são em português, e também o que o servidor escreve DENTRO do vault. Tudo o que
+ele diz a quem chama está em `src/i18n/messages.ts`, nos dois idiomas. Veja
+[CONTRIBUTING.md](CONTRIBUTING.md) para como as mudanças são feitas aqui, e
+[CHANGELOG.md](CHANGELOG.md) para o que mudou em cada versão.
 
 ## Licença
 

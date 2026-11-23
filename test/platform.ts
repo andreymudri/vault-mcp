@@ -47,3 +47,16 @@ export const NO_POSIX_MODES = IS_WINDOWS;
  * portátil é o único jeito de fazer o git TRAVAR de propósito.
  */
 export const NO_SHELL_HOOKS = IS_WINDOWS;
+
+/**
+ * A scanner that walks the vault on EVERY `refresh`, for the tests that change a file behind its
+ * back and then ask for the change.
+ *
+ * Left to its default, a scanner reuses a scan that cost 20 ms or more for ten times what it cost
+ * — which is the right behaviour for a server and a clock dependency for a test: whether the
+ * previous scan took 18 ms or 26 ms is decided by the machine's load, not by the code. Measured on
+ * 2026-11-22 on a busy 16-core machine: 2 of 12 runs of this suite failed on that alone, each time
+ * in a test that asserts something else. The reuse itself is tested in `test/scanner.test.ts`,
+ * with an injected clock.
+ */
+export const ALWAYS_SCAN = { scanTtlMs: 0 } as const;
